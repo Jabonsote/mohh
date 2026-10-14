@@ -1,0 +1,13 @@
+*__pycache__
+.DS_Store
+results*/
+temporal*/
+analysis_express*/
+*.png
+*.gv
+*.zip
+*.log
+*.vscode
+*.egg-info/
+build/
+dist/
