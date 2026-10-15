@@ -132,6 +132,17 @@ def test_evaluate_requests_12_cores():
 
 
 @pytest.mark.parametrize(
+    "script", ["mohh-generate.slrm", "mohh-evaluate.slrm"]
+)
+def test_slurm_outputs_in_submit_dir(script):
+    # Como holamundo.out en la metodologia: sin subcarpetas, para que el
+    # job no muera si el directorio no existe al arrancar.
+    for flag in ("-o", "-e"):
+        match = re.search(rf"#SBATCH\s+{flag}\s+(\S+)", _read(script))
+        assert match and "/" not in match.group(1), f"{script}: {flag} usa subcarpeta"
+
+
+@pytest.mark.parametrize(
     "script",
     [
         "ixachi-setup-env.sh",
