@@ -160,3 +160,17 @@ def test_bash_syntax_ok(script):
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_generate_supports_parallel_model_jobs():
+    content = _read("mohh-generate.slrm")
+    # Un modelo por job: MODELS y carpeta de resultados por entorno.
+    assert 'MODELS="${MODELS:-MOEAD}"' in content
+    assert "--experiment-path" in content
+
+    cli_path = os.path.join(
+        os.path.dirname(__file__), "..", "src", "mohh", "cli.py"
+    )
+    with open(cli_path) as f:
+        cli_src = f.read()
+    assert "--experiment-path" in cli_src

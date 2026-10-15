@@ -29,7 +29,13 @@
 #SBATCH -e mohh-generate-%j.err
 
 # --- Parametros del experimento (editar aqui) ---
-MODELS="MOEAD"
+# Un modelo por job en N nodos (150 cores con 3 jobs). Cada job necesita su
+# propia carpeta o colisionan en results/Experiment_NNN:
+#   MODELS=MOEAD  EXPERIMENT_PATH=results/Experiment_MOEAD  sbatch slurm/mohh-generate.slrm
+#   MODELS=NSGAII EXPERIMENT_PATH=results/Experiment_NSGAII sbatch slurm/mohh-generate.slrm
+MODELS="${MODELS:-MOEAD}"
+EXPERIMENT_ARGS=""
+[ -n "${EXPERIMENT_PATH:-}" ] && EXPERIMENT_ARGS="--experiment-path $EXPERIMENT_PATH"
 # Defaults publicados: 50/30 generaciones, MOEA 105x300 (caro: dias de cola).
 GENERATE_ARGS="--models $MODELS"
 # Sanity rapido (~minutos): comentar la linea anterior y usar esta:
@@ -57,6 +63,6 @@ conda activate "$SLURM_SUBMIT_DIR/.conda-env"
 mkdir -p logs results
 
 # shellcheck disable=SC2086
-mohh-generate $GENERATE_ARGS
+mohh-generate $GENERATE_ARGS $EXPERIMENT_ARGS
 
 echo "Fin del script."

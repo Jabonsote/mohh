@@ -1,5 +1,6 @@
 
 import argparse
+import os
 
 from mohh.main import make_experiment_path, run_generation
 from mohh.run_evaluation import discover_models, extract_operators
@@ -70,13 +71,20 @@ def generate():
     parser.add_argument("--population-size", type=int, default=None)
     parser.add_argument("--generations", type=int, default=None)
     parser.add_argument("--elite-size", type=int, default=None)
+    parser.add_argument("--experiment-path", default=None,
+                        help="Carpeta de resultados fija (default: auto-numerar results/Experiment_NNN). "
+                             "Necesaria para correr varios modelos en jobs SLURM paralelos sin colision.")
     _add_mo_args(parser)
     args = parser.parse_args()
 
     models = args.models.split(",")
     overrides = _generation_overrides(args)
 
-    experiment_path = make_experiment_path()
+    if args.experiment_path:
+        experiment_path = args.experiment_path
+        os.makedirs(experiment_path, exist_ok=True)
+    else:
+        experiment_path = make_experiment_path()
     run_generation(experiment_path, models, overrides)
 
     print(f"\nGeneration complete: {experiment_path}")
