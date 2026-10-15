@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Ambiente MOHH en el cluster ixachi.
+# Ambiente MOHH en el cluster ixachi (via Modules + conda env).
 #
 # Uso (UNA sola vez, desde el nodo de login con internet, NO con sbatch):
 #
@@ -8,11 +8,14 @@
 #   bash slurm/ixachi-setup-env.sh
 #
 # Lo que hace:
-#   1. Carga el modulo de Python (python/miniforge).
-#   2. Crea un venv en .venv-ixachi/ (dentro de LUSTRE, visible en los nodos).
+#   1. Carga el modulo python/miniforge (conda/forge con python 3.12).
+#   2. Crea un conda env con prefijo local .conda-env/ (dentro de LUSTRE,
+#      visible desde login y nodos de computo; no depende de $HOME ni de
+#      rutas de otra maquina como un .venv local).
 #   3. Instala el paquete mohh en modo editable + verifica los entry points.
 #
 # Despues de esto, los scripts mohh-*.slrm ya pueden enviarse con sbatch.
+# Ver comandos en la seccion 3.1 (Modules) de la metodologia del cluster.
 #
 set -euo pipefail
 
@@ -21,22 +24,25 @@ cd "$PROJECT_DIR"
 
 echo "Proyecto: $PROJECT_DIR"
 
-# 1. Modulo de Python del cluster (si existe; si no, se usa el python3 del login).
-if command -v module >/dev/null 2>&1; then
-    module load python/miniforge || echo "AVISO: no se pudo cargar python/miniforge, sigo con python3 del sistema."
+# 1. Software de desarrollo del cluster via Modules.
+#    Por defecto ningun modulo esta cargado: hay que cargarlo explicito.
+if ! command -v module >/dev/null 2>&1; then
+    echo "ERROR: 'module' no disponible; corre este script en el login de ixachi."
+    exit 1
+fi
+module load python/miniforge || { echo "ERROR: no se pudo cargar python/miniforge."; exit 1; }
+module list
+
+# Habilita 'conda activate' en scripts no interactivos.
+eval "$(conda shell.bash hook)"
+
+# 2. Conda env con prefijo dentro del proyecto (LUSTRE).
+ENV_PREFIX="$PROJECT_DIR/.conda-env"
+if [ ! -d "$ENV_PREFIX" ]; then
+    conda create -y -p "$ENV_PREFIX" python=3.12
 fi
 
-command -v python3 >/dev/null 2>&1 || { echo "ERROR: no hay python3 disponible."; exit 1; }
-python3 --version
-
-# 2. Venv dedicado al cluster (no se reutiliza .venv/ local: suele apuntar
-#    a rutas de otra maquina y rompe los symlinks en los nodos).
-if [ ! -d ".venv-ixachi" ]; then
-    python3 -m venv .venv-ixachi
-fi
-
-# shellcheck disable=SC1091
-source .venv-ixachi/bin/activate
+conda activate "$ENV_PREFIX"
 pip install -U pip
 pip install -e .
 

@@ -106,6 +106,18 @@ def test_slurm_runtime_conventions(script):
     assert "MOHH_WORKERS" in content
     assert "OMP_NUM_THREADS=1" in content
     assert "module load python/miniforge" in content
+    # Conda env del cluster (Modules), no venv local.
+    assert "conda activate" in content
+    assert "conda shell.bash hook" in content
+    assert ".venv" not in content
+
+
+def test_setup_creates_conda_env():
+    content = _read("ixachi-setup-env.sh")
+    assert "module load python/miniforge" in content
+    assert "conda create" in content
+    assert "python=3.12" in content
+    assert "pip install -e ." in content
 
 
 def test_generate_requests_50_cores():

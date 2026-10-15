@@ -49,8 +49,8 @@ export MKL_NUM_THREADS=1
 export MOHH_WORKERS="$SLURM_CPUS_PER_TASK"
 
 module load python/miniforge
-# shellcheck disable=SC1091
-source .venv-ixachi/bin/activate
+eval "$(conda shell.bash hook)"
+conda activate "$SLURM_SUBMIT_DIR/.conda-env"
 
 mkdir -p logs results
 
