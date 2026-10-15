@@ -162,6 +162,27 @@ def test_bash_syntax_ok(script):
     assert result.returncode == 0, result.stderr
 
 
+def test_experiment_path_uses_slurm_jobid(monkeypatch, tmp_path):
+    from mohh.main import make_experiment_path
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SLURM_JOB_ID", "13089")
+    path = make_experiment_path()
+    assert path == os.path.join("results", "Experiment_13089")
+    assert os.path.isdir(path)
+
+
+def test_experiment_path_autonumbered_without_slurm(monkeypatch, tmp_path):
+    from mohh.main import make_experiment_path
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    first = make_experiment_path()
+    second = make_experiment_path()
+    assert first == os.path.join("results", "Experiment_001")
+    assert second == os.path.join("results", "Experiment_002")
+
+
 def test_generate_supports_parallel_model_jobs():
     content = _read("mohh-generate.slrm")
     # Un modelo por job: MODELS y carpeta de resultados por entorno.

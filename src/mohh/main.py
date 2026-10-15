@@ -14,6 +14,15 @@ def read_json(data_path: str) -> dict:
 
 def make_experiment_path() -> str:
 
+    # Bajo SLURM cada job tiene JOBID unico: carpeta deterministica por job,
+    # sin condicion de carrera cuando N jobs arrancan a la vez. Fuera de
+    # SLURM se conserva el auto-numerado Experiment_NNN.
+    job_id = os.environ.get("SLURM_JOB_ID", "").strip()
+    if job_id:
+        experiment_path = os.path.join("results", f"Experiment_{job_id}")
+        os.makedirs(experiment_path, exist_ok=True)
+        return experiment_path
+
     number = 1
     experiment_path = os.path.join("results", f"Experiment_{number:03d}")
 
