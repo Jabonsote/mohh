@@ -46,6 +46,8 @@ export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export MOHH_WORKERS="$SLURM_CPUS_PER_TASK"
+# Sin buffer: el % de tqdm aparece en vivo en el .out en vez de por bloques.
+export PYTHONUNBUFFERED=1
 
 module load python/miniforge
 eval "$(conda shell.bash hook)"

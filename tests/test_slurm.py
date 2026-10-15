@@ -109,6 +109,7 @@ def test_slurm_runtime_conventions(script):
     # Conda env del cluster (Modules), no venv local.
     assert "conda activate" in content
     assert "conda shell.bash hook" in content
+    assert "PYTHONUNBUFFERED=1" in content
     assert ".venv" not in content
 
 
