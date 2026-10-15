@@ -6,18 +6,17 @@
 #   cd /LUSTRE/<miusuario>/MOOHH-R
 #   EXPERIMENT=results/Experiment_001 sbatch slurm/mohh-evaluate.slrm
 #
-# Dimensionamiento (-c 12, NO 50):
+# Dimensionamiento (-c 32, NO 50):
 #   La evaluacion paraleliza solo el bucle interno de N_EXPERIMENTS
 #   (evaluation/experiment.py): cada batch lanza exactamente
-#   N_EXPERIMENTS = 11 tareas (una por repeticion). Pedir 50 cores
-#   dejaria ~39 cores ociosos en cada batch y solo alarga la espera
-#   en cola. Se piden 11 workers + 1 proceso principal = 12 cores.
-#   Si subes --n-experiments, sube -c a la par (N + 1).
+#   N_EXPERIMENTS = 31 tareas (una por repeticion). Se piden
+#   31 workers + 1 proceso principal = 32 cores.
+#   Si cambias --n-experiments, ajusta -c a la par (N + 1).
 #
 #SBATCH -J mohh-evaluate
 #SBATCH -p ixachi
 #SBATCH -N 1
-#SBATCH -c 12
+#SBATCH -c 32
 #SBATCH --time=3-00:00:00
 #SBATCH -o mohh-evaluate-%j.out
 #SBATCH -e mohh-evaluate-%j.err
@@ -33,7 +32,8 @@ fi
 SOLVERS="MOEAD,NSGAII,SMSEMOA"
 # Budgets publicados 10k/30k/50k con MO 105x500. Sanity rapido:
 #   EVAL_ARGS="--solvers MOEAD --mo-population-size 10 --mo-generations 3 --n-experiments 3 --eval-budgets 10k:6"
-EVAL_ARGS="--solvers $SOLVERS"
+# 31 ejecuciones independientes por combinacion instancia/operador/solver.
+EVAL_ARGS="--solvers $SOLVERS --n-experiments 31"
 
 cd "$SLURM_SUBMIT_DIR"
 

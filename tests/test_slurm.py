@@ -134,9 +134,13 @@ def test_generate_big_requests_110_cores_exclusive():
     assert re.search(r"#SBATCH\s+--exclusive\b", content)
 
 
-def test_evaluate_requests_12_cores():
-    # 11 N_EXPERIMENTS workers + 1 main process; 50 would idle ~39 cores.
-    assert re.search(r"#SBATCH\s+-c\s+12\b", _read("mohh-evaluate.slrm"))
+def test_evaluate_requests_32_cores():
+    # 31 N_EXPERIMENTS workers + 1 main process.
+    assert re.search(r"#SBATCH\s+-c\s+32\b", _read("mohh-evaluate.slrm"))
+
+
+def test_evaluate_runs_31_independent_experiments():
+    assert "--n-experiments 31" in _read("mohh-evaluate.slrm")
 
 
 @pytest.mark.parametrize(
