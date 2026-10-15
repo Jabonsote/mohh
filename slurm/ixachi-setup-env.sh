@@ -46,7 +46,12 @@ conda activate "$ENV_PREFIX"
 pip install -U pip
 pip install -e .
 
-# 3. Verificacion (equivale al "Hola mundo" de la metodologia: confirma que
+# 3. Directorios que SLURM exige existentes al arrancar el job:
+#    las directivas -o/-e de los .slrm apuntan a logs/ y los resultados
+#    van a results/. Si no existen, el job muere en 1 segundo sin logs.
+mkdir -p logs results
+
+# 4. Verificacion (equivale al "Hola mundo" de la metodologia: confirma que
 #    el ambiente quedo funcional antes de gastar cola).
 python -c "import mohh; print('mohh OK')"
 mohh-generate -h >/dev/null && echo "mohh-generate OK"

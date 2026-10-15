@@ -118,6 +118,8 @@ def test_setup_creates_conda_env():
     assert "conda create" in content
     assert "python=3.12" in content
     assert "pip install -e ." in content
+    # SLURM abre -o/-e al arrancar: logs/ y results/ deben existir antes.
+    assert "mkdir -p logs results" in content
 
 
 def test_generate_requests_50_cores():
