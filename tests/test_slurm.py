@@ -81,7 +81,7 @@ def _read(name):
 
 
 @pytest.mark.parametrize(
-    "script", ["mohh-generate.slrm", "mohh-evaluate.slrm"]
+    "script", ["mohh-generate.slrm", "mohh-generate-big.slrm", "mohh-evaluate.slrm"]
 )
 def test_slurm_required_directives(script):
     content = _read(script)
@@ -98,7 +98,7 @@ def test_slurm_required_directives(script):
 
 
 @pytest.mark.parametrize(
-    "script", ["mohh-generate.slrm", "mohh-evaluate.slrm"]
+    "script", ["mohh-generate.slrm", "mohh-generate-big.slrm", "mohh-evaluate.slrm"]
 )
 def test_slurm_runtime_conventions(script):
     content = _read(script)
@@ -127,13 +127,20 @@ def test_generate_requests_50_cores():
     assert re.search(r"#SBATCH\s+-c\s+50\b", _read("mohh-generate.slrm"))
 
 
+def test_generate_big_requests_110_cores_exclusive():
+    # 110 cores solo caben en graphos1 (112); exclusive = nodo sin vecinos.
+    content = _read("mohh-generate-big.slrm")
+    assert re.search(r"#SBATCH\s+-c\s+110\b", content)
+    assert re.search(r"#SBATCH\s+--exclusive\b", content)
+
+
 def test_evaluate_requests_12_cores():
     # 11 N_EXPERIMENTS workers + 1 main process; 50 would idle ~39 cores.
     assert re.search(r"#SBATCH\s+-c\s+12\b", _read("mohh-evaluate.slrm"))
 
 
 @pytest.mark.parametrize(
-    "script", ["mohh-generate.slrm", "mohh-evaluate.slrm"]
+    "script", ["mohh-generate.slrm", "mohh-generate-big.slrm", "mohh-evaluate.slrm"]
 )
 def test_slurm_outputs_in_submit_dir(script):
     # Como holamundo.out en la metodologia: sin subcarpetas, para que el
@@ -149,6 +156,7 @@ def test_slurm_outputs_in_submit_dir(script):
         "ixachi-setup-env.sh",
         "mohh-full-chain.sh",
         "mohh-generate.slrm",
+        "mohh-generate-big.slrm",
         "mohh-evaluate.slrm",
     ],
 )

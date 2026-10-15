@@ -1,0 +1,61 @@
+#!/bin/bash
+#
+# Generacion de operadores (etapa GE) en NODO GRANDE de ixachi.
+#
+# Envio:
+#   cd /LUSTRE/<miusuario>/MOOHH-R
+#   sbatch slurm/mohh-generate-big.slrm
+#
+# Dimensionamiento (-c 110, --exclusive, 1 nodo):
+#   Igual diseño que mohh-generate.slrm (un solo JOB, multiprocessing en
+#   un nodo, sin MPI), pero pidiendo 110 cores: SLURM solo puede colocarlo
+#   en graphos1 (112 cores, ~1 TB RAM), que suele estar idle. Con 110
+#   workers en vez de 50 el throughput es ~2.2x (tareas por paso: 4000 en
+#   gen 0 y 2800 en gen k, de sobra para 110 workers).
+#   --exclusive entrega el nodo entero: sin vecinos robando ciclos ni
+#   ancho de banda de memoria (critico para workers numpy).
+#   MOHH_WORKERS se toma de lo asignado: aqui 110, sin tocar codigo.
+#
+#SBATCH -J mohh-generate-big
+#SBATCH -p ixachi
+#SBATCH -N 1
+#SBATCH -c 110
+#SBATCH --exclusive
+#SBATCH --time=3-00:00:00
+#SBATCH -o mohh-generate-big-%j.out
+#SBATCH -e mohh-generate-big-%j.err
+
+# --- Parametros del experimento (editar aqui) ---
+MODELS="${MODELS:-MOEAD}"
+EXPERIMENT_ARGS=""
+[ -n "${EXPERIMENT_PATH:-}" ] && EXPERIMENT_ARGS="--experiment-path $EXPERIMENT_PATH"
+# Defaults publicados: 50/30 generaciones, MOEA 105x300 (caro: dias de cola).
+GENERATE_ARGS="--models $MODELS"
+# Sanity rapido (~minutos): comentar la linea anterior y usar esta:
+# GENERATE_ARGS="--models MOEAD --population-size 8 --generations 2 --elite-size 2 --mo-population-size 10 --mo-generations 3"
+
+cd "$SLURM_SUBMIT_DIR"
+
+echo "Ejecutandose en el nodo $SLURM_JOB_NODELIST."
+echo "Ejecutandose con $SLURM_CPUS_PER_TASK hilos (workers)."
+echo "Job $SLURM_JOB_ID en particion $SLURM_JOB_PARTITION."
+
+# Un hilo BLAS por worker: evita que numpy/pymoo multipliquen hilos
+# y oversuscriban los cores asignados.
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export MOHH_WORKERS="$SLURM_CPUS_PER_TASK"
+# Sin buffer: el % de tqdm aparece en vivo en el .out en vez de por bloques.
+export PYTHONUNBUFFERED=1
+
+module load python/miniforge
+eval "$(conda shell.bash hook)"
+conda activate "$SLURM_SUBMIT_DIR/.conda-env"
+
+mkdir -p logs results
+
+# shellcheck disable=SC2086
+mohh-generate $GENERATE_ARGS $EXPERIMENT_ARGS
+
+echo "Fin del script."
