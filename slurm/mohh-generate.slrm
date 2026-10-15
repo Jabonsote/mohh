@@ -1,0 +1,60 @@
+#!/bin/bash
+#
+# Generacion de operadores (etapa GE) en ixachi.
+#
+# Envio:
+#   cd /LUSTRE/<miusuario>/MOOHH-R
+#   sbatch slurm/mohh-generate.slrm
+#
+# Dimensionamiento (-c 50):
+#   Cada paso de evaluacion lanza una tarea MOEA independiente por
+#   (individuo x instancia train). Con los defaults de params.py:
+#     gen 0:  POPULATION_SIZE x N_train = 50 x 80 = 4000 tareas
+#     gen k:  GENERATION_SIZE x N_train = (50-15) x 80 = 2800 tareas
+#   Hay de sobra para mantener 50 workers ocupados al 100%.
+#   Se piden 50 de los 52 cores del nodo (se dejan 2 al SO/SLURM).
+#   Es 1 solo nodo con --cpus-per-task porque el paralelismo es
+#   multiprocessing de Python (memoria por proceso), NO MPI ni OpenMP:
+#   no se usa -n, ni --ntasks-per-node, ni mpiexec.
+#
+# Prueba rapida (sanity, ~minutos) antes del run publicado: editar
+# GENERATE_ARGS abajo con los flags cortos del README y reenviar.
+#
+#SBATCH -J mohh-generate
+#SBATCH -p ixachi
+#SBATCH -N 1
+#SBATCH -c 50
+#SBATCH --time=3-00:00:00
+#SBATCH -o logs/generate-%x-%j.out
+#SBATCH -e logs/generate-%x-%j.err
+
+# --- Parametros del experimento (editar aqui) ---
+MODELS="MOEAD"
+# Defaults publicados: 50/30 generaciones, MOEA 105x300 (caro: dias de cola).
+GENERATE_ARGS="--models $MODELS"
+# Sanity rapido (~minutos): comentar la linea anterior y usar esta:
+# GENERATE_ARGS="--models MOEAD --population-size 8 --generations 2 --elite-size 2 --mo-population-size 10 --mo-generations 3"
+
+cd "$SLURM_SUBMIT_DIR"
+
+echo "Ejecutandose en el nodo $SLURM_JOB_NODELIST."
+echo "Ejecutandose con $SLURM_CPUS_PER_TASK hilos (workers)."
+echo "Job $SLURM_JOB_ID en particion $SLURM_JOB_PARTITION."
+
+# Un hilo BLAS por worker: evita que numpy/pymoo multipliquen hilos
+# y oversuscriban los 50 cores asignados.
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export MOHH_WORKERS="$SLURM_CPUS_PER_TASK"
+
+module load python/miniforge
+# shellcheck disable=SC1091
+source .venv-ixachi/bin/activate
+
+mkdir -p logs results
+
+# shellcheck disable=SC2086
+mohh-generate $GENERATE_ARGS
+
+echo "Fin del script."

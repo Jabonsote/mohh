@@ -1,0 +1,59 @@
+#!/bin/bash
+#
+# Evaluacion de operadores (benchmark en instancias held-out) en ixachi.
+#
+# Envio:
+#   cd /LUSTRE/<miusuario>/MOOHH-R
+#   EXPERIMENT=results/Experiment_001 sbatch slurm/mohh-evaluate.slrm
+#
+# Dimensionamiento (-c 12, NO 50):
+#   La evaluacion paraleliza solo el bucle interno de N_EXPERIMENTS
+#   (evaluation/experiment.py): cada batch lanza exactamente
+#   N_EXPERIMENTS = 11 tareas (una por repeticion). Pedir 50 cores
+#   dejaria ~39 cores ociosos en cada batch y solo alarga la espera
+#   en cola. Se piden 11 workers + 1 proceso principal = 12 cores.
+#   Si subes --n-experiments, sube -c a la par (N + 1).
+#
+#SBATCH -J mohh-evaluate
+#SBATCH -p ixachi
+#SBATCH -N 1
+#SBATCH -c 12
+#SBATCH --time=3-00:00:00
+#SBATCH -o logs/evaluate-%x-%j.out
+#SBATCH -e logs/evaluate-%x-%j.err
+
+# --- Parametros del experimento (editar aqui) ---
+# Carpeta producida por mohh-generate. Si no se define, se usa el
+# Experiment_NNN mas reciente (util para encadenar con --dependency).
+if [ -z "${EXPERIMENT:-}" ]; then
+    EXPERIMENT="$(ls -d results/Experiment_* 2>/dev/null | sort | tail -n 1)"
+fi
+: "${EXPERIMENT:?No hay results/Experiment_*; corre primero mohh-generate o define EXPERIMENT.}"
+# Solvers a benchmarkear (default de params.py: MOEAD,NSGAII,SMSEMOA).
+SOLVERS="MOEAD,NSGAII,SMSEMOA"
+# Budgets publicados 10k/30k/50k con MO 105x500. Sanity rapido:
+#   EVAL_ARGS="--solvers MOEAD --mo-population-size 10 --mo-generations 3 --n-experiments 3 --eval-budgets 10k:6"
+EVAL_ARGS="--solvers $SOLVERS"
+
+cd "$SLURM_SUBMIT_DIR"
+
+echo "Ejecutandose en el nodo $SLURM_JOB_NODELIST."
+echo "Ejecutandose con $SLURM_CPUS_PER_TASK hilos (workers)."
+echo "Job $SLURM_JOB_ID en particion $SLURM_JOB_PARTITION."
+echo "Experimento: $EXPERIMENT"
+
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export MOHH_WORKERS="$SLURM_CPUS_PER_TASK"
+
+module load python/miniforge
+# shellcheck disable=SC1091
+source .venv-ixachi/bin/activate
+
+mkdir -p logs
+
+# shellcheck disable=SC2086
+mohh-evaluate "$EXPERIMENT" $EVAL_ARGS
+
+echo "Fin del script."
