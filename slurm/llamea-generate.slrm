@@ -1,0 +1,53 @@
+#!/bin/bash
+#
+# Busqueda LLaMEa de operadores de variacion (mQAP) en ixachi.
+#
+# Requiere un servidor vLLM activo (ver slurm/llamea-vllm-server.slrm).
+# El nodo del servidor se pasa por entorno (SLURM_JOB_NODELIST del job vLLM):
+#
+#   LLAMEA_SERVER_HOST=<nodo> sbatch slurm/llamea-generate.slrm
+#
+# Un unico algoritmo por generacion por defecto ((1+1)-EA). Para mas por
+# generacion (poblacional), usar N_PARENTS/N_OFFSPRING, ej:
+#   N_PARENTS=4 N_OFFSPRING=4 sbatch slurm/llamea-generate.slrm
+#
+#SBATCH -J llamea-generate
+#SBATCH -p ixachi
+#SBATCH -N 1
+#SBATCH -c 4
+#SBATCH --time=3-00:00:00
+#SBATCH -o llamea-generate-%j.out
+#SBATCH -e llamea-generate-%j.err
+
+cd "$SLURM_SUBMIT_DIR"
+
+: "${LLAMEA_SERVER_HOST:?Define LLAMEA_SERVER_HOST (nodo del job llamea-vllm), ej: squeue para verlo}"
+MODEL="${MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
+BASE_URL="http://${LLAMEA_SERVER_HOST}:${LLAMEA_SERVER_PORT:-8000}/v1"
+
+echo "Ejecutandose en el nodo $SLURM_JOB_NODELIST."
+echo "Modelo: $MODEL"
+echo "Servidor vLLM: $BASE_URL"
+
+export OMP_NUM_THREADS=1
+export PYTHONUNBUFFERED=1
+
+module load python/miniforge
+eval "$(conda shell.bash hook)"
+conda activate "$SLURM_SUBMIT_DIR/.conda-env"
+
+mkdir -p results
+
+python -m mohh.llamea.run \
+    --model "$MODEL" \
+    --base-url "$BASE_URL" \
+    --budget "${BUDGET:-20}" \
+    --n-parents "${N_PARENTS:-1}" \
+    --n-offspring "${N_OFFSPRING:-1}" \
+    --train-instances "${TRAIN_INSTANCES:-8}" \
+    --mo-generations "${MO_GENERATIONS:-30}" \
+    --mo-population-size "${MO_POPULATION_SIZE:-30}" \
+    --seed "${SEED:-42}" \
+    --experiment-name "${EXPERIMENT_NAME:-LLaMEA_Experiment}"
+
+echo "Fin del script."

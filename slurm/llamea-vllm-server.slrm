@@ -1,0 +1,44 @@
+#!/bin/bash
+#
+# Servidor vLLM persistente para LLaMEa en ixachi (particion gpu).
+#
+# Envio (el modelo queda cargado en GPU y sirviendo /v1 hasta el time limit):
+#   MODEL=Qwen/Qwen2.5-1.5B-Instruct sbatch slurm/llamea-vllm-server.slrm
+#
+# Luego, desde otro nodo o login, corre la busqueda apuntando a este servidor:
+#   LLAMEA_SERVER_HOST=<nodo> MODEL=Qwen/Qwen2.5-1.5B-Instruct \
+#       sbatch slurm/llamea-generate.slrm
+#
+#SBATCH -J llamea-vllm
+#SBATCH -p gpu
+#SBATCH -N 1
+#SBATCH -c 8
+#SBATCH --gres=gpu:1
+#SBATCH --time=30-00:00:00
+#SBATCH -o llamea-vllm-%j.out
+#SBATCH -e llamea-vllm-%j.err
+
+cd "$SLURM_SUBMIT_DIR"
+
+MODEL="${MODEL:?Define MODEL, ej: MODEL=Qwen/Qwen2.5-1.5B-Instruct sbatch slurm/llamea-vllm-server.slrm}"
+PORT="${PORT:-8000}"
+
+echo "Ejecutandose en el nodo $SLURM_JOB_NODELIST (GPU)."
+echo "Modelo: $MODEL"
+
+export OMP_NUM_THREADS=1
+export MOHH_WORKERS="$SLURM_CPUS_PER_TASK"
+export PYTHONUNBUFFERED=1
+
+module load python/miniforge
+eval "$(conda shell.bash hook)"
+conda activate "$SLURM_SUBMIT_DIR/.conda-env"
+
+# vLLM baja el modelo si no esta en el cache de HuggingFace; para verificar o
+# descargar explicitamente antes: python scripts/ensure_model.py <modelo>
+python -m vllm.entrypoints.openai.api_server \
+    --model "$MODEL" \
+    --host 0.0.0.0 \
+    --port "$PORT" \
+    --served-model-name "$MODEL" \
+    ${EXTRA_VLLM_ARGS:-}
