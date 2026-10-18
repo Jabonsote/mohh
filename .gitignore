@@ -11,3 +11,5 @@ analysis_express*/
 *.egg-info/
 build/
 dist/
+GIT_PASOS_NO_SUBIR.txt
+cluster.md
