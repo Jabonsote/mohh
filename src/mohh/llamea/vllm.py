@@ -29,11 +29,21 @@ def _hf_cache_dir() -> str:
 
 
 def model_is_available(model_id: str) -> bool:
-    """True si el modelo ya esta en el cache de HuggingFace o es ruta local."""
+    """True si el modelo ya esta en el cache de HuggingFace, en la raiz
+    persistente de `mohh.llamea.models`, o es una ruta local."""
     if os.path.isdir(model_id):
         return True
     cache = _hf_cache_dir()
-    return os.path.isdir(os.path.join(cache, f"models--{model_id.replace('/', '--')}"))
+    if os.path.isdir(os.path.join(cache, f"models--{model_id.replace('/', '--')}")):
+        return True
+    try:
+        from mohh.llamea.models import model_dir
+
+        if os.path.exists(os.path.join(model_dir(model_id), "config.json")):
+            return True
+    except Exception:  # noqa: BLE001 - la comprobacion es informativa
+        pass
+    return False
 
 
 def ensure_model(model_id: str, allow_download: bool = True,
@@ -118,13 +128,15 @@ class VLLM_LLM(OpenAI_LLM):
     # -- contabilidad de tokens ------------------------------------------- #
     def reset_usage(self):
         self.usage = {"requests": 0, "prompt_tokens": 0,
-                      "completion_tokens": 0, "total_tokens": 0}
+                      "completion_tokens": 0, "total_tokens": 0,
+                      "inference_seconds": 0.0, "failed_requests": 0}
         self.usage_history = []
         self._last_message_chars = 0
 
     def _install_usage_capture(self):
-        """Envuelve `chat.completions.create` para registrar tokens y
-        `max_tokens`, sin reimplementar el bucle de reintentos de LLaMEA."""
+        """Envuelve `chat.completions.create` para registrar tokens, `max_tokens`
+        y la **latencia** de cada peticion, sin reimplementar el bucle de
+        reintentos de LLaMEA."""
         raw = self.client.chat.completions
         owner = self
 
@@ -132,8 +144,16 @@ class VLLM_LLM(OpenAI_LLM):
             def create(self, *args, **kwargs):
                 if owner.max_tokens is not None and "max_tokens" not in kwargs:
                     kwargs["max_tokens"] = owner.max_tokens
-                response = raw.create(*args, **kwargs)
-                owner._record_usage(response)
+                start = time.perf_counter()
+                try:
+                    response = raw.create(*args, **kwargs)
+                except Exception:
+                    # Peticion fallida (timeout, 5xx, conexion): se cuenta y se
+                    # deja que LLaMEA aplique su propio reintento.
+                    owner.usage["failed_requests"] += 1
+                    raise
+                elapsed = time.perf_counter() - start
+                owner._record_usage(response, elapsed)
                 return response
 
             def __getattr__(self, name):
@@ -141,7 +161,7 @@ class VLLM_LLM(OpenAI_LLM):
 
         self.client.chat.completions = _CapturingCompletions()
 
-    def _record_usage(self, response):
+    def _record_usage(self, response, elapsed: float = 0.0):
         usage = getattr(response, "usage", None)
         prompt = getattr(usage, "prompt_tokens", None) if usage else None
         completion = getattr(usage, "completion_tokens", None) if usage else None
@@ -165,11 +185,14 @@ class VLLM_LLM(OpenAI_LLM):
         self.usage["prompt_tokens"] += int(prompt)
         self.usage["completion_tokens"] += int(completion)
         self.usage["total_tokens"] += int(total)
+        self.usage["inference_seconds"] += float(elapsed)
         self.usage_history.append({
             "request": self.usage["requests"],
             "prompt_tokens": int(prompt),
             "completion_tokens": int(completion),
             "total_tokens": int(total),
+            "seconds": round(float(elapsed), 4),
+            "time": time.time(),
         })
 
     def usage_snapshot(self):

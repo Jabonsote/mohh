@@ -293,14 +293,68 @@ def pairwise(scores, operators, rows):
     return comparisons
 
 
+def rank_stability(scores, operators):
+    """Estabilidad del ranking entre repeticiones y diferencia minima detectable.
+
+    Con una sola semilla, el "mejor operador" puede ser ruido del MOEA interno.
+    Aqui se rankean los operadores en **cada** repeticion (media sobre
+    instancias): si el primero cambia mucho de una repeticion a otra, el ruido
+    domina la senal y ninguna mejora por debajo de `mdd_top_two` es creible.
+    """
+    names = [name for name, _ns, _kind in operators
+             if any(v is not None for v in scores.get(name, []))]
+    if len(names) < 2:
+        return None
+    n_repeats = len(scores[names[0]])
+    wins = {name: 0 for name in names}
+    ranks = {name: [] for name in names}
+    for rep in range(n_repeats):
+        values = {name: scores[name][rep] for name in names
+                  if scores[name][rep] is not None}
+        if not values:
+            continue
+        for position, (name, _value) in enumerate(
+                sorted(values.items(), key=lambda kv: -kv[1]), start=1):
+            ranks[name].append(position)
+            if position == 1:
+                wins[name] += 1
+    ordered = sorted(
+        names,
+        key=lambda n: -float(np.mean([v for v in scores[n] if v is not None] or [0.0])),
+    )
+    mdd = None
+    if len(ordered) >= 2:
+        top, second = ordered[0], ordered[1]
+        diffs = [a - b for a, b in zip(scores[top], scores[second])
+                 if a is not None and b is not None]
+        if len(diffs) > 1 and float(np.std(diffs, ddof=1)) > 0:
+            try:
+                from scipy.stats import t as _student
+                tcrit = float(_student.ppf(0.975, len(diffs) - 1))
+            except Exception:  # pragma: no cover
+                tcrit = 2.0
+            mdd = tcrit * float(np.std(diffs, ddof=1)) / np.sqrt(len(diffs))
+    return {
+        "repeats": n_repeats,
+        "wins_as_best": wins,
+        "mean_rank": {name: (float(np.mean(ranks[name])) if ranks[name] else None)
+                      for name in names},
+        "rank1_changes": sum(1 for name in names if wins[name] > 0),
+        "top_two": ordered[:2],
+        "mdd_top_two": mdd,
+    }
+
+
 def write_report(path, name, args, rows, comparisons, frames, scores, values, operators,
-                 pairwise_results=None):
+                 pairwise_results=None, stability=None):
     lines = [f"# Comparacion de operadores: {name}", ""]
     lines += [
         "## Diseno",
         "",
         f"- Instancias: {args.split} ({len(args.paths)}), semilla base {args.seed}.",
         f"- Repeticiones independientes: {args.repeats} (semilla = base + repeticion).",
+        "- Semillas por repeticion: " + ", ".join(
+            f"rep{rep}={args.seed + rep}" for rep in range(args.repeats)),
         f"- MOEA interno: {args.solver}, {args.mo_generations} generaciones, "
         f"poblacion {args.mo_population_size}, mutacion {args.mutation}.",
         "- Mismas semillas para todos los operadores (comparacion pareada) y un "
@@ -313,6 +367,26 @@ def write_report(path, name, args, rows, comparisons, frames, scores, values, op
                   if f is None or np.any(f.max(axis=0) == f.min(axis=0))]
     lines += ["- Instancias sin escala (excluidas de la media): "
               + (", ".join(degenerate) if degenerate else "ninguna"), ""]
+
+    if stability:
+        lines += ["## Ruido vs senal (estabilidad del ranking)", "",
+                  "Ranking de cada operador en cada repeticion (media sobre instancias).",
+                  "Si el primero cambia entre repeticiones, el ruido del MOEA interno",
+                  "domina y toda mejora menor que la diferencia minima detectable no es",
+                  "creible.", "",
+                  "| Operador | Veces 1ro | Rank medio |", "|---|---:|---:|"]
+        for op in sorted(stability["wins_as_best"], key=lambda n: -stability["wins_as_best"][n]):
+            mean_rank = stability["mean_rank"].get(op)
+            rank_txt = "-" if mean_rank is None else f"{mean_rank:.2f}"
+            lines.append(f"| {op} | {stability['wins_as_best'][op]}"
+                         f"/{stability['repeats']} | {rank_txt} |")
+        lines.append("")
+        if stability.get("mdd_top_two") is not None:
+            top_two = " vs ".join(stability["top_two"])
+            lines.append(f"- Diferencia minima detectable ({top_two}, 95%): "
+                         f"**{stability['mdd_top_two']:.6f}**. Por debajo de eso, "
+                         "dos operadores no se distinguen con estas repeticiones.")
+            lines.append("")
 
     lines += ["## HV por operador (media de las repeticiones)", "",
               "| Operador | Tipo | Reps | Media | Desv. | Mediana | Min | Max |",
@@ -432,6 +506,7 @@ def main():
     rows = summarize(scores, operators)
     comparisons = pairwise(scores, operators, rows)
     pairwise_results = pairwise_design(fronts, rows, len(args.paths), args.repeats)
+    stability = rank_stability(scores, operators)
 
     result = {
         "config": {
@@ -439,6 +514,15 @@ def main():
             "instances": [os.path.basename(p) for p in args.paths],
             "repeats": args.repeats,
             "seed": args.seed,
+            "seeds": {
+                "base": args.seed,
+                "instance_selection": args.seed,
+                "per_repeat": {str(rep): args.seed + rep
+                               for rep in range(args.repeats)},
+                "policy": ("semilla = base + repeticion; una poblacion inicial por "
+                           "repeticion compartida por todos los operadores, de modo "
+                           "que la comparacion es pareada"),
+            },
             "solver": args.solver,
             "mo_generations": args.mo_generations,
             "mo_population_size": args.mo_population_size,
@@ -454,9 +538,16 @@ def main():
         "operators": rows,
         "comparisons": comparisons,
         "pairwise_head_to_head": pairwise_results,
+        "rank_stability": stability,
         "per_run_scores": scores,
         "per_instance_hv": {name: [values[(name, rep)] for rep in range(args.repeats)]
                             for name, _ns, _k in operators},
+        # Semilla efectiva de cada corrida del MOEA interno (operador x repeticion).
+        "run_seeds": [
+            {"operator": name, "repeat": rep, "seed": args.seed + rep}
+            for name, _ns, _k in operators
+            for rep in range(args.repeats)
+        ],
     }
     if args.save_fronts:
         np.savez_compressed(
@@ -469,7 +560,7 @@ def main():
         json.dump(result, handle, indent=2)
     write_report(os.path.join(out_dir, "report.md"), name, args, rows,
                  comparisons, frames, scores, values, operators,
-                 pairwise_results)
+                 pairwise_results, stability)
     print(f"Guardado en {out_dir}")
 
 

@@ -37,14 +37,18 @@ Ejemplos:
 
 import argparse
 import json
+import logging
 import os
 import random
 import shlex
 import sys
+import time
+import traceback
 
 import numpy as np
 
 from mohh.core.utilities.instance_utils import instance_paths
+from mohh.llamea import metrics as model_metrics
 from mohh.llamea.fitness import build_evaluator, init_params
 from mohh.llamea.prompts import (
     ROLE_PROMPT,
@@ -54,8 +58,8 @@ from mohh.llamea.prompts import (
     SKELETON_PROMPT,
     OUTPUT_FORMAT_PROMPT,
 )
-from mohh.llamea.reporting import ResultsExperimentLogger, write_report
-from mohh.llamea.vllm import VLLM_LLM, ensure_model, model_is_available, wait_for_server
+from mohh.llamea.reporting import ResultsExperimentLogger, write_report, write_seeds
+from mohh.llamea.vllm import VLLM_LLM, model_is_available, wait_for_server
 
 
 class _EvalSolution:
@@ -131,7 +135,27 @@ def _reference_panel(names):
     return selected or None
 
 
-def _make_evaluator(paths, args, bounds=None, archive=None):
+def _model_revision(model):
+    """Revision local del modelo desde el manifiesto de `mohh.llamea.models`.
+
+    Devuelve `None` si no hay manifiesto (p. ej. modelo servido por Ollama en
+    otro nodo); no es un error.
+    """
+    try:
+        from mohh.llamea.models import model_dir, read_manifest
+
+        path = model_dir(model)
+        manifest = read_manifest(path)
+        if manifest:
+            return {"revision": manifest.get("revision"),
+                    "verified_at": manifest.get("verified_at"),
+                    "path": path}
+    except Exception:  # noqa: BLE001 - la procedencia no debe tumbar la corrida
+        return None
+    return None
+
+
+def _make_evaluator(paths, args, bounds=None, archive=None, fronts_dir=None):
     return build_evaluator(
         paths,
         mo_generations=args.mo_generations,
@@ -145,7 +169,68 @@ def _make_evaluator(paths, args, bounds=None, archive=None):
         reference_operators=_reference_panel(args.reference_operators),
         archive=archive,
         frame="stationary" if getattr(args, "stationary_frame", False) else "ge",
+        fronts_dir=fronts_dir,
+        repeat_penalty=getattr(args, "repeat_penalty", 0.5),
     )
+
+
+def _setup_logging(exp_dir):
+    """Log de la corrida: `llamea.log` (todo) y `error.log` (solo avisos/errores).
+
+    En el cluster los `.out`/`.err` de SLURM se buffean y un job puede morir sin
+    dejar rastro. Estos dos archivos quedan dentro del experimento y `error.log`
+    sobrevive incluso a un fallo temprano (servidor caido, modelo ausente), que
+    es justo lo que hay que diagnosticar cuando "el cluster no funciona".
+    """
+    os.makedirs(exp_dir, exist_ok=True)
+    logger = logging.getLogger("mohh.llamea")
+    logger.setLevel(logging.DEBUG)
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+    logger.propagate = False
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    full = logging.FileHandler(os.path.join(exp_dir, "llamea.log"), encoding="utf-8")
+    full.setLevel(logging.INFO)
+    full.setFormatter(formatter)
+    errors = logging.FileHandler(os.path.join(exp_dir, "error.log"), encoding="utf-8")
+    errors.setLevel(logging.WARNING)
+    errors.setFormatter(formatter)
+    logger.addHandler(full)
+    logger.addHandler(errors)
+    return logger
+
+
+def _start_stall_watchdog(exp_dir, logger, timeout):
+    """Aborta la corrida si pasan `timeout` s sin una generacion nueva.
+
+    Vigila la fecha de `checkpoint.json` (reescrito cada generacion). Si el
+    proceso se cuelga (ya paso una vez: una generacion quedo 17 min en estado R;
+    ver `areas-de-mejora.md` §14), el checkpoint queda viejo y este hilo lo
+    detecta, lo deja en `error.log` y termina el proceso. El mejor operador ya
+    esta guardado en `best_so_far.py`, asi que un cuelgue no pierde la corrida.
+    """
+    if not timeout or timeout <= 0:
+        return None
+    import threading
+
+    checkpoint = os.path.join(exp_dir, "checkpoint.json")
+
+    def watch():
+        while True:
+            time.sleep(min(max(timeout / 4.0, 5.0), 120.0))
+            if not os.path.exists(checkpoint):
+                continue
+            stalled = time.time() - os.path.getmtime(checkpoint)
+            if stalled > timeout:
+                logger.error(
+                    "Sin progreso desde hace %.0f s (limite %s s); se aborta. "
+                    "El mejor operador esta en best_so_far.py.", stalled, timeout)
+                logging.shutdown()
+                os._exit(2)
+
+    thread = threading.Thread(target=watch, name="stall-watchdog", daemon=True)
+    thread.start()
+    return thread
 
 
 def run_llamea(args):
@@ -153,9 +238,14 @@ def run_llamea(args):
     #    poder listar los mismos conjuntos train/test que la busqueda GE.
     init_params(RANDOM_SEED=args.seed)
 
+    run_start = time.time()
     exp_dir = os.path.join(args.results_dir, args.experiment_name)
     log_base = os.path.join(exp_dir, "llamea_logs")
+    logger = _setup_logging(exp_dir)
     os.makedirs(log_base, exist_ok=True)
+    _start_stall_watchdog(exp_dir, logger, getattr(args, "stall_timeout", 0.0))
+    logger.info("Inicio de la corrida: model=%s base_url=%s budget=%s",
+                args.model, args.base_url, args.budget)
 
     # 1. Modelo local: verificar/descargar antes de conectar. Con
     #    --no-download (uso cliente en el cluster) solo se informa: el modelo
@@ -163,25 +253,48 @@ def run_llamea(args):
     if args.no_download:
         if model_is_available(args.model):
             print(f"Modelo presente en este nodo: {args.model}")
+            logger.info("Modelo presente en este nodo: %s", args.model)
         else:
-            print(f"AVISO: '{args.model}' no esta en el cache de HuggingFace de "
-                  "este nodo; se asume que lo sirve el endpoint de --base-url "
-                  "(vLLM en el cluster, Ollama o llama.cpp en local).")
+            message = (f"'{args.model}' no esta en el cache de HuggingFace de "
+                       "este nodo; se asume que lo sirve el endpoint de --base-url "
+                       "(vLLM en el cluster, Ollama o llama.cpp en local).")
+            print(f"AVISO: {message}")
+            logger.warning("AVISO: %s", message)
     else:
-        ensure_model(args.model, allow_download=True)
+        try:
+            from mohh.llamea import models as model_store
+
+            # Pesos en la raiz persistente (LUSTRE/$SCRATCH), no en $HOME:
+            # el ambiente del cluster borra el home y los nodos no lo ven.
+            model_store.configure_hf_env()
+            model_store.download_model(args.model)
+        except Exception:
+            logger.exception("Fallo al verificar/descargar el modelo %s", args.model)
+            raise
 
     # 2. Servidor vLLM: opcionalmente esperar a que cargue el modelo.
     if args.wait_server:
         print(f"Esperando servidor en {args.base_url} (max {args.server_timeout}s)...")
         if not wait_for_server(args.base_url, timeout=args.server_timeout):
+            logger.error("El servidor no respondio en %s tras %ss",
+                         args.base_url, args.server_timeout)
             raise RuntimeError(f"El servidor no respondio en {args.base_url}")
+        logger.info("Servidor disponible en %s", args.base_url)
+
+    # 2b. Procedencia del servidor y del modelo: requisito de reproducibilidad
+    #     (el mismo modelo en vLLM vs Ollama puede dar resultados distintos).
+    server_info = model_metrics.server_version(args.base_url)
+    model_info = _model_revision(args.model)
+    print(f"Servidor: {server_info or 'sin endpoint /version'}")
+    print(f"Modelo local: {model_info or 'sin manifiesto local'}")
 
     # 3. Fitness con la logica actual de MOHH-R (train).
     train_paths = _select_instances(instance_paths(train=True), args.train_instances, args.seed)
     print(f"Instancias de train: {len(train_paths)}")
 
     bounds = _load_bounds(args.bounds_file) if args.bounds_file else None
-    fitness = _make_evaluator(train_paths, args, bounds=bounds)
+    fronts_dir = None if args.no_save_fronts else os.path.join(exp_dir, "fronts")
+    fitness = _make_evaluator(train_paths, args, bounds=bounds, fronts_dir=fronts_dir)
 
     config = {
         "command": shlex.join([sys.executable] + sys.argv),
@@ -204,18 +317,68 @@ def run_llamea(args):
         "example": ("none" if args.no_example else
                     "skeleton" if args.skeleton_example else "ox"),
         "comma": args.comma,
+        "repeat_penalty": args.repeat_penalty,
         "max_workers": args.max_workers,
         "results_dir": args.results_dir,
         "log_dir": log_base,
+        # Procedencia (reproducibilidad entre local y cluster).
+        "server_info": server_info,
+        "model_info": model_info,
+        "repeat_penalty": args.repeat_penalty,
+        "stall_timeout": args.stall_timeout,
     }
     with open(os.path.join(exp_dir, "run.json"), "w") as file:
         json.dump(config, file, indent=2)
+
+    # 3c. Semillas y trazabilidad del proceso. Se guardan siempre, en su propio
+    #     archivo y dentro de cada registro (individuos y generaciones).
+    seeds = {
+        "search": args.seed,
+        "instance_selection": args.seed,
+        "moea_internal": args.seed,
+        "moea_seed_policy": ("np.random.seed(search_seed) antes de construir las "
+                             "soluciones iniciales y antes de cada corrida del MOEA "
+                             "interno; la misma semilla para todas las instancias y "
+                             "candidatos, como el arnes de evaluacion"),
+        "reference_panel": args.seed,
+        "eval_test": args.seed,
+        "llm_sampling": {
+            "temperature": args.temperature,
+            "max_tokens": args.max_tokens,
+            "note": ("el servidor muestrea; sin semilla fija, asi que la busqueda no "
+                     "es reproducible bit a bit aunque el MOEA si lo sea"),
+        },
+        "purpose": {
+            "search": "MOEA interno, soluciones iniciales, seleccion de instancias y panel",
+            "llm_sampling": "muestreo del LLM (no determinista)",
+        },
+    }
+    write_seeds(os.path.join(exp_dir, "seeds.json"), seeds)
+    logger.info("Semillas: %s", seeds)
+
+    # 3d. `--dry-run`: validar servidor + configuracion y salir sin gastar GPU.
+    if args.dry_run:
+        print("DRY RUN: configuracion y procedencia escritas en run.json/seeds.json; "
+              "no se ejecuta la busqueda.")
+        if server_info is None:
+            print("AVISO: el servidor no respondio a /version; verifica --base-url "
+                  "antes de lanzar una corrida larga.")
+            logger.warning("dry-run: el servidor no respondio a /version")
+        logger.info("dry-run: fin")
+        return
 
     # 4. Redirigir el logger de LLaMEA a results/<exp>/llamea_logs/.
     import llamea.llamea as llamea_module
 
     ResultsExperimentLogger.results_dir = log_base
     ResultsExperimentLogger.verbose = not args.quiet
+    # Semilla y configuracion del proceso: cada linea de individuals.jsonl y
+    # generation_summary.jsonl la lleva, para que el log sea autosuficiente.
+    ResultsExperimentLogger.seed = args.seed
+    ResultsExperimentLogger.solver = args.solver
+    ResultsExperimentLogger.mo_generations = args.mo_generations
+    ResultsExperimentLogger.mo_population_size = args.mo_population_size
+    ResultsExperimentLogger.mutation = args.mutation
     llamea_module.ExperimentLogger = ResultsExperimentLogger
 
     llm = VLLM_LLM(
@@ -256,6 +419,15 @@ def run_llamea(args):
         experiment_name=args.experiment_name,
     )
 
+    # 3b. Costo del modelo: foto de `/metrics` (vLLM) antes de la corrida; los
+    #     deltas contra la foto final dan el tiempo de GPU y los tokens reales.
+    metrics_before = model_metrics.scrape_prometheus(args.base_url)
+    if metrics_before is not None:
+        print("Metricas Prometheus del servidor: disponibles (vLLM).")
+    else:
+        print("Metricas Prometheus no disponibles; se usaran solo las del cliente "
+              "(tokens y latencia).")
+
     best = llamea.run()
     train_fitness = best.fitness
     print(f"Best train fitness (HV): {train_fitness}")
@@ -263,11 +435,28 @@ def run_llamea(args):
 
     log_dir = llamea.logger.dirname if llamea.logger is not None else log_base
 
+    # 4b. Costo del modelo: tokens y latencia (cliente) + tiempo de GPU y KV
+    #     cache (servidor vLLM, `/metrics`) + GPU local (`nvidia-smi`).
+    metrics_after = model_metrics.scrape_prometheus(args.base_url)
+    gpu_snapshot = model_metrics.nvidia_smi()
+    usage = llm.usage_snapshot() if hasattr(llm, "usage_snapshot") else {}
+    cost = model_metrics.cost_summary(
+        usage, before=metrics_before, after=metrics_after,
+        gpu=gpu_snapshot, wall_seconds=time.time() - run_start,
+    )
+    if metrics_before is not None or metrics_after is not None:
+        print(f"Costo del modelo (vLLM): {cost}")
+    else:
+        print(f"Costo del modelo (solo cliente): {cost}")
+
     # 5. Guardar resultado.
     with open(os.path.join(exp_dir, "llamea_best_operator.py"), "w") as file:
         file.write(best.code + "\n")
 
     info = dict(config)
+    counters = (llamea.logger.counters()
+                if llamea.logger is not None and hasattr(llamea.logger, "counters")
+                else {})
     info.update({
         "train_fitness": train_fitness,
         # Aclaracion para quien lea el JSON: `train_fitness` es el valor que
@@ -281,7 +470,19 @@ def run_llamea(args):
         "description": best.description,
         "log_dir": log_dir,
         "evaluations": len(fitness.archive),
-        "best_hv": fitness.archive.best(),
+        "best_hv_ranking": fitness.archive.best(),
+        "diversity": fitness.duplicate_stats(),
+        # Trazabilidad del proceso: semillas, diversidad y costo.
+        "seeds": seeds,
+        "seeds_file": os.path.join(exp_dir, "seeds.json"),
+        "distinct_operators": counters.get("distinct_operators"),
+        "evaluated_valid": counters.get("evaluated_valid"),
+        "validity_rate": (
+            counters["evaluated_valid"] / args.budget
+            if counters.get("evaluated_valid") is not None and args.budget else None
+        ),
+        "stop_reason": "budget reached",
+        "cost": cost,
     })
 
     # 5b. Marco de normalizacion final. El HV del mejor candidato y el de la
@@ -297,6 +498,9 @@ def run_llamea(args):
             "degenerate_instances": fitness.frame_degenerate_instances(),
             "reference_hv_final_frame": fitness.reference_scores(),
             "train_fitness_final_frame": final_scores.get(best.code.strip(), (None,))[0],
+            # HV crudo del operador entregado (el ranking pudo penalizarlo si se
+            # repitio; el HV de la tabla no se penaliza).
+            "train_fitness_raw": final_scores.get(best.code.strip(), (None,))[0],
         })
         best_key = fitness.best_key_in_final_frame()
         if best_key is not None and best_key != (best.code or "").strip():
@@ -308,6 +512,16 @@ def run_llamea(args):
                 file.write(best_key + "\n")
     else:
         info["frame"] = "none"
+
+    # 5c. Marco final y frentes crudos: evidencia para recalcular el HV.
+    if fronts_dir:
+        try:
+            frame_path = fitness.save_frame(os.path.join(fronts_dir, "frame.npz"))
+            if frame_path:
+                info["frame_file"] = frame_path
+            info["fronts_dir"] = fronts_dir
+        except Exception as error:  # noqa: BLE001
+            logger.exception("No se pudo guardar el marco final: %s", error)
 
     if args.save_bounds:
         try:
@@ -323,16 +537,29 @@ def run_llamea(args):
     if args.eval_test:
         test_paths = _select_instances(instance_paths(train=False), args.test_instances, args.seed)
         print(f"Evaluando el mejor operador en {len(test_paths)} instancias de test...")
-        test_fitness = _make_evaluator(test_paths, args)
-        evaluated = test_fitness(_EvalSolution(best.code))
-        info["test_instances"] = len(test_paths)
-        info["test_fitness"] = evaluated.fitness
-        if test_fitness.normalize:
-            info["test_reference_hv"] = test_fitness.reference_scores()
-            info["test_degenerate_instances"] = test_fitness.frame_degenerate_instances()
-        print(f"Test fitness (HV): {evaluated.fitness}")
-        if info.get("test_reference_hv"):
-            print(f"Test HV de la linea base en el mismo marco: {info['test_reference_hv']}")
+        test_fronts_dir = (None if args.no_save_fronts
+                           else os.path.join(exp_dir, "fronts_test"))
+        test_fitness = _make_evaluator(test_paths, args, fronts_dir=test_fronts_dir)
+        try:
+            evaluated = test_fitness(_EvalSolution(best.code))
+        except Exception:
+            logger.exception("Fallo la evaluacion en test")
+            evaluated = None
+        if evaluated is not None:
+            info["test_instances"] = len(test_paths)
+            info["test_fitness"] = evaluated.fitness
+            info["test_seeds"] = {"moea_internal": args.seed, "selection": args.seed}
+            if test_fitness.normalize:
+                info["test_reference_hv"] = test_fitness.reference_scores()
+                info["test_degenerate_instances"] = test_fitness.frame_degenerate_instances()
+            if test_fronts_dir:
+                try:
+                    test_fitness.save_frame(os.path.join(test_fronts_dir, "frame.npz"))
+                except Exception:  # noqa: BLE001
+                    logger.exception("No se pudo guardar el marco de test")
+            print(f"Test fitness (HV): {evaluated.fitness}")
+            if info.get("test_reference_hv"):
+                print(f"Test HV de la linea base en el mismo marco: {info['test_reference_hv']}")
 
     with open(os.path.join(exp_dir, "llamea_best_info.json"), "w") as file:
         json.dump(info, file, indent=2)
@@ -343,9 +570,29 @@ def run_llamea(args):
         usage["history"] = getattr(llm, "usage_history", [])
         usage["max_tokens"] = args.max_tokens
         usage["temperature"] = args.temperature
+        usage["seeds"] = seeds
         with open(os.path.join(exp_dir, "tokens.json"), "w") as file:
             json.dump(usage, file, indent=2)
         print(f"tokens: {llm.usage_snapshot()}")
+
+    # 7b. Metricas de costo (tokens, tiempo de GPU, energia) + fotos crudas.
+    try:
+        model_metrics.write_metrics(
+            os.path.join(exp_dir, "metrics.json"),
+            summary=cost,
+            before=metrics_before,
+            after=metrics_after,
+            history=getattr(llm, "usage_history", []),
+            extra={"seeds": seeds, "gpu_snapshot": gpu_snapshot},
+        )
+        info["metrics_file"] = os.path.join(exp_dir, "metrics.json")
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo guardar metrics.json")
+
+    # El info final incluye el costo ya calculado; se reescribe para que
+    # llamea_best_info.json sea autosuficiente.
+    with open(os.path.join(exp_dir, "llamea_best_info.json"), "w") as file:
+        json.dump(info, file, indent=2)
 
     # 8. Reporte de la evolucion (CSV, Markdown y grafica).
     best_final = (info.get("best_operator_final_frame") or {}).get("train_fitness")
@@ -358,9 +605,15 @@ def run_llamea(args):
         "best_hv_final_frame": best_final,
         "test_fitness": info.get("test_fitness"),
         "test_reference_hv": info.get("test_reference_hv"),
+        "seeds": seeds,
+        "stop_reason": info.get("stop_reason"),
+        "distinct_operators": info.get("distinct_operators"),
+        "validity_rate": info.get("validity_rate"),
     }
     paths = write_report(log_dir, title=f"LLaMEA {args.experiment_name}",
-                         frame_info=frame_info)
+                         frame_info=frame_info,
+                         cost=cost,
+                         usage_history=getattr(llm, "usage_history", []))
     for kind, path in paths.items():
         print(f"{kind}: {path}")
 
@@ -381,8 +634,9 @@ def main(argv=None):
     parser.add_argument("--max-tokens", type=int, default=None,
                         help="Maximo de tokens generados por peticion "
                              "(None = default del servidor).")
-    parser.add_argument("--budget", type=int, default=100,
-                        help="Numero de generaciones (llamadas al LLM).")
+    parser.add_argument("--budget", type=int, default=1000,
+                        help="Numero de generaciones (llamadas al LLM). Default 1000; "
+                             "para pruebas de humo usar un valor bajo (p. ej. 20).")
     parser.add_argument("--n-parents", type=int, default=1,
                         help="Padres por generacion (1 = un algoritmo por generacion).")
     parser.add_argument("--n-offspring", type=int, default=1,
@@ -436,6 +690,14 @@ def main(argv=None):
     parser.add_argument("--save-bounds", default=None, const="bounds.json", nargs="?",
                         help="Guardar los limites calculados (nombre dentro de la "
                              "carpeta del experimento).")
+    parser.add_argument("--no-save-fronts", action="store_true",
+                        help="No guardar los frentes crudos por candidato "
+                             "(por defecto se guardan en <exp>/fronts/).")
+    parser.add_argument("--repeat-penalty", type=float, default=0.5,
+                        help="Presion de diversidad: multiplicador del HV (solo para "
+                             "el ranking) cuando el codigo ya se habia evaluado. 1.0 "
+                             "lo desactiva. Ataca el anclaje del modelo (repeticion "
+                             "literal del mismo operador).")
     parser.add_argument("--reference-operators", default="ox,pbx,pmx,cx,erx",
                         help="Panel de operadores de referencia para los limites, "
                              "separados por coma (subconjunto de ox,pbx,pmx,cx,erx).")
@@ -448,6 +710,12 @@ def main(argv=None):
                         help="Evaluar el mejor operador en el conjunto de test al final.")
     parser.add_argument("--no-download", action="store_true",
                         help="No descargar el modelo si falta (solo verificar).")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Validar el servidor y la configuracion, escribirlos y "
+                             "salir sin gastar GPU. Requiere que el servidor responda.")
+    parser.add_argument("--stall-timeout", type=float, default=0.0,
+                        help="Segundos sin una generacion nueva antes de abortar la "
+                             "corrida (watchdog del cluster). 0 = desactivado.")
     args = parser.parse_args(argv)
 
     if args.train_instances != "all":

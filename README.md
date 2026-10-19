@@ -29,6 +29,7 @@ multi-objective Quadratic Assignment Problem (mQAP).
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Reproducing the experiments](#reproducing-the-experiments)
+- [LLaMEA search (LLM-guided operators)](#llamea-search-llm-guided-operators)
 - [Repository structure](#repository-structure)
 - [Data](#data)
 - [Configuration reference](#configuration-reference)
@@ -196,6 +197,214 @@ population/generations, 11 repeated experiments - can take a long time):
 mohh-run --full --models MOEAD --population-size 8 --generations 2 \
          --elite-size 2 --mo-population-size 10 --mo-generations 3 \
          --n-experiments 3 --eval-budgets 10k:6
+```
+
+---
+
+## LLaMEA search (LLM-guided operators)
+
+`mohh-llamea` reuses the **exact fitness of the GE search** (same instances,
+same inner MOEA, same normalized-hypervolume frame from
+`mohh/evaluation/experiment.py`, nadir fixed at `[1.1] * K`) but replaces the
+grammar with a local LLM. [LLaMEA](https://github.com/XAI-liacs/LLaMEA) prompts
+the model to write a Python `crossover(x, y)` operator, evaluates it as a pymoo
+`Crossover`, and feeds the hypervolume ranking back to refine the next prompt.
+The GE core is **not modified**: the LLM is injected through `solver.crossover`
+(`src/mohh/llamea/`).
+
+Because the HV is measured in the same consolidated frame (reference panel plus
+every evaluated candidate), the numbers are **comparable with the GE table**.
+
+Full background and design notes: [`docs/llamea-prompts/`](docs/llamea-prompts/)
+(`comparacion-justa.md`, `areas-de-mejora.md`, `pruebas-locales.md`).
+
+### Install
+
+```bash
+pip install -e ".[llamea]"      # llamea==1.4.0 + openai + huggingface_hub
+pip install -e ".[vllm]"        # only on the node that will SERVE the model (GPU)
+```
+
+The model must be exposed through an **OpenAI-compatible** endpoint: vLLM
+(cluster/GPU), Ollama, or llama.cpp (`scripts/local_openai_server.py`).
+
+### A. Local — normal command
+
+```bash
+# 1. Serve a model. Example: Ollama, using already-downloaded models (no GPU).
+ollama serve &
+ollama pull qwen2.5-coder:7b-instruct
+
+# 2. Run the search against the server (wrapper with sensible defaults).
+MODEL=qwen2.5-coder:7b-instruct \
+BASE_URL=http://127.0.0.1:11434/v1 \
+NO_DOWNLOAD=1 \
+CATEGORY=searches \
+BUDGET=200 \
+TRAIN_INSTANCES=8 \
+EVAL_TEST=1 \
+NAME=qwen25coder7b_moead_b200 \
+PYTHON=python3 \
+./scripts/llamea_search.sh
+```
+
+The same thing calling the entry point directly:
+
+```bash
+python -m mohh.llamea.run \
+    --model qwen2.5-coder:7b-instruct \
+    --base-url http://127.0.0.1:11434/v1 --no-download \
+    --budget 1000 --solver MOEAD --train-instances 8 \
+    --repeat-penalty 0.5 --stall-timeout 1800 \
+    --eval-test --results-dir results/searches \
+    --experiment-name qwen25coder7b_moead_b1000
+```
+
+Defaults and the flags that matter:
+
+| Flag | Meaning | Default |
+|------|---------|---------|
+| `--budget N` | LLM generations (one prompt per generation) | `1000` |
+| `--solver MOEAD` | inner MOEA (`MOEAD`, `NSGAII`, `SMSEMOA`) | `MOEAD` |
+| `--mo-generations` / `--mo-population-size` | inner MOEA budget | `30` / `30` |
+| `--repeat-penalty F` | diversity pressure: ranking score is multiplied by `F` when the code was already evaluated (`1.0` disables) | `0.5` |
+| `--stall-timeout S` | watchdog: abort and log if no new generation in `S` seconds | `0` (off) |
+| `--eval-test` | evaluate the best operator on the held-out test set | off |
+| `--mutation` | add `Swap_Mutation` to the inner MOEA | off |
+| `--dry-run` | validate server + config, write them, exit without spending GPU | off |
+| `--stationary-frame` | normalize with the reference panel only (HV fixed); default is the GE frame | off |
+
+Before a long run, validate everything cheaply:
+
+```bash
+python -m mohh.llamea.run --model <model> --base-url <url> --dry-run
+```
+
+### B. Cluster (ixachi) — commands in order
+
+Same Modules + local-conda methodology as the GE stage. Everything lives in
+LUSTRE; `$HOME` is wiped and compute nodes cannot see it.
+
+```bash
+# 0. On the LOGIN node: get the code where the compute nodes can see it.
+cd /LUSTRE/$USER
+git clone -b cluster https://github.com/Jabonsote/mohh.git
+cd mohh
+git pull origin cluster
+
+# 1. Create the environment ONCE, on the login node (has internet). No admin
+#    rights needed: it all goes into ./.conda-env (visible from compute nodes).
+module load python/miniforge
+WITH_VLLM=1 bash slurm/ixachi-setup-env.sh
+#    (omit WITH_VLLM=1 on an account that only SUBMITS searches to a vLLM that
+#     someone else runs; then just `bash slurm/ixachi-setup-env.sh`)
+
+# 2. Download the model ONCE, on the login node, into the PERSISTENT root
+#    (LUSTRE/$SCRATCH, never $HOME). Compute nodes usually have no internet.
+MODEL=Qwen/Qwen2.5-Coder-7B-Instruct bash slurm/llamea-download-model.slrm
+python scripts/mohh_models.py root     # show the persistent root
+python scripts/mohh_models.py list     # state and size of downloaded models
+
+# 3. Start the vLLM server on the GPU partition (long-lived job).
+MODEL=Qwen/Qwen2.5-Coder-7B-Instruct sbatch slurm/llamea-vllm-server.slrm
+squeue --user=$USER
+tail -f llamea-vllm-*.out              # wait for "Uvicorn running on http://0.0.0.0:8000"
+
+# 4. Submit the search, pointed at the server, and wait for it to load.
+MODEL=Qwen/Qwen2.5-Coder-7B-Instruct \
+BUDGET=1000 TRAIN_INSTANCES=8 EVAL_TEST=1 \
+REPEAT_PENALTY=0.5 STALL_TIMEOUT=3600 \
+LLAMEA_SERVER_JOBID=<jobid-vllm> \
+sbatch slurm/llamea-generate.slrm      # or LLAMEA_SERVER_HOST=<node>
+
+# 5. Monitor the two jobs and read the artifacts.
+squeue --user=$USER
+tail -f llamea-generate-*.out          # job stdout
+cat llamea-generate-*.err              # job stderr (empty = clean)
+tail -f results/searches/<name>/llamea.log     # per-generation log
+tail -f results/searches/<name>/error.log      # warnings/tracebacks only
+cat results/searches/<name>/progress.txt       # one line: best-so-far
+```
+
+Both jobs at once, chained so the search starts only after the server is up:
+
+```bash
+MODEL=Qwen/Qwen2.5-Coder-7B-Instruct BUDGET=1000 EVAL_TEST=1 \
+  bash slurm/llamea-full-chain.sh
+```
+
+Extra environment knobs for `slurm/llamea-generate.slrm`: `SOLVER`,
+`MO_GENERATIONS`, `MO_POPULATION_SIZE`, `TEMPERATURE`, `MUTATION=1`, `COMMA=1`,
+`REFINE_ONLY=1`, `NO_SAVE_FRONTS=1`, `MAX_TOKENS`, `CATEGORY`, `EXPERIMENT_NAME`,
+`SEED`.
+
+### C. Compare discovered operators against the classics
+
+The HV of a single search is **not** comparable across runs (its frame contains
+that run's candidates), and one seed cannot separate signal from inner-MOEA
+noise. This harness re-evaluates every operator under **one shared frame**, with
+**paired seeds** and **N independent repetitions**:
+
+```bash
+python scripts/compare_operators.py \
+    --operator discovered=results/examples/llamea_found_operators/qwen25coder7b_moead_b100_ge.py \
+    --operator ox=classic:ox --operator pbx=classic:pbx --operator pmx=classic:pmx \
+    --operator cx=classic:cx --operator erx=classic:erx \
+    --split test --repeats 11 --name b100_vs_clasicos --save-fronts
+```
+
+Writes `results/evaluations/<name>/report.md` and `evaluation.json` with the
+paired Wilcoxon test, effect size (`dz`), **rank stability** across repetitions
+and the **minimum detectable difference** (how much of the ranking is noise).
+
+### D. Replicate the search (not just the operator)
+
+The best of ~1000 candidates of one run is a max-biased estimate. To make a
+claim about the *procedure*, run R independent searches and report the
+distribution of the best-per-run:
+
+```bash
+for i in 0 1 2 3 4; do
+  MODEL=Qwen/Qwen2.5-Coder-7B-Instruct BASE_URL=http://<node>:8000/v1 NO_DOWNLOAD=1 \
+  SEED=$((1000+i)) NAME=proc_r$i CATEGORY=searches BUDGET=1000 \
+    ./scripts/llamea_search.sh
+done
+python scripts/collect_replicates.py 'results/searches/proc_r*' \
+    --out results/multirun/proc_analysis
+```
+
+`summary.md` gives the mean/median/sd of the best-per-run (the honest number),
+and `compare_args.txt` feeds those operators into `compare_operators.py`.
+
+### Output artifacts (per search)
+
+Everything lands under `results/<category>/<name>/`:
+
+| File / dir | Content |
+|---|---|
+| `run.json` | full effective config (incl. vLLM version and model revision) |
+| `llamea_best_operator.py`, `llamea_best_info.json` | best operator and its scores |
+| `generation_summary.jsonl` | per generation: seed, tokens, time, validity, best-so-far |
+| `individuals.jsonl` | one record per candidate (name, fitness, code sha1, seed) |
+| `prompts/` | the exact prompt of each generation + per-turn token counts |
+| `fronts/` | raw Pareto fronts per candidate (evidence; `--no-save-fronts` to skip) |
+| `checkpoint.json`, `best_so_far.py` | durable state — a crash never loses the best operator |
+| `seeds.json` | every seed used and the policy |
+| `tokens.json`, `metrics.json` | tokens, inference time, GPU seconds (vLLM `/metrics`), energy |
+| `progress.txt`, `llamea.log`, `error.log` | monitoring + traceback-only log |
+| `llamea_logs/exp-*/` | LLaMEA's own logs (`report.md`, `evolution.png`, `code/`) |
+
+### Persistent model weights
+
+`scripts/mohh_models.py` keeps weights in `$MOHH_MODELS_DIR`, else
+`$SCRATCH/$USER/mohh-models`, else `$LUSTRE/$USER/mohh-models` — a disk the
+compute nodes can see, never `$HOME`. Subcommands: `root`, `list`, `path`,
+`download`, `verify [--hash] [--load-check]`, `manifest`, `smoke`, `remove`.
+
+```bash
+python scripts/mohh_models.py root
+python scripts/mohh_models.py download Qwen/Qwen2.5-Coder-7B-Instruct
+python scripts/mohh_models.py verify Qwen/Qwen2.5-Coder-7B-Instruct --load-check
 ```
 
 ---

@@ -220,19 +220,51 @@ def test_logger_writes_under_results_dir(tmp_path):
 
     ResultsExperimentLogger.results_dir = str(tmp_path / "llamea_logs")
     ResultsExperimentLogger.verbose = False
+    ResultsExperimentLogger.seed = 7
+    ResultsExperimentLogger.solver = "MOEAD"
+    ResultsExperimentLogger.mo_generations = 2
+    ResultsExperimentLogger.mo_population_size = 6
+    ResultsExperimentLogger.mutation = False
     logger = ResultsExperimentLogger("demo")
 
     assert os.path.commonpath([logger.dirname, str(tmp_path)]) == str(tmp_path)
     assert os.path.isdir(os.path.join(logger.dirname, "code"))
     assert os.path.isdir(os.path.join(logger.dirname, "configspace"))
 
-    logger.log_population([_FakeIndividual(1, 0.4, name="a")])
-    logger.log_population([_FakeIndividual(2, 0.8, name="b")])
+    first = _FakeIndividual(1, 0.4, name="a")
+    second = _FakeIndividual(2, 0.8, name="b")
+    second.code = "import numpy as np\n\ndef crossover(x, y):\n    return y\n"
+    logger.log_population([first])
+    logger.log_population([second])
 
     with open(os.path.join(logger.dirname, "generation_summary.jsonl")) as file:
         summaries = [json.loads(line) for line in file if line.strip()]
     assert [row["generation"] for row in summaries] == [1, 2]
     assert summaries[1]["best_fitness"] == pytest.approx(0.8)
+    # Trazabilidad: la semilla y los acumulados van en cada generacion.
+    assert summaries[1]["seed"] == 7
+    assert summaries[1]["solver"] == "MOEAD"
+    assert summaries[1]["distinct_operators_so_far"] == 2
+    assert summaries[1]["evaluated_so_far"] == 2
+    assert summaries[1]["best_so_far"] == pytest.approx(0.8)
+
+    # Un registro por individuo, con hash del codigo y semilla.
+    with open(os.path.join(logger.dirname, "individuals.jsonl")) as file:
+        individuals = [json.loads(line) for line in file if line.strip()]
+    assert [row["name"] for row in individuals] == ["a", "b"]
+    assert individuals[0]["seed"] == 7
+    assert len(individuals[0]["code_sha1"]) == 12
+    assert individuals[0]["code_sha1"] != individuals[1]["code_sha1"]
+
+    # Checkpoint durable: progreso + mejor operador hasta ahora.
+    with open(os.path.join(logger.dirname, "checkpoint.json")) as file:
+        checkpoint = json.load(file)
+    assert checkpoint["generation"] == 2
+    assert checkpoint["counters"]["distinct_operators"] == 2
+    assert open(os.path.join(logger.dirname, "best_so_far.py")).read() == second.code
+
+    # Progreso en un archivo de una linea (para `tail -f` en el cluster).
+    assert "gen 2" in open(os.path.join(logger.dirname, "progress.txt")).read()
 
     with open(os.path.join(logger.dirname, "log.jsonl")) as file:
         assert sum(1 for line in file if line.strip()) == 2
@@ -326,12 +358,20 @@ def test_vllm_llm_records_usage():
         choices = [_Choice()]
 
     llm._last_message_chars = 40
-    llm._record_usage(_Response())
-    llm._record_usage(_Response())
+    llm._record_usage(_Response(), elapsed=1.5)
+    llm._record_usage(_Response(), elapsed=0.5)
     snapshot = llm.usage_snapshot()
-    assert snapshot == {"requests": 2, "prompt_tokens": 20,
-                        "completion_tokens": 10, "total_tokens": 30}
+    assert snapshot["requests"] == 2
+    assert snapshot["prompt_tokens"] == 20
+    assert snapshot["completion_tokens"] == 10
+    assert snapshot["total_tokens"] == 30
+    # Instrumentacion de costo: latencia acumulada y peticiones fallidas.
+    assert snapshot["inference_seconds"] == 2.0
+    assert snapshot["failed_requests"] == 0
     assert len(llm.usage_history) == 2
+    assert llm.usage_history[0]["seconds"] == 1.5
+    assert llm.usage_history[1]["seconds"] == 0.5
+    assert llm.usage_history[1]["completion_tokens"] == 5
 
 
 def test_vllm_llm_estimates_usage_when_missing():

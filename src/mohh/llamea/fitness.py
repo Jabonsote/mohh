@@ -15,12 +15,15 @@ evaluacion con `max_workers > 1`; cada llamada re-inicializa `Params` de forma
 idempotente, de modo que funciona tambien en procesos hijos.
 """
 
+import hashlib
+import json
 import linecache
 import os
 import signal
 import tempfile
 import threading
 import traceback
+from datetime import datetime
 
 import numpy as np
 
@@ -557,7 +560,7 @@ class OperatorEvaluator:
                  seed=42, model_name="MOEAD", mutation=False,
                  instance_timeout=INSTANCE_TIMEOUT, normalize=True,
                  bounds=None, reference_operators=None, archive=None,
-                 frame="ge"):
+                 frame="ge", fronts_dir=None, repeat_penalty=0.5):
         self.instance_paths = [str(p) for p in instance_paths]
         self.mo_generations = mo_generations
         self.mo_population_size = mo_population_size
@@ -570,6 +573,17 @@ class OperatorEvaluator:
         self.reference_operators = reference_operators
         self.archive = archive if archive is not None else HVArchive()
         self.frame = frame if normalize else "none"
+        # Presion de diversidad: un candidato identico a uno ya evaluado recibe
+        # su HV multiplicado por `repeat_penalty` **solo para el ranking** (el HV
+        # crudo se conserva para el reporte). `1.0` desactiva la penalizacion.
+        self.repeat_penalty = float(repeat_penalty)
+        self._first_seen = {}            # clave -> generacion de la primera vez
+        self._duplicates = 0             # repeticiones exactas evaluadas
+        # Frentes crudos por candidato (evidencia de la evaluacion). Si es None
+        # no se guarda nada (`--no-save-fronts`).
+        self.fronts_dir = fronts_dir
+        if fronts_dir:
+            os.makedirs(fronts_dir, exist_ok=True)
         self._cache = {}
         self._instances = None
         self._init_dir = tempfile.mkdtemp(prefix="llamea_init_")
@@ -829,6 +843,14 @@ class OperatorEvaluator:
         """HV por candidato en el marco final: `{codigo: (score, por_instancia)}`."""
         return {key: (score, values) for key, (score, values, _) in self._scores.items()}
 
+    def duplicate_stats(self):
+        """Estadisticas de diversidad: codigos distintos y repeticiones exactas."""
+        return {
+            "distinct_evaluated": len(self._cache),
+            "duplicate_evaluations": self._duplicates,
+            "repeat_penalty": self.repeat_penalty,
+        }
+
     def reference_scores(self):
         """HV de cada operador de referencia en el marco final (tabla comparable).
 
@@ -889,6 +911,7 @@ class OperatorEvaluator:
         if entry is None:
             entry = self._evaluate_code(solution, compute_hypervolume)
             self._cache[key] = entry
+            self._save_candidate_fronts(key, entry, solution)
 
         if entry["error"] is not None:
             message = entry["error"]
@@ -927,7 +950,29 @@ class OperatorEvaluator:
             solution.set_scores(FALLBACK_SCORE, reason, ValueError(reason))
             return solution
 
-        rank = self.archive.add(score, novelty, key=key)
+        # Presion de diversidad (no de prompt): si el codigo ya se habia
+        # evaluado, se penaliza **solo el ranking** (el HV crudo se conserva
+        # para el reporte) y el feedback lo dice de forma accionable. Es la
+        # respuesta directa a la evidencia del anclaje: en la corrida b200 el
+        # mismo operador se repitio 108 veces pese a ir por debajo de PBX.
+        generation = getattr(solution, "generation", None)
+        if generation is not None and key not in self._first_seen:
+            self._first_seen[key] = generation
+        duplicate_note = ""
+        ranking_score = score
+        if cached_hit and self.repeat_penalty < 1.0 and score is not None:
+            self._duplicates += 1
+            ranking_score = score * self.repeat_penalty
+            first = self._first_seen.get(key)
+            where = f" (first proposed at generation {first})" if first is not None else ""
+            duplicate_note = (
+                f" DUPLICATE: this exact code was already evaluated{where}; its "
+                f"ranking score is penalized by x{self.repeat_penalty:.2f} "
+                f"({score:.6f} -> {ranking_score:.6f}). Repeating an operator does "
+                f"not improve the search: propose a STRUCTURALLY DIFFERENT crossover."
+            )
+
+        rank = self.archive.add(ranking_score, novelty, key=key)
         total = len(self.archive)
         best = self.archive.best()
         reuse = " (reused cached evaluation)" if cached_hit else ""
@@ -969,14 +1014,14 @@ class OperatorEvaluator:
             f"Ranking: this crossover is #{rank} of {total} evaluated so far by "
             f"mean hypervolume (1 = best; higher is better; HV ties are broken by "
             f"recombination novelty). "
-            f"Mean hypervolume ({frame_note}): {score:.6f}. "
+            f"Mean hypervolume ({frame_note}): {ranking_score:.6f}. "
             f"Best so far: {best:.6f}.{baseline_note} "
             f"Recombination novelty: {novelty:.2f} (0 = copies a parent, 1 = child "
             f"unlike both parents). "
             f"Per-instance HV: {[None if hv is None else round(hv, 6) for hv in per_instance]}."
-            f"{degenerate_note}{reuse}"
+            f"{degenerate_note}{duplicate_note}{reuse}"
         )
-        solution.set_scores(score, feedback)
+        solution.set_scores(ranking_score, feedback)
         return solution
 
     def _evaluate_code(self, solution, compute_hypervolume):
@@ -1036,6 +1081,74 @@ class OperatorEvaluator:
                 "score": float(np.mean(fronts)), "error": None,
                 "exception": None, "novelty": novelty}
 
+    # -- artefactos ------------------------------------------------------- #
+    def _save_candidate_fronts(self, key, entry, solution):
+        """Guarda los frentes crudos del candidato en `fronts/`.
+
+        Escribe `candidate-<sha1>.npz` (un arreglo por instancia) y agrega una
+        linea a `fronts/manifest.jsonl` con la generacion, el candidato y el
+        archivo. Es la evidencia cruda de la evaluacion: permite recalcular el
+        HV en cualquier marco sin volver a correr el MOEA interno.
+        """
+        if not self.fronts_dir or entry.get("fronts") is None:
+            return
+        fronts = entry["fronts"]
+        arrays = {
+            f"instance_{index}": np.asarray(front, dtype=float)
+            for index, front in enumerate(fronts)
+            if front is not None and len(front)
+        }
+        if not arrays:
+            return
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+        filename = f"candidate-{digest}.npz"
+        np.savez_compressed(os.path.join(self.fronts_dir, filename), **arrays)
+        record = {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "key_sha1": digest,
+            "generation": getattr(solution, "generation", None),
+            "name": getattr(solution, "name", None),
+            "instances": [os.path.basename(path) for path in self.instance_paths],
+            "saved_instances": sorted(arrays),
+            "file": filename,
+            "score_at_evaluation": entry.get("score"),
+            "novelty": entry.get("novelty"),
+        }
+        with open(os.path.join(self.fronts_dir, "manifest.jsonl"), "a") as handle:
+            handle.write(json.dumps(record) + "\n")
+
+    def save_frame(self, path=None):
+        """Guarda el marco de normalizacion final por instancia.
+
+        `frame.npz` con `vmin`/`vmax` de cada instancia puntuable, mas un JSON
+        legible (`frame.json`). Es el marco con el que se midieron los HV que
+        reporta `llamea_best_info.json`.
+        """
+        if self._frame_points is None:
+            self.ensure_reference_bounds()
+        if not self._frame_points:
+            return None
+        path = path or os.path.join(self.fronts_dir or ".", "frame.npz")
+        arrays = {}
+        readable = {}
+        for index, frame in enumerate(self._frame_points):
+            name = os.path.basename(self.instance_paths[index])
+            if frame is None or len(frame) == 0:
+                readable[name] = None
+                continue
+            arrays[f"vmin_{index}"] = frame.min(axis=0)
+            arrays[f"vmax_{index}"] = frame.max(axis=0)
+            readable[name] = {
+                "vmin": frame.min(axis=0).tolist(),
+                "vmax": frame.max(axis=0).tolist(),
+            }
+        if not arrays:
+            return None
+        np.savez_compressed(path, **arrays)
+        with open(os.path.splitext(path)[0] + ".json", "w") as handle:
+            json.dump({"frame": self.frame, "instances": readable}, handle, indent=2)
+        return path
+
     # -- utilidades ------------------------------------------------------- #
     def __repr__(self):  # pragma: no cover - solo para logs
         return (f"OperatorEvaluator(n_instances={len(self.instance_paths)}, "
@@ -1047,7 +1160,7 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
                     seed=42, model_name="MOEAD", mutation=False,
                     instance_timeout=INSTANCE_TIMEOUT, normalize=True,
                     bounds=None, reference_operators=None, archive=None,
-                    frame="ge"):
+                    frame="ge", fronts_dir=None, repeat_penalty=0.5):
     """Construye la funcion de fitness que consume LLaMEA.
 
     @param train_instances: lista de rutas de instancias (train o test).
@@ -1070,6 +1183,8 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
         operadores de referencia y todos los candidatos ya evaluados, como la
         evaluacion gramatical; `"stationary"` usa solo los operadores de
         referencia (HV fijos, escala abierta).
+    @param fronts_dir: si se indica, guarda los frentes crudos de cada candidato
+        (`candidate-*.npz` + `manifest.jsonl`) en ese directorio.
     """
     return OperatorEvaluator(
         train_instances,
@@ -1084,4 +1199,6 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
         reference_operators=reference_operators,
         archive=archive,
         frame=frame,
+        fronts_dir=fronts_dir,
+        repeat_penalty=repeat_penalty,
     )

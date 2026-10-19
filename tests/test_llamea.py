@@ -386,13 +386,28 @@ def test_evaluator_is_picklable_for_parallel_workers():
 
 
 def test_evaluator_caches_repeated_code():
-    """Un mismo codigo no se re-evalua: clave para corridas largas."""
+    """Un mismo codigo no se re-evalua; el ranking penaliza la repeticion."""
     fitness = build_evaluator([INSTANCE], mo_generations=2, mo_population_size=6, seed=42)
     first = fitness(_FakeSolution(EXAMPLE_CODE))
     second = fitness(_FakeSolution(EXAMPLE_CODE))
-    assert first.fitness == second.fitness > 0
+    # El HV crudo se cachea y no cambia...
+    assert first.fitness == float(fitness._scores[EXAMPLE_CODE.strip()][0]) > 0
+    # ...pero la repeticion exacta se penaliza para el ranking (presion de
+    # diversidad) y el feedback lo dice.
+    assert second.fitness == pytest.approx(first.fitness * fitness.repeat_penalty)
+    assert "DUPLICATE" in second.feedback
     assert "reused" in second.feedback
     assert len(fitness._cache) == 1
+    assert fitness.duplicate_stats()["duplicate_evaluations"] == 1
+
+
+def test_repeat_penalty_can_be_disabled():
+    fitness = build_evaluator([INSTANCE], mo_generations=2, mo_population_size=6,
+                              seed=42, repeat_penalty=1.0)
+    first = fitness(_FakeSolution(EXAMPLE_CODE))
+    second = fitness(_FakeSolution(EXAMPLE_CODE))
+    assert first.fitness == second.fitness > 0
+    assert "DUPLICATE" not in second.feedback
 
 
 def test_recombination_novelty_flags_parent_copies():

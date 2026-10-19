@@ -22,17 +22,22 @@
 # Variables:
 #   MODEL (Qwen/Qwen2.5-0.5B-Instruct)  modelo servido
 #   BASE_URL (http://localhost:8001/v1) endpoint OpenAI-compatible
-#   BUDGET (100)                        generaciones
+#   BUDGET (1000)                       generaciones
 #   SOLVER (MOEAD)                       MOEAD | NSGAII | SMSEMOA
 #   TRAIN_INSTANCES (8)                  instancias de train (o "all")
 #   MO_GENERATIONS (30)                  generaciones del MOEA interno
 #   MO_POPULATION_SIZE (30)              poblacion del MOEA interno
 #   TEMPERATURE (0.2)                    temperatura del LLM
 #   MAX_TOKENS (vacío)                   máximo de tokens de salida por petición
+#   REPEAT_PENALTY (0.5)                 presión de diversidad: castigo al
+#                                        ranking por repetir código (1.0 = off)
+#   STALL_TIMEOUT (0)                    segundos sin generación nueva antes de
+#                                        abortar (watchdog; 0 = off)
 #   CATEGORY (searches)                  subcarpeta de results/
 #   NAME                                 nombre del experimento (default: auto)
 #   PYTHON                               interprete (default: python)
 #   NO_DOWNLOAD / WAIT_SERVER / EVAL_TEST / REFINE_ONLY / COMMA / MUTATION
+#   NO_SAVE_FRONTS                       no guardar los frentes por candidato
 #   EXTRA                                argumentos extra para mohh.llamea.run
 #                                        (p. ej. EXTRA=--stationary-frame) 
 #
@@ -43,7 +48,7 @@ set -euo pipefail
 
 MODEL="${MODEL:-Qwen/Qwen2.5-0.5B-Instruct}"
 BASE_URL="${BASE_URL:-http://localhost:8001/v1}"
-BUDGET="${BUDGET:-100}"
+BUDGET="${BUDGET:-1000}"
 SOLVER="${SOLVER:-MOEAD}"
 TRAIN_INSTANCES="${TRAIN_INSTANCES:-8}"
 MO_GENERATIONS="${MO_GENERATIONS:-30}"
@@ -64,6 +69,8 @@ args=(
   --mo-generations "$MO_GENERATIONS"
   --mo-population-size "$MO_POPULATION_SIZE"
   --temperature "$TEMPERATURE"
+  --repeat-penalty "${REPEAT_PENALTY:-0.5}"
+  --stall-timeout "${STALL_TIMEOUT:-0}"
   --results-dir "results/$CATEGORY"
   --experiment-name "$NAME"
 )
@@ -74,6 +81,7 @@ args=(
 [[ "${REFINE_ONLY:-0}" == "1" ]] && args+=(--refine-only)
 [[ "${COMMA:-0}" == "1" ]] && args+=(--comma)
 [[ "${MUTATION:-0}" == "1" ]] && args+=(--mutation)
+[[ "${NO_SAVE_FRONTS:-0}" == "1" ]] && args+=(--no-save-fronts)
 [[ "${QUIET:-0}" == "1" ]] && args+=(--quiet)
 [[ -n "${BOUNDS_FILE:-}" ]] && args+=(--bounds-file "$BOUNDS_FILE")
 [[ -n "${MAX_TOKENS:-}" ]] && args+=(--max-tokens "$MAX_TOKENS")

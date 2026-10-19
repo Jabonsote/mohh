@@ -5,7 +5,12 @@
 # Uso (UNA sola vez, desde el nodo de login con internet, NO con sbatch):
 #
 #   cd /LUSTRE/<miusuario>/MOOHH-R
-#   bash slurm/ixachi-setup-env.sh
+#   bash slurm/ixachi-setup-env.sh              # busqueda con LLM (LLaMEA)
+#   WITH_VLLM=1 bash slurm/ixachi-setup-env.sh  # ademas servir modelos (GPU)
+#
+# No hace falta ningun permiso de administrador: todo (modulo + conda + pip)
+# queda en el prefijo local .conda-env/ dentro de LUSTRE, visible desde el
+# login y desde los nodos de computo. Igual que el ambiente de la etapa GE.
 #
 # Lo que hace:
 #   1. Carga el modulo python/miniforge (conda/forge con python 3.12).
@@ -51,7 +56,10 @@ pip install -e .
 pip install -e ".[llamea]"
 
 # Servidor de inferencia en GPU (vLLM): pesado, solo si se va a usar mohh.llamea
-# en el cluster y este env va a servir modelos. La particion gpu lo ejecuta.
+# en el cluster y este env va a servir modelos desde la particion gpu.
+#   WITH_VLLM=1 bash slurm/ixachi-setup-env.sh
+# vLLM trae su propio torch CUDA; el env de busqueda (sin WITH_VLLM) no lo
+# necesita, asi el login y los nodos ixachi no cargan 2-3 GB de CUDA de mas.
 if [ "${WITH_VLLM:-0}" = "1" ]; then
     pip install -e ".[vllm]"
 fi
@@ -76,9 +84,19 @@ mohh-evaluate -h >/dev/null && echo "mohh-evaluate OK"
 python -c "import mohh.llamea; print('mohh.llamea OK')" \
     && mohh-llamea -h >/dev/null && echo "mohh-llamea OK" \
     || echo "AVISO: mohh.llamea no disponible (instala el extra llamea)."
+python -c "import llamea, openai, huggingface_hub; print('llamea/openai/hf OK')" \
+    || echo "AVISO: faltan dependencias del extra llamea."
 
 if [ "${WITH_VLLM:-0}" = "1" ]; then
-    python -c "import vllm; print('vllm OK')" || echo "AVISO: vllm no importable."
+    python -c "import vllm; print('vllm OK', vllm.__version__)" \
+        || echo "AVISO: vllm no importable."
+fi
+
+# 6. Raiz persistente de pesos (no $HOME) y recordatorio del siguiente paso.
+if [ "${WITH_VLLM:-0}" = "1" ]; then
+    python scripts/mohh_models.py root || true
+    echo "Descarga el modelo en el login (con internet):"
+    echo "  MODEL=<org/modelo> bash slurm/llamea-download-model.slrm"
 fi
 
 echo "Ambiente listo. Envia trabajos con: sbatch slurm/mohh-generate.slrm"

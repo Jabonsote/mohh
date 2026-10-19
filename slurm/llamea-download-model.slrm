@@ -1,0 +1,65 @@
+#!/bin/bash
+#
+# Descarga/verifica los pesos de un modelo en la raiz PERSISTENTE
+# (LUSTRE/$SCRATCH), no en $HOME: el ambiente del cluster limpia el home y los
+# nodos de computo no lo ven.
+#
+# USO RECOMENDADO (nodo de login, que si tiene internet):
+#
+#   cd /LUSTRE/<miusuario>/MOOHH-R
+#   module load python/miniforge
+#   eval "$(conda shell.bash hook)" && conda activate .conda-env
+#   MODEL=Qwen/Qwen2.5-Coder-7B-Instruct bash slurm/llamea-download-model.slrm
+#
+# Tambien se puede enviar con sbatch *si* la particion tiene salida a internet:
+#
+#   MODEL=Qwen/Qwen2.5-Coder-7B-Instruct sbatch slurm/llamea-download-model.slrm
+#
+# Opciones por entorno:
+#   MODEL       (obligatorio) id de HuggingFace o ruta local
+#   REVISION    revision/branch/tag del repo (default: main)
+#   LOAD_CHECK  1 = ademas comprobar que tokenizer/modelo cargan (lento, RAM)
+#   MOHH_MODELS_DIR  raiz alternativa (default: $SCRATCH/$LUSTRE/$HOME)
+#   WITH_VLLM   1 = solo si este env sirve modelos; no hace falta para bajar
+#
+#SBATCH -J llamea-models
+#SBATCH -p ixachi
+#SBATCH -N 1
+#SBATCH -c 8
+#SBATCH --time=12:00:00
+#SBATCH -o llamea-models-%j.out
+#SBATCH -e llamea-models-%j.err
+
+set -euo pipefail
+
+# Con `bash` en el login no hay $SLURM_SUBMIT_DIR: se usa el repo del script.
+cd "${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+: "${MODEL:?Define MODEL, ej: MODEL=Qwen/Qwen2.5-Coder-7B-Instruct bash slurm/llamea-download-model.slrm}"
+
+echo "Nodo:   ${SLURM_JOB_NODELIST:-login}"
+echo "Modelo: $MODEL"
+
+module load python/miniforge
+eval "$(conda shell.bash hook)"
+conda activate "$PWD/.conda-env"
+
+# Raiz persistente y espacio disponible antes de bajar decenas de GB.
+python scripts/mohh_models.py root
+df -h "$(python scripts/mohh_models.py root)" || true
+
+ARGS=(download "$MODEL")
+[ -n "${REVISION:-}" ] && ARGS+=(--revision "$REVISION")
+
+python scripts/mohh_models.py "${ARGS[@]}"
+
+VERIFY_ARGS=(verify "$MODEL")
+if [ "${LOAD_CHECK:-0}" = "1" ]; then
+    VERIFY_ARGS+=(--load-check)
+fi
+python scripts/mohh_models.py "${VERIFY_ARGS[@]}"
+
+echo
+echo "Listo. El job vLLM ya puede usar este modelo sin volver a descargarlo."
+echo "Siguiente paso (login):"
+echo "   MODEL=$MODEL sbatch slurm/llamea-vllm-server.slrm"

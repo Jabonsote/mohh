@@ -23,6 +23,16 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 MODEL="${MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 
+# 0. Pesos en la raiz persistente: se bajan AQUI (login, con internet) una sola
+#    vez; los nodos de computo suelen no tener salida a internet. Si el modelo
+#    ya esta verificado, esta linea no hace nada.
+if python scripts/mohh_models.py verify "$MODEL" >/dev/null 2>&1; then
+    echo "Modelo ya disponible en la raiz persistente: $MODEL"
+else
+    echo "Descargando $MODEL en la raiz persistente (login con internet) ..."
+    python scripts/mohh_models.py download "$MODEL"
+fi
+
 echo "Enviando servidor vLLM para $MODEL ..."
 SERVER_JOB="$(MODEL="$MODEL" sbatch --parsable --export=ALL slurm/llamea-vllm-server.slrm)"
 echo "  job vLLM: $SERVER_JOB"

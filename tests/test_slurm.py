@@ -186,3 +186,94 @@ def test_generate_supports_parallel_model_jobs():
     with open(cli_path) as f:
         cli_src = f.read()
     assert "--experiment-path" in cli_src
+
+
+# --------------------------------------------------------------------------- #
+# Integracion LLaMEA en el cluster (misma metodologia que la etapa GE)
+# --------------------------------------------------------------------------- #
+
+LLAMEA_SLRM = ["llamea-vllm-server.slrm", "llamea-generate.slrm",
+               "llamea-download-model.slrm"]
+
+
+@pytest.mark.parametrize("script", LLAMEA_SLRM + ["llamea-full-chain.sh"])
+def test_llamea_bash_syntax_ok(script):
+    result = subprocess.run(
+        ["bash", "-n", os.path.join(SLURM_DIR, script)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("script", LLAMEA_SLRM)
+def test_llamea_slurm_required_directives(script):
+    content = _read(script)
+    for pattern in (
+        r"#SBATCH\s+-p\s+(ixachi|gpu)",
+        r"#SBATCH\s+-J\s+\S+",
+        r"#SBATCH\s+-o\s+\S+",
+        r"#SBATCH\s+-e\s+\S+",
+        r"#SBATCH\s+-N\s+1",
+        r"#SBATCH\s+-c\s+\d+",
+        r"#SBATCH\s+--time=\S+",
+    ):
+        assert re.search(pattern, content), f"{script}: missing {pattern}"
+    # Como los .slrm de GE: logs en el dir de trabajo, sin subcarpetas.
+    for flag in ("-o", "-e"):
+        match = re.search(rf"#SBATCH\s+{flag}\s+(\S+)", content)
+        assert match and "/" not in match.group(1), f"{script}: {flag} usa subcarpeta"
+
+
+@pytest.mark.parametrize("script", LLAMEA_SLRM)
+def test_llamea_slurm_loads_cluster_env(script):
+    """Modules + conda env local, igual que la etapa GE (sin permisos de root)."""
+    content = _read(script)
+    assert "module load python/miniforge" in content
+    assert "conda shell.bash hook" in content
+    assert 'conda activate "$PWD/.conda-env"' in content or \
+           'conda activate "$SLURM_SUBMIT_DIR/.conda-env"' in content
+    assert ".venv" not in content
+
+
+def test_llamea_generate_defaults_to_1000_generations():
+    content = _read("llamea-generate.slrm")
+    assert '--budget "${BUDGET:-1000}"' in content
+    assert "--repeat-penalty" in content
+    assert "--stall-timeout" in content
+
+
+def test_llamea_vllm_server_samples_gpu_and_uses_persistent_models():
+    content = _read("llamea-vllm-server.slrm")
+    assert "nvidia-smi --query-gpu" in content
+    assert "GPU_SAMPLE_SECONDS" in content
+    assert "GPU_CSV" in content
+    # Pesos en la raiz persistente via el CLI, no en el cache de $HOME.
+    assert "mohh_models.py" in content
+    assert "ensure_model.py" not in content
+
+
+def test_llamea_download_model_job_uses_cli():
+    content = _read("llamea-download-model.slrm")
+    assert "mohh_models.py" in content
+    assert "download" in content
+    # Debe poder correr en el login (sin $SLURM_SUBMIT_DIR).
+    assert "SLURM_SUBMIT_DIR:-" in content
+
+
+def test_llamea_full_chain_exports_env_and_chains_after_server():
+    content = _read("llamea-full-chain.sh")
+    assert "--export=ALL" in content
+    assert "after:" in content
+    # Pre-descarga en el login (los nodos de computo no tienen internet).
+    assert "mohh_models.py" in content
+
+
+def test_llamea_search_script_defaults_to_1000_generations():
+    path = os.path.join(os.path.dirname(__file__), "..", "scripts", "llamea_search.sh")
+    with open(path) as handle:
+        content = handle.read()
+    assert 'BUDGET="${BUDGET:-1000}"' in content
+    assert "--repeat-penalty" in content
+
