@@ -18,10 +18,33 @@ dependencies = [
     "tqdm>=4.67",
 ]
 
+[project.optional-dependencies]
+# Busqueda con LLM (LLaMEA) en lugar de gramatica. Instalar con:
+#   pip install -e ".[llamea]"
+llamea = [
+    "llamea==1.4.0",
+    "openai>=1.99.1,<2",
+    "huggingface_hub>=0.24",
+]
+# Servidor de inferencia en GPU (solo en la maquina/nodo con GPU). Pesado.
+vllm = [
+    "vllm>=0.6.3",
+]
+# Servidor de desarrollo local sin GPU/vLLM (transformers + fastapi).
+local-server = [
+    "transformers>=4.49",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+dev = [
+    "pytest>=7.4",
+]
+
 [project.scripts]
 mohh-generate = "mohh.cli:generate"
 mohh-evaluate = "mohh.cli:evaluate"
 mohh-run = "mohh.cli:run_full"
+mohh-llamea = "mohh.llamea.run:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mohh"]

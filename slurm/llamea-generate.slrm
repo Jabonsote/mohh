@@ -1,15 +1,23 @@
 #!/bin/bash
 #
-# Busqueda LLaMEa de operadores de variacion (mQAP) en ixachi.
+# Busqueda LLaMEA de operadores de variacion (mQAP) en ixachi.
 #
 # Requiere un servidor vLLM activo (ver slurm/llamea-vllm-server.slrm).
-# El nodo del servidor se pasa por entorno (SLURM_JOB_NODELIST del job vLLM):
+# El nodo del servidor se pasa por entorno, ya sea como host directo o por
+# el JobID del job vLLM (se autodetecta el nodo con squeue):
 #
 #   LLAMEA_SERVER_HOST=<nodo> sbatch slurm/llamea-generate.slrm
+#   LLAMEA_SERVER_JOBID=<jobid-vllm> sbatch slurm/llamea-generate.slrm
 #
 # Un unico algoritmo por generacion por defecto ((1+1)-EA). Para mas por
-# generacion (poblacional), usar N_PARENTS/N_OFFSPRING, ej:
-#   N_PARENTS=4 N_OFFSPRING=4 sbatch slurm/llamea-generate.slrm
+# generacion (poblacional): N_PARENTS=4 N_OFFSPRING=4 ...
+#
+# Opciones por entorno: MODEL, BUDGET, TRAIN_INSTANCES, TEST_INSTANCES,
+# SOLVER, MO_GENERATIONS, MO_POPULATION_SIZE, SEED, EXPERIMENT_NAME,
+# EVAL_TEST=1, MUTATION=1, TEMPERATURE, MAX_WORKERS, COMMA=1, REFINE_ONLY=1,
+# INSTANCE_TIMEOUT, CATEGORY (searches|tests|prompts|examples), NO_NORMALIZE=1,
+# SAVE_BOUNDS (nombre del json), BOUNDS_FILE, REFERENCE_OPERATORS, MAX_TOKENS,
+# NO_EXAMPLE=1, SKELETON_EXAMPLE=1 (mutuamente excluyentes).
 #
 #SBATCH -J llamea-generate
 #SBATCH -p ixachi
@@ -21,13 +29,20 @@
 
 cd "$SLURM_SUBMIT_DIR"
 
-: "${LLAMEA_SERVER_HOST:?Define LLAMEA_SERVER_HOST (nodo del job llamea-vllm), ej: squeue para verlo}"
+# Autodetecta el nodo del servidor vLLM a partir del JobID, si se dio.
+if [ -z "${LLAMEA_SERVER_HOST:-}" ] && [ -n "${LLAMEA_SERVER_JOBID:-}" ]; then
+    LLAMEA_SERVER_HOST="$(squeue -j "$LLAMEA_SERVER_JOBID" -h -o '%N' | head -1)"
+    LLAMEA_SERVER_HOST="${LLAMEA_SERVER_HOST%%[*}"  # quita el [n] de nodos
+fi
+
+: "${LLAMEA_SERVER_HOST:?Define LLAMEA_SERVER_HOST o LLAMEA_SERVER_JOBID (nodo del job vLLM)}"
+
 MODEL="${MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 BASE_URL="http://${LLAMEA_SERVER_HOST}:${LLAMEA_SERVER_PORT:-8000}/v1"
 
-echo "Ejecutandose en el nodo $SLURM_JOB_NODELIST."
-echo "Modelo: $MODEL"
-echo "Servidor vLLM: $BASE_URL"
+echo "Nodo de computo: $SLURM_JOB_NODELIST"
+echo "Modelo:          $MODEL"
+echo "Servidor vLLM:   $BASE_URL"
 
 export OMP_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
@@ -36,18 +51,86 @@ module load python/miniforge
 eval "$(conda shell.bash hook)"
 conda activate "$SLURM_SUBMIT_DIR/.conda-env"
 
-mkdir -p results
+mkdir -p "results/${CATEGORY:-searches}"
+
+# El modelo lo sirve el nodo vLLM; este nodo solo necesita el ID. Verificamos
+# de forma informativa (puede no estar en el cache de este nodo, y esta bien).
+python scripts/ensure_model.py "$MODEL" --check \
+    || echo "AVISO: '$MODEL' no esta en el cache de este nodo; se asume servido por el nodo vLLM."
+
+EVAL_TEST_ARG=""
+if [ "${EVAL_TEST:-0}" = "1" ]; then
+    EVAL_TEST_ARG="--eval-test --test-instances ${TEST_INSTANCES:-8}"
+fi
+
+MUTATION_ARG=""
+if [ "${MUTATION:-0}" = "1" ]; then
+    MUTATION_ARG="--mutation"
+fi
+
+COMMA_ARG=""
+if [ "${COMMA:-0}" = "1" ]; then
+    COMMA_ARG="--comma"
+fi
+
+REFINE_ARG=""
+if [ "${REFINE_ONLY:-0}" = "1" ]; then
+    REFINE_ARG="--refine-only"
+fi
+
+NORMALIZE_ARG=""
+if [ "${NO_NORMALIZE:-0}" = "1" ]; then
+    NORMALIZE_ARG="--no-normalize"
+fi
+
+BOUNDS_ARGS=""
+if [ -n "${BOUNDS_FILE:-}" ]; then
+    BOUNDS_ARGS="--bounds-file ${BOUNDS_FILE}"
+fi
+if [ -n "${SAVE_BOUNDS:-}" ]; then
+    BOUNDS_ARGS="${BOUNDS_ARGS} --save-bounds ${SAVE_BOUNDS}"
+fi
+
+TOKENS_ARGS=""
+if [ -n "${MAX_TOKENS:-}" ]; then
+    TOKENS_ARGS="--max-tokens ${MAX_TOKENS}"
+fi
+
+EXAMPLE_ARG=""
+if [ "${NO_EXAMPLE:-0}" = "1" ]; then
+    EXAMPLE_ARG="--no-example"
+fi
+if [ "${SKELETON_EXAMPLE:-0}" = "1" ]; then
+    EXAMPLE_ARG="--skeleton-example"
+fi
 
 python -m mohh.llamea.run \
     --model "$MODEL" \
     --base-url "$BASE_URL" \
-    --budget "${BUDGET:-20}" \
+    --no-download \
+    --wait-server \
+    --server-timeout "${SERVER_TIMEOUT:-1800}" \
+    --budget "${BUDGET:-100}" \
+    --temperature "${TEMPERATURE:-0.2}" \
     --n-parents "${N_PARENTS:-1}" \
     --n-offspring "${N_OFFSPRING:-1}" \
+    --max-workers "${MAX_WORKERS:-1}" \
+    --solver "${SOLVER:-MOEAD}" \
     --train-instances "${TRAIN_INSTANCES:-8}" \
     --mo-generations "${MO_GENERATIONS:-30}" \
     --mo-population-size "${MO_POPULATION_SIZE:-30}" \
+    --instance-timeout "${INSTANCE_TIMEOUT:-300}" \
     --seed "${SEED:-42}" \
-    --experiment-name "${EXPERIMENT_NAME:-LLaMEA_Experiment}"
+    --reference-operators "${REFERENCE_OPERATORS:-ox,pbx,pmx,cx,erx}" \
+    $TOKENS_ARGS \
+    $EXAMPLE_ARG \
+    --results-dir "results/${CATEGORY:-searches}" \
+    --experiment-name "${EXPERIMENT_NAME:-LLaMEA_Experiment}" \
+    $EVAL_TEST_ARG \
+    $MUTATION_ARG \
+    $COMMA_ARG \
+    $REFINE_ARG \
+    $NORMALIZE_ARG \
+    $BOUNDS_ARGS
 
 echo "Fin del script."

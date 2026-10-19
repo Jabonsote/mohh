@@ -7,22 +7,18 @@ from mohh.core.utilities.algorithm.HH_functions import *
 
 class HH_Operator(Crossover):
     def __init__(self, operator: str, solution_type: str, n_parents: int=2,
-                 n_offsprings: int=2, prob: float=1.0, eval_namespace=None, **kwargs):
+                n_offsprings: int=2, prob: float=1.0, **kwargs):
         """
         @param operator: Phenotype operator.
         @param solution_type: Natural or Real.
         @param n_parents: Number of parents per mating.
         @param n_offsprings: Number of offspring per mating.
         @param prob: Crossover probability.
-        @param eval_namespace: Optional dict with names available to eval()
-            (e.g. functions defined in LLaMEA-generated code). None keeps the
-            default module-global lookup.
         """
         super().__init__(n_parents, n_offsprings, prob, **kwargs)
 
         # Load phenotype expression
         self.expression = operator
-        self.eval_namespace = eval_namespace
 
         # Work with natural or real numbers
         self.solution_type = solution_type.lower()
@@ -37,16 +33,12 @@ class HH_Operator(Crossover):
         # Output with shape (n_offsprings, n_matings, n_var)
         Y = np.full_like(X, None, dtype=object)
 
-            for k in range(n_matings):
-                # x and y are 1D arrays, required to evaluate
-                x, y = X[0, k], X[1, k]
+        for k in range(n_matings):
+            # x and y are 1D arrays, required to evaluate
+            x, y = X[0, k], X[1, k]
 
-                # Evaluate with operator (namespace opcional para codigo
-                # generado por LLaMEA: eval usa globals dados + locals actuales)
-                if self.eval_namespace is not None:
-                    child = eval(self.expression, self.eval_namespace)
-                else:
-                    child = eval(self.expression)
+            # Evaluate with operator
+            child = eval(self.expression)
 
             #if isinstance(child, tuple):
             #    if not(self.is_permutation(child[0])):

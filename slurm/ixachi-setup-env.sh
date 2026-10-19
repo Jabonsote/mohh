@@ -46,6 +46,21 @@ conda activate "$ENV_PREFIX"
 pip install -U pip
 pip install -e .
 
+# Busqueda con LLM (LLaMEA): extra "llamea" del pyproject. Instala llamea==1.4.0
+# + openai + huggingface_hub y NO toca torch/pymoo del env.
+pip install -e ".[llamea]"
+
+# Servidor de inferencia en GPU (vLLM): pesado, solo si se va a usar mohh.llamea
+# en el cluster y este env va a servir modelos. La particion gpu lo ejecuta.
+if [ "${WITH_VLLM:-0}" = "1" ]; then
+    pip install -e ".[vllm]"
+fi
+
+# Servidor de desarrollo local (transformers + fastapi), opcional.
+if [ "${WITH_LOCAL_SERVER:-0}" = "1" ]; then
+    pip install -e ".[local-server]"
+fi
+
 # 3. Directorios que SLURM exige existentes al arrancar el job:
 #    las directivas -o/-e de los .slrm apuntan a logs/ y los resultados
 #    van a results/. Si no existen, el job muere en 1 segundo sin logs.
@@ -56,5 +71,14 @@ mkdir -p logs results
 python -c "import mohh; print('mohh OK')"
 mohh-generate -h >/dev/null && echo "mohh-generate OK"
 mohh-evaluate -h >/dev/null && echo "mohh-evaluate OK"
+
+# 5. Verificacion de la integracion LLaMEA (si se instalo el extra).
+python -c "import mohh.llamea; print('mohh.llamea OK')" \
+    && mohh-llamea -h >/dev/null && echo "mohh-llamea OK" \
+    || echo "AVISO: mohh.llamea no disponible (instala el extra llamea)."
+
+if [ "${WITH_VLLM:-0}" = "1" ]; then
+    python -c "import vllm; print('vllm OK')" || echo "AVISO: vllm no importable."
+fi
 
 echo "Ambiente listo. Envia trabajos con: sbatch slurm/mohh-generate.slrm"

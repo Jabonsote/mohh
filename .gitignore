@@ -13,3 +13,13 @@ build/
 dist/
 GIT_PASOS_NO_SUBIR.txt
 cluster.md
+LLaMEA-main/
+LLaMEA-main.zip
+vendor/LLaMEA-main/
+vendor/LLaMEA-main.zip
+exp-*/
+.conda-env/
+# Papers de referencia (32 MB de PDFs): se quedan fuera del repo.
+docs/llamea-prompts/pdfs/
+# Nota de trabajo, no material del proyecto.
+best.md

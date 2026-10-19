@@ -1,13 +1,21 @@
 #!/bin/bash
 #
-# Servidor vLLM persistente para LLaMEa en ixachi (particion gpu).
+# Servidor vLLM persistente para LLaMEA en ixachi (particion gpu).
 #
-# Envio (el modelo queda cargado en GPU y sirviendo /v1 hasta el time limit):
+# El modelo queda cargado en la GPU y sirviendo la API OpenAI-compatible
+# (/v1) hasta el time limit; la busqueda LLaMEA se conecta a este nodo.
+#
+# Envio:
 #   MODEL=Qwen/Qwen2.5-1.5B-Instruct sbatch slurm/llamea-vllm-server.slrm
 #
-# Luego, desde otro nodo o login, corre la busqueda apuntando a este servidor:
-#   LLAMEA_SERVER_HOST=<nodo> MODEL=Qwen/Qwen2.5-1.5B-Instruct \
-#       sbatch slurm/llamea-generate.slrm
+# Opciones por entorno (todas opcionales):
+#   PORT=8000                     puerto del servidor
+#   GPU_MEM_UTIL=0.9              --gpu-memory-utilization (bajar si hay OOM)
+#   MAX_MODEL_LEN=8192            --max-model-len
+#   TENSOR_PARALLEL=1             --tensor-parallel-size (varias GPUs)
+#   EXTRA_VLLM_ARGS="..."         argumentos extra para vllm
+#
+# Al arrancar imprime el nodo asignado; usalo como LLAMEA_SERVER_HOST.
 #
 #SBATCH -J llamea-vllm
 #SBATCH -p gpu
@@ -22,23 +30,43 @@ cd "$SLURM_SUBMIT_DIR"
 
 MODEL="${MODEL:?Define MODEL, ej: MODEL=Qwen/Qwen2.5-1.5B-Instruct sbatch slurm/llamea-vllm-server.slrm}"
 PORT="${PORT:-8000}"
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.9}"
+TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
 
-echo "Ejecutandose en el nodo $SLURM_JOB_NODELIST (GPU)."
-echo "Modelo: $MODEL"
+echo "Nodo GPU: $SLURM_JOB_NODELIST"
+echo "JobID:    $SLURM_JOB_ID"
+echo "Modelo:   $MODEL"
+echo "Puerto:   $PORT"
 
 export OMP_NUM_THREADS=1
-export MOHH_WORKERS="$SLURM_CPUS_PER_TASK"
 export PYTHONUNBUFFERED=1
 
 module load python/miniforge
 eval "$(conda shell.bash hook)"
 conda activate "$SLURM_SUBMIT_DIR/.conda-env"
 
-# vLLM baja el modelo si no esta en el cache de HuggingFace; para verificar o
-# descargar explicitamente antes: python scripts/ensure_model.py <modelo>
-python -m vllm.entrypoints.openai.api_server \
+# 1. Verificar/descargar el modelo (el modelo es local; evita fallos a mitad
+#    del serve en un job largo).
+python scripts/ensure_model.py "$MODEL"
+
+# 2. Servir. --served-model-name = MODEL para que el cliente use el mismo ID.
+MAXLEN_ARG=""
+if [ -n "${MAX_MODEL_LEN:-}" ]; then
+    MAXLEN_ARG="--max-model-len $MAX_MODEL_LEN"
+fi
+
+echo "Para conectarse desde node:"
+echo "   LLAMEA_SERVER_HOST=$SLURM_JOB_NODELIST LLAMEA_SERVER_JOBID=$SLURM_JOB_ID \\"
+echo "       sbatch slurm/llamea-generate.slrm"
+echo "o directamente:"
+echo "   python -m mohh.llamea.run --model $MODEL --base-url http://$SLURM_JOB_NODELIST:$PORT/v1"
+
+exec python -m vllm.entrypoints.openai.api_server \
     --model "$MODEL" \
+    --served-model-name "$MODEL" \
     --host 0.0.0.0 \
     --port "$PORT" \
-    --served-model-name "$MODEL" \
+    --gpu-memory-utilization "$GPU_MEM_UTIL" \
+    --tensor-parallel-size "$TENSOR_PARALLEL" \
+    $MAXLEN_ARG \
     ${EXTRA_VLLM_ARGS:-}
