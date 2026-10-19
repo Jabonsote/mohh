@@ -524,3 +524,80 @@ intacto. Cubierto por `test_mutation_flag_is_not_a_noop`.
   instancias; para presupuestos chicos dejarlo en 1. LLaMEA además capa
   `max_workers` a `n_offspring`, así que el paralelismo real requiere
   `--n-offspring > 1`.
+
+---
+
+## 9. Job único, modelos grandes y presión de diversidad (2026-10)
+
+### 9.1 Un solo comando y un solo job
+
+La cadena anterior (job vLLM + job de búsqueda + coordinación por nodo) se
+reemplaza, como camino recomendado, por **un único job GPU** que:
+
+1. verifica el modelo en la raíz persistente;
+2. arranca vLLM en `127.0.0.1` en segundo plano;
+3. corre `mohh.llamea.run` contra ese servidor (con `--wait-server`);
+4. apaga el servidor y el sampler de GPU en el `trap EXIT`.
+
+`slurm/llamea-all.sh` es el **único comando** desde el login: descarga el
+modelo (el login tiene internet; los nodos de cómputo no) y envía
+`slurm/llamea-single.slrm`. El servidor y la búsqueda comparten nodo, así que
+no hay que esperar a que aparezca un job ajeno ni adivinar el host.
+
+La cadena de dos jobs (`llamea-full-chain.sh`) se conserva para reutilizar un
+servidor ya cargado entre varias búsquedas.
+
+### 9.2 Perfiles de GPU con modelos grandes
+
+`slurm/llamea-gpu-profile.sh` elige el modelo según la GPU del cluster
+(H100 80 GB, A100 40 GB, A10 24 GB):
+
+| `PROFILE` | Modelo | VRAM aprox. | GPU |
+|---|---|---|---|
+| `big-quant` (default) | `Qwen/Qwen2.5-Coder-32B-Instruct-AWQ` | 19–21 GB | A100/H100 |
+| `h100-fp16` | `Qwen/Qwen2.5-Coder-32B-Instruct` | 65 GB | H100 |
+| `a100-fp16` | `Qwen/Qwen2.5-Coder-14B-Instruct` | 29 GB | A100/H100 |
+| `a10-quant` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | 10 GB | A10 |
+| `smoke` | `Qwen/Qwen2.5-1.5B-Instruct` | 3 GB | cualquiera (humo) |
+
+El default deja de ser un modelo de juguete: es el mayor número de parámetros
+con contexto largo en A100 40 GB/H100 80 GB (32B AWQ). En A10 24 GB se usa
+`a10-quant` (14B AWQ), porque el 32B AWQ no deja KV cache para 16k. `MODEL`,
+`CONSTRAINT`, `MAX_MODEL_LEN` y `GPU_MEM_UTIL` se pueden sobreescribir por
+entorno.
+
+### 9.3 Parada temprana y diversidad
+
+Se exponen mecanismos de LLaMEA 1.4 que atacan el anclaje observado (el modelo
+repetía el mismo operador 108 veces en `b200`):
+
+| Bandera | Efecto | Default |
+|---|---|---|
+| `--patience N` | corta tras `N` evaluaciones sin mejorar el mejor HV | `0` (off) |
+| `--parent-selection` | `random`, `roulette`, `tournament` | `tournament` |
+| `--adaptive-mutation` | mutación adaptativa de LLaMEA | on |
+| `--feature-guided-mutation` | guía por características del AST | off |
+| `--niching` | `sharing`, `clearing`, `novelty`, `map_elites` | `none` |
+| `--novelty-k`, `--novelty-archive-size` | archivo de novedad | `5`, LLaMEA |
+
+`EarlyStop` se lanza desde el evaluador y `run.py` cierra con el mejor operador
+guardado; el checkpoint y `best_so_far.py` ya están en disco.
+
+### 9.4 Evaluación final repetida
+
+`--eval-repeats R` repite la evaluación en test con semillas distintas y
+reporta media, desviación, mínimo y máximo. Con `R > 1` el marco se fija al
+panel de referencia (`stationary`) para que las repeticiones sean comparables;
+con `R = 1` se conserva el marco GE de siempre.
+
+### 9.5 Documentación del cluster
+
+`cluster_ixachi/` es documentación local (no material del proyecto) y queda en
+`.gitignore`.
+
+### 9.6 Pruebas
+
+`tests/test_slurm.py` valida los perfiles (default 32B), la sintaxis y el
+contrato del job único (vLLM + búsqueda + `127.0.0.1`), el comando único y el
+paso de las nuevas banderas. `tests/test_llamea.py` cubre `EarlyStop` y
+`_llamea_kwargs`. Suite completa: `166 passed, 1 skipped`.

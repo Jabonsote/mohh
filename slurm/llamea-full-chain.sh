@@ -1,27 +1,33 @@
 #!/bin/bash
 #
-# Encadena servidor vLLM + busqueda LLaMEA en ixachi.
+# Encadena servidor vLLM + busqueda LLaMEA en ixachi (dos jobs).
+#
+# Alternativa al job unico recomendado (`bash slurm/llamea-all.sh`). Usar esta
+# cadena cuando se reutiliza un servidor ya cargado para varias busquedas.
 #
 # Envia el job del servidor (particion gpu) y, dependiente de su arranque,
 # el job de busqueda (particion ixachi) que espera al servidor con
 # --wait-server. El nodo del servidor se autodetecta por JobID.
 #
 # Uso:
-#   MODEL=Qwen/Qwen2.5-7B-Instruct bash slurm/llamea-full-chain.sh
-#   MODEL=Qwen/Qwen2.5-Coder-7B-Instruct BUDGET=200 EVAL_TEST=1 \
-#     EXPERIMENT_NAME=qwen7bcoder_moead_b200 bash slurm/llamea-full-chain.sh
+#   bash slurm/llamea-full-chain.sh                         # perfil big-quant (32B AWQ)
+#   PROFILE=h100-fp16 BUDGET=200 EVAL_TEST=1 \
+#     EXPERIMENT_NAME=qwen32b_moead_b200 bash slurm/llamea-full-chain.sh
 #
-# Opciones por entorno: MODEL, BUDGET, TRAIN_INSTANCES, TEST_INSTANCES,
-# EVAL_TEST=1, SOLVER, MO_GENERATIONS, MO_POPULATION_SIZE, N_PARENTS,
-# N_OFFSPRING, TEMPERATURE, EXPERIMENT_NAME, MAX_WORKERS, COMMA=1,
-# REFINE_ONLY=1, CATEGORY, NO_NORMALIZE=1, SAVE_BOUNDS, BOUNDS_FILE.
-# Se exportan al job de busqueda tal cual (--export=ALL).
+# Opciones por entorno: PROFILE, MODEL, CONSTRAINT, BUDGET, TRAIN_INSTANCES,
+# TEST_INSTANCES, EVAL_TEST=1, EVAL_REPEATS, SOLVER, MO_GENERATIONS,
+# MO_POPULATION_SIZE, N_PARENTS, N_OFFSPRING, TEMPERATURE, MAX_TOKENS,
+# EXPERIMENT_NAME, MAX_WORKERS, COMMA=1, REFINE_ONLY=1, CATEGORY,
+# NO_NORMALIZE=1, SAVE_BOUNDS, BOUNDS_FILE, REPEAT_PENALTY, PATIENCE,
+# PARENT_SELECTION, NICHING. Se exportan al job de busqueda tal cual
+# (--export=ALL).
 #
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-MODEL="${MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
+source slurm/llamea-gpu-profile.sh
+echo "Perfil ${PROFILE}: modelo=$MODEL  constraint=$CONSTRAINT"
 
 # 0. Pesos en la raiz persistente: se bajan AQUI (login, con internet) una sola
 #    vez; los nodos de computo suelen no tener salida a internet. Si el modelo
@@ -34,7 +40,8 @@ else
 fi
 
 echo "Enviando servidor vLLM para $MODEL ..."
-SERVER_JOB="$(MODEL="$MODEL" sbatch --parsable --export=ALL slurm/llamea-vllm-server.slrm)"
+SERVER_JOB="$(MODEL="$MODEL" sbatch --parsable --export=ALL \
+    --constraint="$CONSTRAINT" slurm/llamea-vllm-server.slrm)"
 echo "  job vLLM: $SERVER_JOB"
 
 echo "Enviando busqueda LLaMEA (dependiente de $SERVER_JOB) ..."

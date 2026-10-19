@@ -410,6 +410,47 @@ def test_repeat_penalty_can_be_disabled():
     assert "DUPLICATE" not in second.feedback
 
 
+def test_patience_stops_when_best_does_not_improve():
+    from mohh.llamea.fitness import EarlyStop
+
+    # LLaMEA envuelve la evaluacion en `except Exception`; la senal de parada
+    # debe heredar de BaseException para no convertirse en un candidato con 0.
+    assert not issubclass(EarlyStop, Exception)
+
+    fitness = build_evaluator([INSTANCE], mo_generations=2, mo_population_size=6,
+                              seed=42, patience=1)
+    first = fitness(_FakeSolution(EXAMPLE_CODE))
+    assert fitness.best_solution().code == first.code
+    # La segunda evaluacion repite el codigo: se penaliza y no mejora -> parada.
+    with pytest.raises(EarlyStop):
+        fitness(_FakeSolution(EXAMPLE_CODE))
+    assert fitness.duplicate_stats()["patience"] == 1
+
+
+def test_llamea_kwargs_enable_diversity_mechanisms():
+    import argparse
+
+    from mohh.llamea import run as run_module
+
+    args = argparse.Namespace(
+        parent_selection="tournament", tournament_size=3, adaptive_mutation=True,
+        feature_guided_mutation=False, novelty_k=5, novelty_archive_size=None,
+        niching="none", niche_radius=None, adaptive_niche_radius=False,
+        clearing_interval=None,
+    )
+    kwargs = run_module._llamea_kwargs(args)
+    assert kwargs["parent_selection"] == "tournament"
+    assert kwargs["adaptive_mutation"] is True
+    assert kwargs["tournament_size"] == 3
+    assert "niching" not in kwargs  # "none" no se pasa a LLaMEA
+
+    args.niching = "map_elites"
+    args.niche_radius = 0.25
+    kwargs = run_module._llamea_kwargs(args)
+    assert kwargs["niching"] == "map_elites"
+    assert kwargs["niche_radius"] == 0.25
+
+
 def test_recombination_novelty_flags_parent_copies():
     from mohh.llamea.fitness import recombination_novelty
 
@@ -677,6 +718,11 @@ def test_llamea_end_to_end_with_scripted_llm(tmp_path, monkeypatch):
         minimization=False,
         max_workers=1,
         experiment_name="e2e",
+        # Mecanismos de diversidad expuestos por run.py: deben funcionar
+        # sin tocar el nucleo ni el motor.
+        parent_selection="tournament",
+        tournament_size=2,
+        adaptive_mutation=True,
     )
     best = llamea.run()
     assert best.code.strip()

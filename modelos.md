@@ -2,17 +2,21 @@
 
 El modelo **es local**: lo sirve un servidor de inferencia con API
 OpenAI-compatible (vLLM en el cluster; `scripts/local_openai_server.py` para
-pruebas) y LLaMEA se conecta por HTTP. **Antes de correr, verificar que el
-modelo esté descargado:**
+pruebas) y LLaMEA se conecta por HTTP. En el cluster los pesos viven en una
+**raíz persistente** (LUSTRE/`$SCRATCH`, nunca `$HOME`) gestionada por
+`scripts/mohh_models.py`; la descarga se hace en el login (los nodos de cómputo
+no tienen internet).
 
 ```bash
-python scripts/ensure_model.py <model_id>          # verifica en cache HF; descarga si falta
-python scripts/ensure_model.py <model_id> --check  # solo verifica (para nodos sin internet)
+python scripts/mohh_models.py root       # dónde viven los pesos
+python scripts/mohh_models.py list       # qué hay descargado
+python scripts/mohh_models.py verify <model_id>   # integridad (sin red)
+python scripts/mohh_models.py download <model_id> # login (con red)
 ```
 
-Cache de HuggingFace: `~/.cache/huggingface/hub/models--<org>--<modelo>`
-(respeta `HF_HOME` y `HUGGINGFACE_HUB_CACHE`). vLLM auto-descarga en el primer
-`serve`, pero la verificación explícita evita sorpresas en jobs SLURM.
+`scripts/ensure_model.py` sigue disponible para el cache clásico de
+HuggingFace (`~/.cache/huggingface/hub/models--<org>--<modelo>`, respeta
+`HF_HOME` y `HUGGINGFACE_HUB_CACHE`).
 
 ---
 
@@ -25,9 +29,10 @@ Cache de HuggingFace: `~/.cache/huggingface/hub/models--<org>--<modelo>`
 | Qwen/Qwen2.5-1.5B-Instruct | 1.5B | ~3 GB | Pruebas rápidas (cabe en 12 GB) |
 | **Qwen/Qwen2.5-Coder-7B-Instruct** | 7B | ~15 GB | **Recomendado en 24 GB**: escribe código correcto |
 | Qwen/Qwen2.5-7B-Instruct | 7B | ~15 GB | **Default en 24 GB**: buen balance |
-| Qwen/Qwen2.5-14B-Instruct | 14B | ~29 GB | 32+ GB cómodo; 24 GB justo (vigilar KV) |
-| Qwen/Qwen2.5-32B-Instruct | 32B | ~63 GB | 50 GB: usar cuantización (AWQ/GPTQ ~18 GB) |
-| Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4 | 32B | ~18 GB | **24-50 GB**: calidad alta, memoria baja |
+| Qwen/Qwen2.5-Coder-14B-Instruct | 14B | ~29 GB | A100 40 GB / H100 |
+| **Qwen/Qwen2.5-Coder-32B-Instruct-AWQ** | 32B | ~19-21 GB | **Default del cluster**: cabe en A10 24 GB, A100 40 GB y H100 80 GB |
+| **Qwen/Qwen2.5-Coder-32B-Instruct** | 32B | ~65 GB | **H100 80 GB**: el de más calidad |
+| Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4 | 32B | ~18 GB | Alternativa cuantizada (GPTQ) |
 | Meta-Llama-3.1-8B-Instruct | 8B | ~16 GB | 24 GB |
 | Meta-Llama-3.1-70B-Instruct | 70B | ~140 GB | 50 GB: solo cuantizado agresivo o `--tensor-parallel-size 2` |
 | deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct | 16B MoE (2.4B act.) | ~31 GB (AWQ ~9 GB) | 24 GB: alternativa fuerte en código |
@@ -46,9 +51,21 @@ Notas:
   `--gpu-memory-utilization` (default 0.9). Si hay OOM: bajarlo
   (`GPU_MEM_UTIL=0.8` en el `.slrm`) o acortar `--max-model-len`
   (`MAX_MODEL_LEN=8192`).
-- **Elección por VRAM disponible** (el cluster da 24-50 GB):
-  - 24 GB → `Qwen2.5-7B-Instruct` (fp16) o `Qwen2.5-32B-Instruct-GPTQ-Int4`.
-  - 50 GB → `Qwen2.5-14B-Instruct` (fp16) o `Qwen2.5-32B-Instruct` cuantizado.
+- **Elección por VRAM disponible**: el cluster tiene tres GPUs y
+  `slurm/llamea-gpu-profile.sh` elige el modelo más grande que cabe en cada una:
+
+  | GPU | VRAM | `PROFILE` | Modelo |
+  |---|---|---|---|
+  | A100 | 40 GB | `big-quant` (default) | `Qwen2.5-Coder-32B-Instruct-AWQ` (~19-21 GB) |
+  | H100 | 80 GB | `h100-fp16` | `Qwen2.5-Coder-32B-Instruct` fp16 (~65 GB) |
+  | A100 | 40 GB | `a100-fp16` | `Qwen2.5-Coder-14B-Instruct` fp16 (~29 GB) |
+  | A10 | 24 GB | `a10-quant` | `Qwen2.5-Coder-14B-Instruct-AWQ` (~10 GB) |
+
+  `big-quant` es el default porque es el **mayor número de parámetros** que
+  cabe con contexto largo en las GPUs grandes (A100 40 GB y H100 80 GB). En una
+  A10 (24 GB) usar `PROFILE=a10-quant`; el 32B AWQ no deja KV cache suficiente
+  para 16k de contexto. Si el job cae en una H100, `PROFILE=h100-fp16` da la
+  versión sin cuantizar.
 - **En esta máquina de pruebas (RTX 3060, 12 GB)**: usar `Qwen2.5-0.5B/1.5B`.
 - Los modelos `-Instruct` tienen chat template: el prompt de LLaMEA va como
   mensaje de usuario y la respuesta se parsea por bloques ```` ```python ````.
@@ -60,13 +77,18 @@ Notas:
 ### A) vLLM (cluster, partición GPU) — recomendado
 
 ```bash
-MODEL=Qwen/Qwen2.5-7B-Instruct sbatch slurm/llamea-vllm-server.slrm
+# Servidor persistente (opcional; el default es el job único de la sección B
+# del README: `bash slurm/llamea-all.sh`).
+sbatch slurm/llamea-vllm-server.slrm                 # perfil big-quant (32B AWQ)
+PROFILE=h100-fp16 sbatch --constraint=H100 slurm/llamea-vllm-server.slrm
 ```
 
 Variables de entorno del `.slrm` (todas opcionales):
-`PORT` (8000), `GPU_MEM_UTIL` (0.9), `MAX_MODEL_LEN`, `TENSOR_PARALLEL`,
-`EXTRA_VLLM_ARGS`. El script hace `ensure_model` antes de servir y deja el
-modelo cargado hasta el time limit (30 días).
+`PROFILE` (`big-quant`), `MODEL`, `CONSTRAINT`, `PORT` (8000), `GPU_MEM_UTIL`
+(0.9), `MAX_MODEL_LEN`, `TENSOR_PARALLEL`, `EXTRA_VLLM_ARGS`. El script elige
+el modelo con `slurm/llamea-gpu-profile.sh`, verifica los pesos en la raíz
+persistente (`python scripts/mohh_models.py root`) y deja el modelo cargado
+hasta el time limit (30 días).
 
 ### B) Servidor local de desarrollo (sin vLLM)
 
@@ -200,19 +222,26 @@ python -m mohh.llamea.run \
     --eval-test --save-bounds
 ```
 
-En el cluster (vLLM en otro nodo, modelo ya descargado allí):
+En el cluster (**un solo comando**, recomendado: descarga en el login y envía un
+job que sirve el 32B AWQ y corre la búsqueda):
+
+```bash
+PROFILE=big-quant BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+```
+
+Alternativa con un servidor ya cargado (el cliente solo necesita el ID):
 
 ```bash
 BASE_URL=http://gpu-nodo:8000/v1 NO_DOWNLOAD=1 WAIT_SERVER=1 EVAL_TEST=1 \
-CATEGORY=searches NAME=qwen7b_moead_b100 \
-MODEL=Qwen/Qwen2.5-7B-Instruct ./scripts/llamea_search.sh
+CATEGORY=searches NAME=qwen32b_moead_b100 \
+MODEL=Qwen/Qwen2.5-Coder-32B-Instruct-AWQ ./scripts/llamea_search.sh
 ```
 
-Encadenado servidor + búsqueda (recomendado, Coder 7B):
+Encadenado servidor + búsqueda en dos jobs (reutiliza el servidor):
 
 ```bash
-MODEL=Qwen/Qwen2.5-Coder-7B-Instruct BUDGET=200 EVAL_TEST=1 \
-  EXPERIMENT_NAME=qwen7bcoder_moead_b200 bash slurm/llamea-full-chain.sh
+PROFILE=h100-fp16 BUDGET=200 EVAL_TEST=1 \
+  EXPERIMENT_NAME=qwen32b_moead_b200 bash slurm/llamea-full-chain.sh
 ```
 
 Cada corrida deja `run.json` (configuración + comando exacto),
@@ -245,18 +274,32 @@ Para no gastar en vano:
 
 ## 5. Recetas de descarga
 
+El cluster usa una **raíz persistente** (LUSTRE/`$SCRATCH`, nunca `$HOME`) y el
+CLI `scripts/mohh_models.py`, que registra hashes y un manifiesto. La descarga
+se hace en el **login** (tiene internet); los nodos de cómputo no.
+
 ```bash
-# Pruebas locales (rápido, ~1 GB)
-python scripts/ensure_model.py Qwen/Qwen2.5-0.5B-Instruct
+python scripts/mohh_models.py root      # mostrar la raíz persistente
+python scripts/mohh_models.py list      # modelos descargados + tamaño
 
-# Cluster 24 GB
-python scripts/ensure_model.py Qwen/Qwen2.5-7B-Instruct
+# Default del cluster (32B AWQ, cabe en A10/A100/H100)
+python scripts/mohh_models.py download Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
 
-# Cluster 24-50 GB, calidad alta y memoria baja
-python scripts/ensure_model.py Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4
+# H100: 32B sin cuantizar (mayor calidad, ~65 GB)
+python scripts/mohh_models.py download Qwen/Qwen2.5-Coder-32B-Instruct
+
+# A100 40 GB: 14B fp16
+python scripts/mohh_models.py download Qwen/Qwen2.5-Coder-14B-Instruct
+
+# Verificar / smoke test (sin descargar de nuevo)
+python scripts/mohh_models.py verify Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
+python scripts/mohh_models.py smoke  Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
 ```
 
-Descargar a un directorio propio (útil si el cache de `$HOME` es chico; luego
+El camino corto es `bash slurm/llamea-all.sh`: verifica/descarga el modelo del
+perfil en el login y envía el job único que lo sirve y corre la búsqueda.
+
+Descargar a un directorio propio (útil si la raíz persistente es chica; luego
 pasar esa ruta como `--model`):
 
 ```bash

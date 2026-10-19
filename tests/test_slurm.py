@@ -252,6 +252,9 @@ def test_llamea_vllm_server_samples_gpu_and_uses_persistent_models():
     # Pesos en la raiz persistente via el CLI, no en el cache de $HOME.
     assert "mohh_models.py" in content
     assert "ensure_model.py" not in content
+    # vLLM carga la ruta local (el id de HF intentaria descargar sin internet).
+    assert "mohh_models.py path" in content
+    assert '--model "$MODEL_PATH"' in content
 
 
 def test_llamea_download_model_job_uses_cli():
@@ -276,4 +279,98 @@ def test_llamea_search_script_defaults_to_1000_generations():
         content = handle.read()
     assert 'BUDGET="${BUDGET:-1000}"' in content
     assert "--repeat-penalty" in content
+
+
+REPO_DIR = os.path.join(os.path.dirname(__file__), "..")
+
+
+def _source_profile(profile, extra_env=None):
+    """Sourcea el perfil y devuelve las variables MODEL/CONSTRAINT resultantes."""
+    env = dict(os.environ)
+    if profile:
+        env["PROFILE"] = profile
+    if extra_env:
+        env.update(extra_env)
+    result = subprocess.run(
+        ["bash", "-c",
+         "source slurm/llamea-gpu-profile.sh; echo \"$MODEL\"; echo \"$CONSTRAINT\""],
+        cwd=REPO_DIR, capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.strip().splitlines()
+    return lines[0], lines[1]
+
+
+def test_llamea_gpu_profile_defaults_to_big_model():
+    # El default del cluster no puede ser un modelo de juguete: 32B AWQ.
+    model, constraint = _source_profile(None)
+    assert "32B" in model
+    assert "A100" in constraint or "H100" in constraint
+
+
+@pytest.mark.parametrize("profile,needle", [
+    ("h100-fp16", "32B"),
+    ("a100-fp16", "14B"),
+    ("a10-quant", "14B"),
+    ("smoke", "1.5B"),
+])
+def test_llamea_gpu_profile_variants(profile, needle):
+    model, _constraint = _source_profile(profile)
+    assert needle in model
+
+
+def test_llamea_gpu_profile_respects_model_override():
+    model, _constraint = _source_profile("h100-fp16", {"MODEL": "org/custom"})
+    assert model == "org/custom"
+
+
+@pytest.mark.parametrize("script", ["llamea-single.slrm", "llamea-all.sh"])
+def test_llamea_single_command_syntax_ok(script):
+    result = subprocess.run(
+        ["bash", "-n", os.path.join(SLURM_DIR, script)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_llamea_single_job_serves_and_searches_in_one_job():
+    content = _read("llamea-single.slrm")
+    # Un unico job: servidor vLLM + busqueda contra localhost.
+    assert "vllm.entrypoints.openai.api_server" in content
+    assert "mohh.llamea.run" in content
+    assert "--wait-server" in content
+    assert "127.0.0.1" in content
+    assert "llamea-gpu-profile.sh" in content
+    # Cabecera GPU de la documentacion del cluster.
+    for pattern in (r"#SBATCH\s+-p\s+gpu", r"#SBATCH\s+--gres=gpu:1",
+                    r"#SBATCH\s+--constraint=", r"#SBATCH\s+--time=\S+"):
+        assert re.search(pattern, content), f"llamea-single.slrm: missing {pattern}"
+    # Todo el pipeline en el mismo job: comparacion pareada opcional.
+    assert "compare_operators.py" in content
+    assert "classic:ox" in content
+    assert "COMPARE" in content
+    # vLLM debe cargar la RUTA local de la raiz persistente (no el id de HF,
+    # que intentaria descargar en un nodo sin internet).
+    assert "mohh_models.py path" in content
+    assert '--model "$MODEL_PATH"' in content
+
+
+def test_llamea_all_is_one_command():
+    path = os.path.join(SLURM_DIR, "llamea-all.sh")
+    with open(path) as handle:
+        content = handle.read()
+    # Descarga en el login y envia el job unico.
+    assert "mohh_models.py" in content
+    assert "download" in content
+    assert "llamea-single.slrm" in content
+    assert "--export=ALL" in content
+    # Puede correr en el login (modulo opcional).
+    assert "command -v module" in content
+
+
+def test_llamea_generate_passes_diversity_flags_to_the_search():
+    content = _read("llamea-generate.slrm")
+    for flag in ("--patience", "--parent-selection", "--niching", "--eval-repeats"):
+        assert flag in content, f"llamea-generate.slrm: falta {flag}"
+
 

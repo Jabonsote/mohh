@@ -13,6 +13,8 @@ build/
 dist/
 GIT_PASOS_NO_SUBIR.txt
 cluster.md
+# Documentacion del cluster (local, no es material del proyecto).
+cluster_ixachi/
 LLaMEA-main/
 LLaMEA-main.zip
 vendor/LLaMEA-main/

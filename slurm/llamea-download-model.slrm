@@ -9,11 +9,14 @@
 #   cd /LUSTRE/<miusuario>/MOOHH-R
 #   module load python/miniforge
 #   eval "$(conda shell.bash hook)" && conda activate .conda-env
-#   MODEL=Qwen/Qwen2.5-Coder-7B-Instruct bash slurm/llamea-download-model.slrm
+#   MODEL=Qwen/Qwen2.5-Coder-32B-Instruct-AWQ bash slurm/llamea-download-model.slrm
+#
+# Normalmente no hace falta llamarlo a mano: `bash slurm/llamea-all.sh` ya
+# verifica/descarga el modelo del perfil antes de enviar el job unico.
 #
 # Tambien se puede enviar con sbatch *si* la particion tiene salida a internet:
 #
-#   MODEL=Qwen/Qwen2.5-Coder-7B-Instruct sbatch slurm/llamea-download-model.slrm
+#   MODEL=Qwen/Qwen2.5-Coder-32B-Instruct-AWQ sbatch slurm/llamea-download-model.slrm
 #
 # Opciones por entorno:
 #   MODEL       (obligatorio) id de HuggingFace o ruta local
@@ -35,7 +38,7 @@ set -euo pipefail
 # Con `bash` en el login no hay $SLURM_SUBMIT_DIR: se usa el repo del script.
 cd "${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
-: "${MODEL:?Define MODEL, ej: MODEL=Qwen/Qwen2.5-Coder-7B-Instruct bash slurm/llamea-download-model.slrm}"
+: "${MODEL:?Define MODEL, ej: MODEL=Qwen/Qwen2.5-Coder-32B-Instruct-AWQ bash slurm/llamea-download-model.slrm}"
 
 echo "Nodo:   ${SLURM_JOB_NODELIST:-login}"
 echo "Modelo: $MODEL"

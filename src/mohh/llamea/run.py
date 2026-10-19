@@ -49,7 +49,7 @@ import numpy as np
 
 from mohh.core.utilities.instance_utils import instance_paths
 from mohh.llamea import metrics as model_metrics
-from mohh.llamea.fitness import build_evaluator, init_params
+from mohh.llamea.fitness import EarlyStop, build_evaluator, init_params
 from mohh.llamea.prompts import (
     ROLE_PROMPT,
     make_task_prompt,
@@ -171,7 +171,36 @@ def _make_evaluator(paths, args, bounds=None, archive=None, fronts_dir=None):
         frame="stationary" if getattr(args, "stationary_frame", False) else "ge",
         fronts_dir=fronts_dir,
         repeat_penalty=getattr(args, "repeat_penalty", 0.5),
+        patience=getattr(args, "patience", 0),
     )
+
+
+def _llamea_kwargs(args):
+    """Mecanismos de diversidad que LLaMEA 1.4 trae y la busqueda base no usaba.
+
+    Atacan directamente el anclaje observado (el modelo repite el mismo
+    operador): seleccion por torneo (LLaMEA usa `random` por defecto), mutacion
+    adaptativa, guia por caracteristicas del AST, niching (clearing/novelty/
+    map_elites con descriptor derivado del codigo) y tamano del archivo de
+    novedad. No se toca el nucleo GE ni el motor de LLaMEA.
+    """
+    kwargs = {
+        "parent_selection": args.parent_selection,
+        "tournament_size": args.tournament_size,
+        "adaptive_mutation": args.adaptive_mutation,
+        "feature_guided_mutation": args.feature_guided_mutation,
+        "novelty_k": args.novelty_k,
+    }
+    if args.novelty_archive_size is not None:
+        kwargs["novelty_archive_size"] = args.novelty_archive_size
+    if args.niching and args.niching != "none":
+        kwargs["niching"] = args.niching
+        if args.niche_radius is not None:
+            kwargs["niche_radius"] = args.niche_radius
+        kwargs["adaptive_niche_radius"] = args.adaptive_niche_radius
+        if args.clearing_interval is not None:
+            kwargs["clearing_interval"] = args.clearing_interval
+    return kwargs
 
 
 def _setup_logging(exp_dir):
@@ -318,13 +347,22 @@ def run_llamea(args):
                     "skeleton" if args.skeleton_example else "ox"),
         "comma": args.comma,
         "repeat_penalty": args.repeat_penalty,
+        "patience": args.patience,
+        "parent_selection": args.parent_selection,
+        "tournament_size": args.tournament_size,
+        "adaptive_mutation": args.adaptive_mutation,
+        "feature_guided_mutation": args.feature_guided_mutation,
+        "niching": args.niching,
+        "niche_radius": args.niche_radius,
+        "novelty_k": args.novelty_k,
+        "novelty_archive_size": args.novelty_archive_size,
+        "eval_repeats": args.eval_repeats,
         "max_workers": args.max_workers,
         "results_dir": args.results_dir,
         "log_dir": log_base,
         # Procedencia (reproducibilidad entre local y cluster).
         "server_info": server_info,
         "model_info": model_info,
-        "repeat_penalty": args.repeat_penalty,
         "stall_timeout": args.stall_timeout,
     }
     with open(os.path.join(exp_dir, "run.json"), "w") as file:
@@ -417,6 +455,7 @@ def run_llamea(args):
         minimization=False,
         max_workers=args.max_workers,
         experiment_name=args.experiment_name,
+        **_llamea_kwargs(args),
     )
 
     # 3b. Costo del modelo: foto de `/metrics` (vLLM) antes de la corrida; los
@@ -428,7 +467,21 @@ def run_llamea(args):
         print("Metricas Prometheus no disponibles; se usaran solo las del cliente "
               "(tokens y latencia).")
 
-    best = llamea.run()
+    if args.patience:
+        print(f"Parada temprana: se corta tras {args.patience} evaluaciones sin "
+              "mejora del mejor HV.")
+    stop_reason = "budget reached"
+    try:
+        best = llamea.run()
+    except EarlyStop as error:
+        # Parada temprana: LLaMEA no llego a devolver nada, pero el evaluador ya
+        # tiene el mejor operador guardado y el checkpoint esta en disco.
+        stop_reason = f"early stop (patience={args.patience})"
+        best = fitness.best_solution()
+        logger.warning("Parada temprana: %s", error)
+        if best is None:
+            raise
+        print(f"Parada temprana: {error}")
     train_fitness = best.fitness
     print(f"Best train fitness (HV): {train_fitness}")
     print(f"Best code:\n{best.code}")
@@ -481,7 +534,7 @@ def run_llamea(args):
             counters["evaluated_valid"] / args.budget
             if counters.get("evaluated_valid") is not None and args.budget else None
         ),
-        "stop_reason": "budget reached",
+        "stop_reason": stop_reason,
         "cost": cost,
     })
 
@@ -536,30 +589,68 @@ def run_llamea(args):
     #    usa la evaluacion de MOHH-R; nunca se usa durante la busqueda).
     if args.eval_test:
         test_paths = _select_instances(instance_paths(train=False), args.test_instances, args.seed)
-        print(f"Evaluando el mejor operador en {len(test_paths)} instancias de test...")
+        repeats = max(1, args.eval_repeats)
+        print(f"Evaluando el mejor operador en {len(test_paths)} instancias de test "
+              f"({repeats} repeticion(es))...")
         test_fronts_dir = (None if args.no_save_fronts
                            else os.path.join(exp_dir, "fronts_test"))
-        test_fitness = _make_evaluator(test_paths, args, fronts_dir=test_fronts_dir)
-        try:
-            evaluated = test_fitness(_EvalSolution(best.code))
-        except Exception:
-            logger.exception("Fallo la evaluacion en test")
-            evaluated = None
-        if evaluated is not None:
-            info["test_instances"] = len(test_paths)
-            info["test_fitness"] = evaluated.fitness
-            info["test_seeds"] = {"moea_internal": args.seed, "selection": args.seed}
+        hvs, rep_seeds = [], []
+        baseline_hv = None
+        degenerate = None
+        for rep in range(repeats):
+            # Con varias repeticiones se fija el marco al panel de referencia
+            # (`stationary`): asi las semillas son comparables entre si. Con una
+            # sola, se conserva el marco GE de siempre.
+            rep_args = argparse.Namespace(**vars(args))
+            rep_args.seed = args.seed + rep * 7919
+            rep_args.patience = 0
+            rep_args.repeat_penalty = 1.0
+            if repeats > 1:
+                rep_args.stationary_frame = True
+            rep_dir = test_fronts_dir if (test_fronts_dir is None or repeats == 1) \
+                else os.path.join(test_fronts_dir, f"rep-{rep}")
+            test_fitness = _make_evaluator(test_paths, rep_args, fronts_dir=rep_dir)
+            try:
+                evaluated = test_fitness(_EvalSolution(best.code))
+            except Exception:
+                logger.exception("Fallo la evaluacion en test (rep %d)", rep)
+                evaluated = None
+            if evaluated is None:
+                continue
+            if np.isfinite(evaluated.fitness):
+                hvs.append(float(evaluated.fitness))
+            rep_seeds.append(rep_args.seed)
             if test_fitness.normalize:
-                info["test_reference_hv"] = test_fitness.reference_scores()
-                info["test_degenerate_instances"] = test_fitness.frame_degenerate_instances()
-            if test_fronts_dir:
+                baseline_hv = test_fitness.reference_scores()
+                degenerate = test_fitness.frame_degenerate_instances()
+            if rep_dir:
                 try:
-                    test_fitness.save_frame(os.path.join(test_fronts_dir, "frame.npz"))
+                    test_fitness.save_frame(os.path.join(rep_dir, "frame.npz"))
                 except Exception:  # noqa: BLE001
                     logger.exception("No se pudo guardar el marco de test")
-            print(f"Test fitness (HV): {evaluated.fitness}")
-            if info.get("test_reference_hv"):
-                print(f"Test HV de la linea base en el mismo marco: {info['test_reference_hv']}")
+        if hvs:
+            info["test_instances"] = len(test_paths)
+            info["test_fitness"] = float(np.mean(hvs))
+            info["test_fitness_repeats"] = {
+                "n": len(hvs),
+                "values": [round(v, 6) for v in hvs],
+                "mean": float(np.mean(hvs)),
+                "sd": float(np.std(hvs, ddof=1)) if len(hvs) > 1 else 0.0,
+                "min": float(np.min(hvs)),
+                "max": float(np.max(hvs)),
+                "frame": ("stationary (panel de referencia)" if repeats > 1
+                          else info.get("frame")),
+                "seeds": rep_seeds,
+            }
+            if baseline_hv:
+                info["test_reference_hv"] = baseline_hv
+            if degenerate is not None:
+                info["test_degenerate_instances"] = degenerate
+            info["test_seeds"] = {"moea_internal": rep_seeds, "selection": args.seed}
+            print(f"Test fitness (HV, {len(hvs)} rep): {info['test_fitness']:.6f} "
+                  f"(sd {info['test_fitness_repeats']['sd']:.6f})")
+            if baseline_hv:
+                print(f"Test HV de la linea base en el mismo marco: {baseline_hv}")
 
     with open(os.path.join(exp_dir, "llamea_best_info.json"), "w") as file:
         json.dump(info, file, indent=2)
@@ -698,6 +789,39 @@ def main(argv=None):
                              "el ranking) cuando el codigo ya se habia evaluado. 1.0 "
                              "lo desactiva. Ataca el anclaje del modelo (repeticion "
                              "literal del mismo operador).")
+    # Diversidad y parada temprana (mecanismos de LLaMEA 1.4).
+    parser.add_argument("--patience", type=int, default=0,
+                        help="Parada temprana: corta tras N evaluaciones sin mejora "
+                             "del mejor HV (0 = sin parada; requiere --max-workers 1).")
+    parser.add_argument("--parent-selection",
+                        choices=["random", "roulette", "tournament"],
+                        default="tournament",
+                        help="Seleccion de padres de LLaMEA (default tournament; "
+                             "LLaMEA usa random).")
+    parser.add_argument("--tournament-size", type=int, default=3,
+                        help="Candidatos muestreados por torneo.")
+    parser.add_argument("--adaptive-mutation", action="store_true", default=True,
+                        help="Mutacion adaptativa de LLaMEA (default activada).")
+    parser.add_argument("--no-adaptive-mutation", dest="adaptive_mutation",
+                        action="store_false",
+                        help="Desactiva la mutacion adaptativa.")
+    parser.add_argument("--feature-guided-mutation", action="store_true",
+                        help="Guia la mutacion con caracteristicas del AST (LLaMEA).")
+    parser.add_argument("--niching",
+                        choices=["none", "sharing", "clearing", "novelty", "map_elites"],
+                        default="none",
+                        help="Niching de LLaMEA (presion de diversidad sobre el "
+                             "archivo; map_elites usa un descriptor del codigo).")
+    parser.add_argument("--niche-radius", type=float, default=None)
+    parser.add_argument("--adaptive-niche-radius", action="store_true")
+    parser.add_argument("--clearing-interval", type=int, default=None)
+    parser.add_argument("--novelty-k", type=int, default=5,
+                        help="Vecinos para el puntaje de novedad (niching=novelty).")
+    parser.add_argument("--novelty-archive-size", type=int, default=None,
+                        help="Tamano del archivo de novedad (default de LLaMEA: 100).")
+    parser.add_argument("--eval-repeats", type=int, default=1,
+                        help="Repeticiones de la evaluacion final en test (reporta "
+                             "media y desviacion del HV; 1 = solo una).")
     parser.add_argument("--reference-operators", default="ox,pbx,pmx,cx,erx",
                         help="Panel de operadores de referencia para los limites, "
                              "separados por coma (subconjunto de ox,pbx,pmx,cx,erx).")

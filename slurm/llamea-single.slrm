@@ -1,0 +1,196 @@
+#!/bin/bash
+#
+# UN SOLO JOB: servidor vLLM + busqueda LLaMEA en el mismo nodo GPU.
+#
+# Es el camino recomendado para la busqueda: el cliente no es CPU-bound (el
+# cuello es la inferencia) y asi no hay que coordinar dos jobs ni esperar a que
+# arranque el servidor en otro nodo. El modelo se sirve en 127.0.0.1 y la
+# busqueda se conecta a localhost; al terminar, el trap apaga el servidor.
+#
+# Uso recomendado (login, un solo comando; descarga y envia):
+#     bash slurm/llamea-all.sh
+#     PROFILE=h100-fp16 BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+#
+# Uso directo (el modelo ya debe estar en la raiz persistente):
+#     MODEL=Qwen/Qwen2.5-Coder-32B-Instruct-AWQ sbatch slurm/llamea-single.slrm
+#     PROFILE=h100-fp16 sbatch --constraint=H100 slurm/llamea-single.slrm
+#
+# Opciones por entorno: BUDGET (1000), SOLVER, TRAIN_INSTANCES, TEST_INSTANCES,
+# MO_GENERATIONS, MO_POPULATION_SIZE, TEMPERATURE, MAX_TOKENS (4096), SEED,
+# EVAL_TEST=1, EVAL_REPEATS, MUTATION=1, COMMA=1, REFINE_ONLY=1,
+# NO_SAVE_FRONTS=1, REPEAT_PENALTY (0.5), PATIENCE (0), STALL_TIMEOUT (3600),
+# PARENT_SELECTION (tournament), NICHING (none), EXPERIMENT_NAME, CATEGORY,
+# PORT, PROFILE, MODEL, GPU_MEM_UTIL, MAX_MODEL_LEN, TENSOR_PARALLEL,
+# EXTRA_VLLM_ARGS, EXTRA.
+# COMPARE=1 agrega, en el mismo job, la comparacion pareada del mejor operador
+# contra los clasicos (COMPARE_SPLIT=test, COMPARE_REPEATS=11, COMPARE_NAME).
+#
+# El entorno (module + .conda-env con vLLM) lo prepara slurm/ixachi-setup-env.sh
+# con WITH_VLLM=1, la primera vez, en el login.
+#
+#SBATCH -J llamea-single
+#SBATCH -p gpu
+#SBATCH -N 1
+#SBATCH -c 24
+#SBATCH --mem=64G
+#SBATCH --gres=gpu:1
+#SBATCH --constraint="A100|H100"
+#SBATCH --time=3-00:00:00
+#SBATCH -o llamea-single-%j.out
+#SBATCH -e llamea-single-%j.err
+
+set -euo pipefail
+
+cd "$SLURM_SUBMIT_DIR"
+
+# Modelo y limites segun el perfil de GPU (override con MODEL/GPU_MEM_UTIL/...).
+source slurm/llamea-gpu-profile.sh
+PORT="${PORT:-8000}"
+
+echo "Nodo:           $SLURM_JOB_NODELIST"
+echo "Perfil:         $PROFILE"
+echo "Modelo:         $MODEL"
+echo "Constraint:     $CONSTRAINT"
+echo "max-model-len:  $MAX_MODEL_LEN   gpu-mem-util: $GPU_MEM_UTIL"
+
+# vLLM usa varios hilos para tokenizacion/planificacion; el MOEA interno es
+# pymoo/numpy y no escala con 24 nucleos, asi que se deja un hilo BLAS.
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export PYTHONUNBUFFERED=1
+
+module load python/miniforge
+eval "$(conda shell.bash hook)"
+conda activate "$SLURM_SUBMIT_DIR/.conda-env"
+
+mkdir -p results
+MODEL_ROOT="$(python scripts/mohh_models.py root)"
+# vLLM y huggingface no deben escribir nada en $HOME (se borra y no lo ven los
+# nodos de computo): todo el cache va a la raiz persistente.
+export HF_HOME="$MODEL_ROOT"
+export HUGGINGFACE_HUB_CACHE="$MODEL_ROOT/hub"
+echo "Raiz de modelos: $MODEL_ROOT"
+
+# 1. Modelo: debe estar en la raiz persistente (se baja en el login). Si falta,
+#    se intenta (solo funciona si este nodo tiene salida a internet).
+if ! python scripts/mohh_models.py verify "$MODEL" >/dev/null 2>&1; then
+    echo "AVISO: '$MODEL' no esta en la raiz persistente; intentando descargar."
+    python scripts/mohh_models.py download "$MODEL"
+fi
+# vLLM necesita la RUTA local (los pesos viven en <raiz>/<org>--<modelo>, no en
+# el cache de HF). El nombre servido sigue siendo el ID para el cliente.
+MODEL_PATH="$(python scripts/mohh_models.py path "$MODEL")"
+if [ ! -f "$MODEL_PATH/config.json" ]; then
+    echo "ERROR: no se encontro el modelo en $MODEL_PATH" >&2
+    echo "Descargalo en el login: python scripts/mohh_models.py download $MODEL" >&2
+    exit 1
+fi
+echo "Pesos locales:  $MODEL_PATH"
+python -c "import vllm; print('vLLM', vllm.__version__)" || true
+
+# 2. Servidor vLLM en 127.0.0.1 (solo este job lo usa) + sampler de GPU a CSV.
+GPU_CSV="${GPU_CSV:-results/llamea-single-gpu-${SLURM_JOB_ID}.csv}"
+SAMPLER_PID=""
+if command -v nvidia-smi >/dev/null 2>&1; then
+    (
+        echo "timestamp,index,name,utilization_gpu_pct,memory_used_mib,memory_total_mib,power_draw_w,temperature_c"
+        while true; do
+            nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu \
+                --format=csv,noheader,nounits 2>/dev/null || true
+            sleep 30
+        done
+    ) > "$GPU_CSV" &
+    SAMPLER_PID=$!
+    echo "Sampler GPU: $GPU_CSV (pid $SAMPLER_PID)"
+fi
+
+python -m vllm.entrypoints.openai.api_server \
+    --model "$MODEL_PATH" \
+    --served-model-name "$MODEL" \
+    --host 127.0.0.1 \
+    --port "$PORT" \
+    --gpu-memory-utilization "$GPU_MEM_UTIL" \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --tensor-parallel-size "${TENSOR_PARALLEL:-1}" \
+    ${EXTRA_VLLM_ARGS:-} &
+VLLM_PID=$!
+
+cleanup() {
+    kill "$VLLM_PID" 2>/dev/null || true
+    [ -n "$SAMPLER_PID" ] && kill "$SAMPLER_PID" 2>/dev/null || true
+}
+trap cleanup EXIT TERM INT
+
+# 3. Busqueda LLaMEA contra el servidor local (espera a que cargue el modelo).
+ARGS=(
+    --model "$MODEL"
+    --base-url "http://127.0.0.1:${PORT}/v1"
+    --no-download
+    --wait-server
+    --server-timeout "${SERVER_TIMEOUT:-1800}"
+    --budget "${BUDGET:-1000}"
+    --temperature "${TEMPERATURE:-0.2}"
+    --max-tokens "${MAX_TOKENS:-4096}"
+    --repeat-penalty "${REPEAT_PENALTY:-0.5}"
+    --patience "${PATIENCE:-0}"
+    --stall-timeout "${STALL_TIMEOUT:-3600}"
+    --parent-selection "${PARENT_SELECTION:-tournament}"
+    --niching "${NICHING:-none}"
+    --eval-repeats "${EVAL_REPEATS:-1}"
+    --solver "${SOLVER:-MOEAD}"
+    --train-instances "${TRAIN_INSTANCES:-8}"
+    --mo-generations "${MO_GENERATIONS:-30}"
+    --mo-population-size "${MO_POPULATION_SIZE:-30}"
+    --instance-timeout "${INSTANCE_TIMEOUT:-300}"
+    --seed "${SEED:-42}"
+    --reference-operators "${REFERENCE_OPERATORS:-ox,pbx,pmx,cx,erx}"
+    --results-dir "results/${CATEGORY:-searches}"
+    --experiment-name "${EXPERIMENT_NAME:-LLaMEA_single}"
+)
+if [ "${EVAL_TEST:-0}" = "1" ]; then
+    ARGS+=(--eval-test --test-instances "${TEST_INSTANCES:-8}")
+fi
+if [ "${MUTATION:-0}" = "1" ]; then
+    ARGS+=(--mutation)
+fi
+if [ "${COMMA:-0}" = "1" ]; then
+    ARGS+=(--comma)
+fi
+if [ "${REFINE_ONLY:-0}" = "1" ]; then
+    ARGS+=(--refine-only)
+fi
+if [ "${NO_SAVE_FRONTS:-0}" = "1" ]; then
+    ARGS+=(--no-save-fronts)
+fi
+if [ -n "${EXTRA:-}" ]; then
+    # shellcheck disable=SC2206
+    ARGS+=(${EXTRA})
+fi
+
+python -m mohh.llamea.run "${ARGS[@]}"
+
+# 4. (Opcional) Comparacion pareada contra los clasicos, en el MISMO job.
+#    COMPARE=1 la activa; usa el mejor operador que acaba de escribir la busqueda.
+if [ "${COMPARE:-0}" = "1" ]; then
+    EXP_DIR="results/${CATEGORY:-searches}/${EXPERIMENT_NAME:-LLaMEA_single}"
+    BEST_OPERATOR="$EXP_DIR/llamea_best_operator.py"
+    if [ -f "$BEST_OPERATOR" ]; then
+        echo "Comparando el mejor operador contra los clasicos ..."
+        python scripts/compare_operators.py \
+            --operator "llamea=$BEST_OPERATOR" \
+            --operator ox=classic:ox \
+            --operator pbx=classic:pbx \
+            --operator pmx=classic:pmx \
+            --operator cx=classic:cx \
+            --operator erx=classic:erx \
+            --split "${COMPARE_SPLIT:-test}" \
+            --repeats "${COMPARE_REPEATS:-11}" \
+            --name "${COMPARE_NAME:-${EXPERIMENT_NAME:-LLaMEA_single}_vs_clasicos}" \
+            --save-fronts
+    else
+        echo "AVISO: no existe $BEST_OPERATOR; se omite COMPARE=1." >&2
+    fi
+fi
+
+echo "Fin del job unico."

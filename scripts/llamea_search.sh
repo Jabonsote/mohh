@@ -31,6 +31,12 @@
 #   MAX_TOKENS (vacío)                   máximo de tokens de salida por petición
 #   REPEAT_PENALTY (0.5)                 presión de diversidad: castigo al
 #                                        ranking por repetir código (1.0 = off)
+#   PATIENCE (0)                         parada temprana tras N evaluaciones sin
+#                                        mejorar el mejor HV (0 = off)
+#   PARENT_SELECTION (tournament)        random | roulette | tournament
+#   NICHING (none)                       none | sharing | clearing | novelty |
+#                                        map_elites (presión de diversidad)
+#   EVAL_REPEATS (1)                     repeticiones de la evaluación final
 #   STALL_TIMEOUT (0)                    segundos sin generación nueva antes de
 #                                        abortar (watchdog; 0 = off)
 #   CATEGORY (searches)                  subcarpeta de results/
@@ -70,6 +76,10 @@ args=(
   --mo-population-size "$MO_POPULATION_SIZE"
   --temperature "$TEMPERATURE"
   --repeat-penalty "${REPEAT_PENALTY:-0.5}"
+  --patience "${PATIENCE:-0}"
+  --parent-selection "${PARENT_SELECTION:-tournament}"
+  --niching "${NICHING:-none}"
+  --eval-repeats "${EVAL_REPEATS:-1}"
   --stall-timeout "${STALL_TIMEOUT:-0}"
   --results-dir "results/$CATEGORY"
   --experiment-name "$NAME"

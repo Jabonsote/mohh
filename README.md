@@ -268,8 +268,14 @@ Defaults and the flags that matter:
 | `--solver MOEAD` | inner MOEA (`MOEAD`, `NSGAII`, `SMSEMOA`) | `MOEAD` |
 | `--mo-generations` / `--mo-population-size` | inner MOEA budget | `30` / `30` |
 | `--repeat-penalty F` | diversity pressure: ranking score is multiplied by `F` when the code was already evaluated (`1.0` disables) | `0.5` |
+| `--patience N` | early stop after `N` evaluations without improving the best HV (`0` = off) | `0` |
+| `--parent-selection` | LLaMEA parent selection: `random`, `roulette`, `tournament` | `tournament` |
+| `--adaptive-mutation` / `--no-adaptive-mutation` | LLaMEA adaptive mutation | on |
+| `--feature-guided-mutation` | guide mutation with AST features | off |
+| `--niching` | LLaMEA diversity archive: `none`, `sharing`, `clearing`, `novelty`, `map_elites` | `none` |
 | `--stall-timeout S` | watchdog: abort and log if no new generation in `S` seconds | `0` (off) |
 | `--eval-test` | evaluate the best operator on the held-out test set | off |
+| `--eval-repeats R` | repeat the final test evaluation `R` times (reports mean/sd) | `1` |
 | `--mutation` | add `Swap_Mutation` to the inner MOEA | off |
 | `--dry-run` | validate server + config, write them, exit without spending GPU | off |
 | `--stationary-frame` | normalize with the reference panel only (HV fixed); default is the GE frame | off |
@@ -280,10 +286,15 @@ Before a long run, validate everything cheaply:
 python -m mohh.llamea.run --model <model> --base-url <url> --dry-run
 ```
 
-### B. Cluster (ixachi) — commands in order
+### B. Cluster (ixachi) — one command
 
 Same Modules + local-conda methodology as the GE stage. Everything lives in
-LUSTRE; `$HOME` is wiped and compute nodes cannot see it.
+LUSTRE; `$HOME` is wiped, compute nodes cannot see it and have **no internet**.
+
+The recommended path is a **single SLURM job** that serves the model with vLLM
+on `127.0.0.1` and runs the search against it, so there is nothing to
+coordinate. A login wrapper downloads the weights (the login has internet) and
+submits that job.
 
 ```bash
 # 0. On the LOGIN node: get the code where the compute nodes can see it.
@@ -292,51 +303,72 @@ git clone -b cluster https://github.com/Jabonsote/mohh.git
 cd mohh
 git pull origin cluster
 
-# 1. Create the environment ONCE, on the login node (has internet). No admin
-#    rights needed: it all goes into ./.conda-env (visible from compute nodes).
+# 1. Create the environment ONCE, on the login node (no admin rights needed:
+#    it all goes into ./.conda-env, visible from the compute nodes).
 module load python/miniforge
 WITH_VLLM=1 bash slurm/ixachi-setup-env.sh
-#    (omit WITH_VLLM=1 on an account that only SUBMITS searches to a vLLM that
-#     someone else runs; then just `bash slurm/ixachi-setup-env.sh`)
 
-# 2. Download the model ONCE, on the login node, into the PERSISTENT root
-#    (LUSTRE/$SCRATCH, never $HOME). Compute nodes usually have no internet.
-MODEL=Qwen/Qwen2.5-Coder-7B-Instruct bash slurm/llamea-download-model.slrm
-python scripts/mohh_models.py root     # show the persistent root
-python scripts/mohh_models.py list     # state and size of downloaded models
+# 2. ONE COMMAND: download the model (login) + submit the single GPU job
+#    (vLLM server + LLaMEA search). Big model by default (32B AWQ).
+PROFILE=big-quant BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
 
-# 3. Start the vLLM server on the GPU partition (long-lived job).
-MODEL=Qwen/Qwen2.5-Coder-7B-Instruct sbatch slurm/llamea-vllm-server.slrm
+# Full pipeline in the SAME job: search + test evaluation + paired comparison
+# of the best operator against OX/PBX/PMX/CX/ERX (11 repetitions, same frame).
+PROFILE=big-quant BUDGET=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
+
+# 3. Monitor.
 squeue --user=$USER
-tail -f llamea-vllm-*.out              # wait for "Uvicorn running on http://0.0.0.0:8000"
-
-# 4. Submit the search, pointed at the server, and wait for it to load.
-MODEL=Qwen/Qwen2.5-Coder-7B-Instruct \
-BUDGET=1000 TRAIN_INSTANCES=8 EVAL_TEST=1 \
-REPEAT_PENALTY=0.5 STALL_TIMEOUT=3600 \
-LLAMEA_SERVER_JOBID=<jobid-vllm> \
-sbatch slurm/llamea-generate.slrm      # or LLAMEA_SERVER_HOST=<node>
-
-# 5. Monitor the two jobs and read the artifacts.
-squeue --user=$USER
-tail -f llamea-generate-*.out          # job stdout
-cat llamea-generate-*.err              # job stderr (empty = clean)
-tail -f results/searches/<name>/llamea.log     # per-generation log
-tail -f results/searches/<name>/error.log      # warnings/tracebacks only
-cat results/searches/<name>/progress.txt       # one line: best-so-far
+tail -f llamea-single-*.out             # server load + per-generation search
+cat llamea-single-*.err                 # empty = clean
+tail -f results/searches/LLaMEA_single/llamea.log     # per-generation log
+tail -f results/searches/LLaMEA_single/error.log      # warnings/tracebacks only
+cat results/searches/LLaMEA_single/progress.txt       # best-so-far
 ```
 
-Both jobs at once, chained so the search starts only after the server is up:
+#### GPU/model profiles (big models)
+
+`slurm/llamea-gpu-profile.sh` picks the largest model that fits. Override with
+`MODEL=...`, `CONSTRAINT=...`, `MAX_MODEL_LEN=...`, `GPU_MEM_UTIL=...`.
+
+| `PROFILE` | Model | VRAM | Fits on |
+|---|---|---|---|
+| `big-quant` (default) | `Qwen/Qwen2.5-Coder-32B-Instruct-AWQ` | ~19–21 GB | A100 40 GB, H100 80 GB |
+| `h100-fp16` | `Qwen/Qwen2.5-Coder-32B-Instruct` | ~65 GB | H100 80 GB |
+| `a100-fp16` | `Qwen/Qwen2.5-Coder-14B-Instruct` | ~29 GB | A100 40 GB |
+| `a10-quant` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | ~10 GB | A10 24 GB |
+| `smoke` | `Qwen/Qwen2.5-1.5B-Instruct` | ~3 GB | any (smoke tests only) |
+
+Examples:
 
 ```bash
-MODEL=Qwen/Qwen2.5-Coder-7B-Instruct BUDGET=1000 EVAL_TEST=1 \
-  bash slurm/llamea-full-chain.sh
+PROFILE=h100-fp16 BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh      # sanity check
 ```
 
-Extra environment knobs for `slurm/llamea-generate.slrm`: `SOLVER`,
-`MO_GENERATIONS`, `MO_POPULATION_SIZE`, `TEMPERATURE`, `MUTATION=1`, `COMMA=1`,
-`REFINE_ONLY=1`, `NO_SAVE_FRONTS=1`, `MAX_TOKENS`, `CATEGORY`, `EXPERIMENT_NAME`,
-`SEED`.
+#### Alternative: a persistent server + separate searches
+
+Use this when you will run **many** searches against the same loaded model
+(avoids reloading the 32B weights for every run).
+
+```bash
+# Server (long-lived GPU job).
+sbatch slurm/llamea-vllm-server.slrm
+tail -f llamea-vllm-*.out               # wait for "Uvicorn running on ...:8000"
+
+# Each search points at the server node (it can autodetect it by JobID).
+BUDGET=1000 EVAL_TEST=1 LLAMEA_SERVER_JOBID=<jobid-vllm> \
+  sbatch slurm/llamea-generate.slrm
+
+# Or chain both with the dependency after the server starts.
+BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-full-chain.sh
+```
+
+Extra environment knobs for the search jobs: `SOLVER`, `MO_GENERATIONS`,
+`MO_POPULATION_SIZE`, `TEMPERATURE`, `MAX_TOKENS` (4096), `MUTATION=1`,
+`COMMA=1`, `REFINE_ONLY=1`, `NO_SAVE_FRONTS=1`, `REPEAT_PENALTY`, `PATIENCE`,
+`PARENT_SELECTION`, `NICHING`, `EVAL_REPEATS`, `CATEGORY`, `EXPERIMENT_NAME`,
+`SEED`. Add `COMPARE=1` to run the paired comparison against the classics in
+the same job (`COMPARE_REPEATS=11`, `COMPARE_SPLIT=test`).
 
 ### C. Compare discovered operators against the classics
 
@@ -365,7 +397,7 @@ distribution of the best-per-run:
 
 ```bash
 for i in 0 1 2 3 4; do
-  MODEL=Qwen/Qwen2.5-Coder-7B-Instruct BASE_URL=http://<node>:8000/v1 NO_DOWNLOAD=1 \
+  MODEL=Qwen/Qwen2.5-Coder-32B-Instruct-AWQ BASE_URL=http://<node>:8000/v1 NO_DOWNLOAD=1 \
   SEED=$((1000+i)) NAME=proc_r$i CATEGORY=searches BUDGET=1000 \
     ./scripts/llamea_search.sh
 done
@@ -403,8 +435,8 @@ compute nodes can see, never `$HOME`. Subcommands: `root`, `list`, `path`,
 
 ```bash
 python scripts/mohh_models.py root
-python scripts/mohh_models.py download Qwen/Qwen2.5-Coder-7B-Instruct
-python scripts/mohh_models.py verify Qwen/Qwen2.5-Coder-7B-Instruct --load-check
+python scripts/mohh_models.py download Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
+python scripts/mohh_models.py verify Qwen/Qwen2.5-Coder-32B-Instruct-AWQ --load-check
 ```
 
 ---

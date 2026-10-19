@@ -31,6 +31,21 @@ from mohh.generation.utilities.algorithm.HH_auxiliars import is_permutation
 
 FALLBACK_SCORE = 0.0
 
+
+class EarlyStop(BaseException):
+    """Parada temprana: el mejor ranking no mejoro en `patience` evaluaciones.
+
+    El evaluador la lanza desde `__call__` y `run.py` la captura para cerrar la
+    corrida con el mejor operador guardado (no se pierde nada y no se gastan
+    cientos de generaciones repitiendo el mismo anclaje).
+
+    Hereda de `BaseException` a proposito: LLaMEA envuelve la evaluacion en
+    `try/except Exception` (llamea.py, `evolve_solution`) y convertiria la
+    parada en un simple candidato con score 0. Con `BaseException` la senal
+    atraviesa ese `except` y llega a `run.py`. Requiere `max_workers=1` (el
+    default); con joblib/loky el transporte de BaseException no es confiable.
+    """
+
 # Limites de tiempo para el codigo generado por el LLM. Protegen la busqueda de
 # operadores que no terminan (`while True`, recursiones sin corte). Son
 # necesarios porque con `max_workers=1` joblib usa un backend secuencial que NO
@@ -560,7 +575,7 @@ class OperatorEvaluator:
                  seed=42, model_name="MOEAD", mutation=False,
                  instance_timeout=INSTANCE_TIMEOUT, normalize=True,
                  bounds=None, reference_operators=None, archive=None,
-                 frame="ge", fronts_dir=None, repeat_penalty=0.5):
+                 frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0):
         self.instance_paths = [str(p) for p in instance_paths]
         self.mo_generations = mo_generations
         self.mo_population_size = mo_population_size
@@ -577,6 +592,13 @@ class OperatorEvaluator:
         # su HV multiplicado por `repeat_penalty` **solo para el ranking** (el HV
         # crudo se conserva para el reporte). `1.0` desactiva la penalizacion.
         self.repeat_penalty = float(repeat_penalty)
+        # Parada temprana: si el mejor ranking no mejora en `patience`
+        # evaluaciones seguidas, se lanza `EarlyStop` y `run.py` cierra con el
+        # mejor operador guardado (evita gastar 1000 generaciones en un anclaje).
+        self.patience = int(patience)
+        self._best_ranking = None
+        self._best_solution = None
+        self._since_improvement = 0
         self._first_seen = {}            # clave -> generacion de la primera vez
         self._duplicates = 0             # repeticiones exactas evaluadas
         # Frentes crudos por candidato (evidencia de la evaluacion). Si es None
@@ -849,7 +871,13 @@ class OperatorEvaluator:
             "distinct_evaluated": len(self._cache),
             "duplicate_evaluations": self._duplicates,
             "repeat_penalty": self.repeat_penalty,
+            "patience": self.patience,
+            "since_improvement": self._since_improvement,
         }
+
+    def best_solution(self):
+        """El mejor `Solution` visto (para cerrar tras una parada temprana)."""
+        return self._best_solution
 
     def reference_scores(self):
         """HV de cada operador de referencia en el marco final (tabla comparable).
@@ -898,6 +926,25 @@ class OperatorEvaluator:
 
 
     # -- fitness ---------------------------------------------------------- #
+    def _track_best(self, ranking_score, solution):
+        """Actualiza el mejor-hasta-ahora y aplica la parada por paciencia.
+
+        Se llama en TODOS los caminos de evaluacion (exito, codigo invalido y
+        HV indefinido) para que `--patience` cuente tambien las generaciones
+        que no producen nada util.
+        """
+        if self._best_ranking is None or ranking_score > self._best_ranking + 1e-12:
+            self._best_ranking = ranking_score
+            self._best_solution = solution
+            self._since_improvement = 0
+        else:
+            self._since_improvement += 1
+            if self.patience and self._since_improvement >= self.patience:
+                raise EarlyStop(
+                    f"sin mejora del mejor HV en {self.patience} evaluaciones "
+                    f"(mejor={self._best_ranking:.6f})"
+                )
+
     def __call__(self, solution, logger=None):
         from mohh.core.utilities.algorithm.MO import compute_hypervolume
 
@@ -921,6 +968,7 @@ class OperatorEvaluator:
             if error is None:
                 error = ValueError(message)
             solution.set_scores(FALLBACK_SCORE, message, error)
+            self._track_best(FALLBACK_SCORE, solution)
             return solution
 
         # Marco GE: el candidato puede ampliar la envolvente de la instancia, en
@@ -948,6 +996,7 @@ class OperatorEvaluator:
                 "those instances as NaN)"
             )
             solution.set_scores(FALLBACK_SCORE, reason, ValueError(reason))
+            self._track_best(FALLBACK_SCORE, solution)
             return solution
 
         # Presion de diversidad (no de prompt): si el codigo ya se habia
@@ -971,6 +1020,10 @@ class OperatorEvaluator:
                 f"({score:.6f} -> {ranking_score:.6f}). Repeating an operator does "
                 f"not improve the search: propose a STRUCTURALLY DIFFERENT crossover."
             )
+
+        # Parada temprana y mejor-hasta-ahora: se sigue el mejor ranking. Si no
+        # mejora en `patience` evaluaciones seguidas, se corta la corrida.
+        self._track_best(ranking_score, solution)
 
         rank = self.archive.add(ranking_score, novelty, key=key)
         total = len(self.archive)
@@ -1160,7 +1213,7 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
                     seed=42, model_name="MOEAD", mutation=False,
                     instance_timeout=INSTANCE_TIMEOUT, normalize=True,
                     bounds=None, reference_operators=None, archive=None,
-                    frame="ge", fronts_dir=None, repeat_penalty=0.5):
+                    frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0):
     """Construye la funcion de fitness que consume LLaMEA.
 
     @param train_instances: lista de rutas de instancias (train o test).
@@ -1201,4 +1254,5 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
         frame=frame,
         fronts_dir=fronts_dir,
         repeat_penalty=repeat_penalty,
+        patience=patience,
     )

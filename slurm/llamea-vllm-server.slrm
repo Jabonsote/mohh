@@ -6,20 +6,27 @@
 # (/v1) hasta el time limit; la busqueda LLaMEA se conecta a este nodo.
 #
 # Envio:
-#   MODEL=Qwen/Qwen2.5-1.5B-Instruct sbatch slurm/llamea-vllm-server.slrm
+#   sbatch slurm/llamea-vllm-server.slrm                 # perfil big-quant (32B AWQ)
+#   PROFILE=h100-fp16 sbatch --constraint=H100 slurm/llamea-vllm-server.slrm
+#
+# El modelo por defecto lo elige slurm/llamea-gpu-profile.sh (32B AWQ, el mayor
+# que cabe en cualquier GPU). Para correr la busqueda completa usa mejor el job
+# unico: `bash slurm/llamea-all.sh`.
 #
 # Requisitos (una sola vez, en el login): slurm/ixachi-setup-env.sh con
 # WITH_VLLM=1, para que .conda-env tenga vLLM. El script carga el modulo y el
 # env igual que los jobs de GE.
 #
 # Opciones por entorno (todas opcionales):
+#   PROFILE=big-quant             perfil GPU/modelo (llamea-gpu-profile.sh)
+#   MODEL=org/modelo              override del modelo
 #   PORT=8000                     puerto del servidor
 #   GPU_MEM_UTIL=0.9              --gpu-memory-utilization (bajar si hay OOM)
-#   MAX_MODEL_LEN=8192            --max-model-len
+#   MAX_MODEL_LEN=16384           --max-model-len
 #   TENSOR_PARALLEL=1             --tensor-parallel-size (varias GPUs)
 #   EXTRA_VLLM_ARGS="..."         argumentos extra para vllm
 #   GPU_SAMPLE_SECONDS=30         periodo del sampler nvidia-smi -> CSV
-#   GPU_CSV=...                   ruta del CSV (default llamea-gpu-<jobid>.csv)
+#   GPU_CSV=...                   ruta del CSV (default results/llamea-gpu-<jobid>.csv)
 #
 # Los pesos se descargan/verifican en la raiz persistente (LUSTRE/$SCRATCH),
 # no en $HOME: `python scripts/mohh_models.py root` la muestra.
@@ -31,13 +38,14 @@
 #SBATCH -N 1
 #SBATCH -c 24
 #SBATCH --gres=gpu:1
+#SBATCH --constraint="A100|H100"
 #SBATCH --time=30-00:00:00
 #SBATCH -o llamea-vllm-%j.out
 #SBATCH -e llamea-vllm-%j.err
 
 cd "$SLURM_SUBMIT_DIR"
 
-MODEL="${MODEL:?Define MODEL, ej: MODEL=Qwen/Qwen2.5-1.5B-Instruct sbatch slurm/llamea-vllm-server.slrm}"
+source slurm/llamea-gpu-profile.sh
 PORT="${PORT:-8000}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.9}"
 TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
@@ -54,9 +62,14 @@ module load python/miniforge
 eval "$(conda shell.bash hook)"
 conda activate "$SLURM_SUBMIT_DIR/.conda-env"
 
+# Artefactos bajo results/ (incluye el CSV del sampler de GPU).
+mkdir -p results
+
 # 0. Raiz persistente de pesos (LUSTRE/$SCRATCH; nunca $HOME).
-echo "Raiz de modelos:"
-python scripts/mohh_models.py root
+MODEL_ROOT="$(python scripts/mohh_models.py root)"
+export HF_HOME="$MODEL_ROOT"
+export HUGGINGFACE_HUB_CACHE="$MODEL_ROOT/hub"
+echo "Raiz de modelos: $MODEL_ROOT"
 
 # 1. Modelo en la raiz persistente. Lo normal es bajarlo ANTES con
 #    `slurm/llamea-download-model.slrm` desde el login (los nodos de computo
@@ -68,13 +81,20 @@ else
     echo "AVISO: '$MODEL' no esta en la raiz persistente; intentando descargar."
     python scripts/mohh_models.py download "$MODEL"
 fi
+# vLLM carga desde la RUTA local del layout persistente, no desde el id de HF.
+MODEL_PATH="$(python scripts/mohh_models.py path "$MODEL")"
+if [ ! -f "$MODEL_PATH/config.json" ]; then
+    echo "ERROR: no se encontro el modelo en $MODEL_PATH" >&2
+    exit 1
+fi
+echo "Pesos locales: $MODEL_PATH"
 
 # 1b. Procedencia: version de vLLM (el resultado depende de ella).
 python -c "import vllm; print('vLLM', vllm.__version__)" || echo "AVISO: vllm no importable."
 
 # 2. Sampler de GPU -> CSV, en segundo plano: utilidad real y energia por
 #    muestra, ademas de las metricas Prometheus que recoge la busqueda.
-GPU_CSV="${GPU_CSV:-llamea-gpu-${SLURM_JOB_ID}.csv}"
+GPU_CSV="${GPU_CSV:-results/llamea-gpu-${SLURM_JOB_ID}.csv}"
 GPU_SAMPLE_SECONDS="${GPU_SAMPLE_SECONDS:-30}"
 GPU_SAMPLER_PID=""
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -113,7 +133,7 @@ echo "   python -m mohh.llamea.run --model $MODEL --base-url http://$SLURM_JOB_N
 #    Se lanza en segundo plano (no `exec`) para que el trap EXIT mate al
 #    sampler de GPU al terminar; el job entero vive en el cgroup de SLURM.
 python -m vllm.entrypoints.openai.api_server \
-    --model "$MODEL" \
+    --model "$MODEL_PATH" \
     --served-model-name "$MODEL" \
     --host 0.0.0.0 \
     --port "$PORT" \
