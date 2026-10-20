@@ -33,6 +33,17 @@ def _atomic_write_json(path, payload):
     _atomic_write_text(path, json.dumps(payload, indent=2) + "\n")
 
 
+def _metadata(candidate, key):
+    """`candidate.get_metadata(key)` si existe (LLaMEA Solution), o None."""
+    getter = getattr(candidate, "get_metadata", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter(key)
+    except Exception:  # noqa: BLE001 - el log no debe tumbar la corrida
+        return None
+
+
 class ResultsExperimentLogger(ExperimentLogger):
     """`ExperimentLogger` de LLaMEA que escribe dentro de `results/`.
 
@@ -45,6 +56,9 @@ class ResultsExperimentLogger(ExperimentLogger):
     #: Objeto con `usage_snapshot()` (normalmente `VLLM_LLM`) para registrar
     #: tokens por generacion. Se fija desde `run.py` antes de construir LLaMEA.
     token_source = None
+    #: Objeto con `diversity_snapshot()` (normalmente `OperatorEvaluator`) para
+    #: registrar la diversidad conductual acumulada por generacion.
+    diversity_source = None
     #: Semillas y configuracion del proceso (se fijan desde `run.py`). Se
     #: escriben en cada registro de `individuals.jsonl` y
     #: `generation_summary.jsonl` para que la trazabilidad sea autosuficiente.
@@ -100,6 +114,9 @@ class ResultsExperimentLogger(ExperimentLogger):
             "tokens_total": record.get("tokens_total"),
             "wall_seconds": record.get("wall_seconds"),
         }
+        diversity_source = type(self).diversity_source
+        if diversity_source is not None and hasattr(diversity_source, "diversity_snapshot"):
+            payload["diversity"] = diversity_source.diversity_snapshot()
         _atomic_write_json(checkpoint, payload)
 
         fitness = best.fitness if best is not None else None
@@ -145,6 +162,13 @@ class ResultsExperimentLogger(ExperimentLogger):
                             else float(candidate.fitness)),
                 "error": (str(error)[:300] if error else None),
                 "novelty": getattr(candidate, "novelty", None),
+                # Huella conductual que dejo el evaluador (si el codigo paso la
+                # validacion): permite post-procesar diversidad sin re-ejecutar.
+                # `get_metadata` es opcional para no romper individuos de tests
+                # o de versiones antiguas de LLaMEA.
+                "behavior_family": _metadata(candidate, "behavior_family"),
+                "behavioral_novelty": _metadata(candidate, "behavioral_novelty"),
+                "behavior_cell": _metadata(candidate, "behavior_cell"),
                 "operator": getattr(candidate, "operator", None),
                 "parent_ids": getattr(candidate, "parent_ids", None),
                 # Trazabilidad: semilla y configuracion del proceso.
@@ -240,6 +264,22 @@ class ResultsExperimentLogger(ExperimentLogger):
                 "failed_requests": usage.get("failed_requests", 0),
             })
             self._last_usage = usage
+
+        # Diversidad conductual acumulada (no textual): mecanismos distintos,
+        # entropia, novedad media y cobertura del archivo MAP-Elites.
+        diversity_source = type(self).diversity_source
+        if diversity_source is not None and hasattr(diversity_source, "diversity_snapshot"):
+            snapshot = diversity_source.diversity_snapshot()
+            record.update({
+                "behavior_unique": snapshot.get("unique_behavior"),
+                "behavior_entropy": snapshot.get("behavior_entropy"),
+                "behavior_effective": snapshot.get("effective_behaviors"),
+                "behavior_mean_distance": snapshot.get("mean_pairwise_distance"),
+                "behavior_mean_novelty": snapshot.get("mean_novelty"),
+                "behavior_near_duplicates": snapshot.get("near_duplicates"),
+                "behavior_archive_coverage": snapshot.get("archive_coverage"),
+                "behavior_family_counts": snapshot.get("family_counts"),
+            })
 
         self._last_time = now
 

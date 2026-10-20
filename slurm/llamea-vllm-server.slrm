@@ -72,16 +72,18 @@ export HF_HOME="$MODEL_ROOT"
 export HUGGINGFACE_HUB_CACHE="$MODEL_ROOT/hub"
 echo "Raiz de modelos: $MODEL_ROOT"
 
-# 1. Modelo en la raiz persistente. Lo normal es bajarlo ANTES con
-#    `slurm/llamea-download-model.slrm` desde el login (los nodos de computo
-#    suelen NO tener internet). Aqui solo se verifica; si falta y el nodo si
-#    tiene salida, se intenta descargar y se falla con mensaje claro si no.
-if python scripts/mohh_models.py verify "$MODEL" >/dev/null 2>&1; then
-    echo "Modelo presente y verificado: $MODEL"
-else
-    echo "AVISO: '$MODEL' no esta en la raiz persistente; intentando descargar."
-    python scripts/mohh_models.py download "$MODEL"
+# 1. Modelo en la raiz persistente. El job GPU NUNCA descarga: los nodos de
+#    computo no tienen internet y no se debe gastar una asignacion de cola en
+#    un fallo de red. El camino normal (`slurm/llamea-all.sh`) ya lo baja en el
+#    login; para el servidor persistente se baja una vez con:
+#      python scripts/mohh_models.py download "$MODEL"
+if ! python scripts/mohh_models.py verify "$MODEL" >/dev/null 2>&1; then
+    echo "ERROR: '$MODEL' no esta en la raiz persistente." >&2
+    echo "       En el login: python scripts/mohh_models.py download '$MODEL'" >&2
+    echo "       O usa el job unico: PROFILE=$PROFILE bash slurm/llamea-all.sh" >&2
+    exit 1
 fi
+echo "Modelo presente y verificado: $MODEL"
 # vLLM carga desde la RUTA local del layout persistente, no desde el id de HF.
 MODEL_PATH="$(python scripts/mohh_models.py path "$MODEL")"
 if [ ! -f "$MODEL_PATH/config.json" ]; then

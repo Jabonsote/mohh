@@ -95,8 +95,9 @@ fi
 # 6. Raiz persistente de pesos (no $HOME) y recordatorio del siguiente paso.
 if [ "${WITH_VLLM:-0}" = "1" ]; then
     python scripts/mohh_models.py root || true
-    echo "Descarga el modelo en el login (con internet):"
-    echo "  MODEL=<org/modelo> bash slurm/llamea-download-model.slrm"
+    echo "No hace falta descargar el modelo por separado: el comando unico"
+    echo "lo verifica/descarga en el login y envia UN job GPU con vLLM+busqueda."
+    echo "  bash slurm/llamea-all.sh"
 fi
 
 echo "Ambiente listo. Envia trabajos con: sbatch slurm/mohh-generate.slrm"

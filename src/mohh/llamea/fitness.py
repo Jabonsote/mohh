@@ -28,8 +28,20 @@ from datetime import datetime
 import numpy as np
 
 from mohh.generation.utilities.algorithm.HH_auxiliars import is_permutation
+from mohh.llamea.diversity import (
+    BehaviorTracker,
+    behavior_descriptor,
+    behavior_fingerprint,
+)
 
 FALLBACK_SCORE = 0.0
+
+
+def _set_metadata(solution, key, value):
+    """`Solution.add_metadata` si existe; no rompe con soluciones de prueba."""
+    add = getattr(solution, "add_metadata", None)
+    if callable(add):
+        add(key, value)
 
 
 class EarlyStop(BaseException):
@@ -50,7 +62,7 @@ class EarlyStop(BaseException):
 # operadores que no terminan (`while True`, recursiones sin corte). Son
 # necesarios porque con `max_workers=1` joblib usa un backend secuencial que NO
 # aplica el `eval_timeout` de LLaMEA.
-OPERATOR_CALL_TIMEOUT = 10.0   # segundos por llamada de validacion (n <= 50)
+OPERATOR_CALL_TIMEOUT = 10.0   # segundos por llamada de validacion (n <= 100)
 COMPILE_TIMEOUT = 30.0         # segundos para `exec` del codigo del LLM (código de módulo)
 INSTANCE_TIMEOUT = 300.0       # segundos por instancia del MOEA interno (configurable)
 
@@ -190,7 +202,7 @@ def _exception_feedback(n, exc):
 def validate_operator(crossover_func):
     """Valida `crossover` en tamanos reales del dominio: `(ok, motivo)`.
 
-    Prueba n = 11, 24 y 50 (el rango de las instancias mQAP) y comprueba:
+    Prueba n = 11, 24, 50 y 100 (el rango de las instancias mQAP) y comprueba:
     que no se modifiquen los padres, que devuelva una permutacion (o la tupla
     `(child1, child2)`), que no sea una vista de un padre y que no lance
     excepciones. `motivo` es el texto que se le da al LLM como feedback; antes
@@ -200,8 +212,10 @@ def validate_operator(crossover_func):
     rng = np.random.RandomState(0)
     # Tamanos del dominio mQAP (las instancias van de n=11 a n=100). No se usan
     # tamanos muy chicos: algunas primitivas de MOHH-R (p.ej. preserve_segments)
-    # no estan definidas para n<3 y no se debe tocar el nucleo.
-    for n in (11, 24, 50):
+    # no estan definidas para n<3 y no se debe tocar el nucleo. Se incluye 100
+    # porque un operador puede funcionar hasta 50 y romper en la instancia mas
+    # grande; sin esta prueba el fallo aparecia despues, gastando el MOEA.
+    for n in (11, 24, 50, 100):
         x = rng.permutation(n)
         y = rng.permutation(n)
         x_before = x.copy()
@@ -268,7 +282,7 @@ def recombination_novelty(crossover_func, trials=DEGENERACY_TRIALS, seed=1234):
     rng = np.random.RandomState(seed)
     distances = []
     for _ in range(trials):
-        n = int(rng.choice([11, 16, 24, 50]))
+        n = int(rng.choice([11, 16, 24, 50, 100]))
         x = rng.permutation(n)
         y = rng.permutation(n)
         try:
@@ -575,7 +589,8 @@ class OperatorEvaluator:
                  seed=42, model_name="MOEAD", mutation=False,
                  instance_timeout=INSTANCE_TIMEOUT, normalize=True,
                  bounds=None, reference_operators=None, archive=None,
-                 frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0):
+                 frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0,
+                 diversity_feedback=True, diversity_log=None):
         self.instance_paths = [str(p) for p in instance_paths]
         self.mo_generations = mo_generations
         self.mo_population_size = mo_population_size
@@ -601,11 +616,33 @@ class OperatorEvaluator:
         self._since_improvement = 0
         self._first_seen = {}            # clave -> generacion de la primera vez
         self._duplicates = 0             # repeticiones exactas evaluadas
+        # Diversidad conductual (no textual): huella de lo que hace el operador
+        # sobre pares de padres fijos, novedad, familias y archivo MAP-Elites.
+        # `diversity_feedback` agrega el diagnostico al feedback que ve el LLM.
+        self.diversity = BehaviorTracker()
+        self.diversity_feedback = bool(diversity_feedback)
+        self._evaluations = 0            # llamadas a __call__ (incluye invalidas)
+        self._valid_evaluations = 0      # llamadas con HV definido
         # Frentes crudos por candidato (evidencia de la evaluacion). Si es None
         # no se guarda nada (`--no-save-fronts`).
         self.fronts_dir = fronts_dir
         if fronts_dir:
             os.makedirs(fronts_dir, exist_ok=True)
+        # `diversity.jsonl` es una traza independiente del manifest de frentes.
+        # `run.py` pasa `exp_dir/diversity.jsonl` para conservarla incluso con
+        # `--no-save-fronts`; si no se indica, se deriva del directorio de
+        # frentes (compatibilidad con llamadas antiguas).
+        self.diversity_log = diversity_log or (
+            os.path.join(os.path.dirname(os.path.abspath(fronts_dir)),
+                         "diversity.jsonl")
+            if fronts_dir else None
+        )
+        if self.diversity_log:
+            os.makedirs(
+                os.path.dirname(os.path.abspath(self.diversity_log)), exist_ok=True
+            )
+        self._diversity_lock = threading.Lock()
+        self._fronts_lock = threading.Lock()
         self._cache = {}
         self._instances = None
         self._init_dir = tempfile.mkdtemp(prefix="llamea_init_")
@@ -624,7 +661,14 @@ class OperatorEvaluator:
         """
         state = self.__dict__.copy()
         state["_instances"] = None
+        state.pop("_diversity_lock", None)
+        state.pop("_fronts_lock", None)
         return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._diversity_lock = threading.Lock()
+        self._fronts_lock = threading.Lock()
 
     def _params_overrides(self):
         return {
@@ -866,14 +910,114 @@ class OperatorEvaluator:
         return {key: (score, values) for key, (score, values, _) in self._scores.items()}
 
     def duplicate_stats(self):
-        """Estadisticas de diversidad: codigos distintos y repeticiones exactas."""
-        return {
+        """Estadisticas de diversidad: texto, comportamiento y repeticiones.
+
+        `distinct_evaluated` cuenta codigos distintos; `unique_behavior` cuenta
+        mecanismos distintos (con un umbral de distancia conductual). La
+        diferencia entre ambos es la senal de anclaje: muchos codigos nuevos que
+        hacen lo mismo. `validity_rate` usa todas las evaluaciones (incluidas las
+        invalidas) como denominador; antes se dividia por el presupuesto, lo que
+        podia dar >100% cuando el MOEA evalua varios individuos por generacion.
+        """
+        stats = {
             "distinct_evaluated": len(self._cache),
             "duplicate_evaluations": self._duplicates,
             "repeat_penalty": self.repeat_penalty,
             "patience": self.patience,
             "since_improvement": self._since_improvement,
+            "evaluations": self._evaluations,
+            "valid_evaluations": self._valid_evaluations,
+            "validity_rate": (
+                self._valid_evaluations / self._evaluations
+                if self._evaluations else 0.0
+            ),
         }
+        stats.update(self.diversity.snapshot())
+        return stats
+
+    def diversity_snapshot(self):
+        """Resumen de diversidad conductual (para logger y reporte)."""
+        return self.diversity.snapshot()
+
+    def diversity_entries(self):
+        """Entradas de diversidad serializables (fingerprints incluidos)."""
+        return self.diversity.entries_snapshot()
+
+    def _behavioral_feedback(self, info, entry):
+        """Diagnostico conductual accionable para el LLM (reflexion tipo ReEvo)."""
+        if not self.diversity_feedback:
+            return ""
+        fingerprint = entry.get("fingerprint")
+        if fingerprint is None or not info:
+            return (
+                " Behavioral profile unavailable: the operator passed the basic "
+                "checks but failed the fixed-pair behavior probe. Keep it simple "
+                "and deterministic."
+            )
+
+        recombination, structure = behavior_descriptor(fingerprint)
+        family = info.get("family", "mixed")
+        closest = info.get("closest_reference")
+        closest_distance = info.get("closest_distance", 0.0)
+        novelty = float(info.get("novelty", 0.0))
+        coverage = float(info.get("coverage", 0.0))
+        hint = info.get("hint", "")
+        note = (
+            f" Behavioral profile: family={family}, closest classic={closest} "
+            f"(distance {closest_distance:.2f}), recombination={recombination:.2f}, "
+            f"structure preservation={structure:.2f}."
+        )
+        if info.get("cached"):
+            note += (
+                " This is the same code as a previous candidate; changing the "
+                "mechanism is the only way to get a new behavior."
+            )
+        elif novelty < self.diversity.threshold:
+            nearest = self.diversity.nearest(info.get("key"))
+            where = ""
+            if nearest:
+                where = (
+                    f" (generation {nearest.get('generation')}, family "
+                    f"{nearest.get('family')}, description "
+                    f"'{nearest.get('description')[:80]}')"
+                )
+            note += (
+                f" BEHAVIORALLY REDUNDANT: novelty {novelty:.3f} is below "
+                f"{self.diversity.threshold:.2f}; this behaves almost exactly like "
+                f"a previously evaluated operator{where}. A syntactic rewrite will "
+                f"not help: change the recombination mechanism."
+            )
+        else:
+            note += (
+                f" Behavioral novelty: {novelty:.3f} (0 = same behavior as an "
+                f"existing operator, 1 = unlike any tried)."
+            )
+        note += f" Behavior archive coverage: {coverage:.0%}."
+        if hint:
+            note += f" Under-explored direction: {hint}."
+        return note
+
+    def _log_diversity(self, key, info, entry, score):
+        """Traza durable por operador, aunque la corrida se corte a mitad."""
+        if not self.diversity_log:
+            return
+        record = {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "key_sha1": hashlib.sha1(key.encode("utf-8")).hexdigest()[:12],
+            "generation": info.get("generation"),
+            "family": info.get("family"),
+            "closest_reference": info.get("closest_reference"),
+            "closest_distance": info.get("closest_distance"),
+            "novelty": info.get("novelty"),
+            "cell": list(info.get("cell", ())),
+            "coverage": info.get("coverage"),
+            "fitness": float(score),
+            "fingerprint": [float(value) for value in entry["fingerprint"]],
+            "description": info.get("description", ""),
+        }
+        with self._diversity_lock:
+            with open(self.diversity_log, "a") as handle:
+                handle.write(json.dumps(record) + "\n")
 
     def best_solution(self):
         """El mejor `Solution` visto (para cerrar tras una parada temprana)."""
@@ -948,6 +1092,7 @@ class OperatorEvaluator:
     def __call__(self, solution, logger=None):
         from mohh.core.utilities.algorithm.MO import compute_hypervolume
 
+        self._evaluations += 1
         # Cache por codigo: en corridas largas el LLM repite el mismo operador
         # muchas veces (p. ej. el OX del ejemplo). Reutilizar los frentes
         # ahorra todo el MOEA interno sin cambiar el resultado.
@@ -999,6 +1144,8 @@ class OperatorEvaluator:
             self._track_best(FALLBACK_SCORE, solution)
             return solution
 
+        self._valid_evaluations += 1
+
         # Presion de diversidad (no de prompt): si el codigo ya se habia
         # evaluado, se penaliza **solo el ranking** (el HV crudo se conserva
         # para el reporte) y el feedback lo dice de forma accionable. Es la
@@ -1021,13 +1168,44 @@ class OperatorEvaluator:
                 f"not improve the search: propose a STRUCTURALLY DIFFERENT crossover."
             )
 
+        # Diversidad conductual: se mide una sola vez por codigo (el fingerprint
+        # se calculo en `_evaluate_code`) y se expone en `Solution.metadata`
+        # para que LLaMEA use `distance_metric` / `behavior_descriptor`
+        # conductuales en novelty, clearing y MAP-Elites.
+        diversity_info = None
+        fingerprint = entry.get("fingerprint")
+        if fingerprint is not None:
+            diversity_info = self.diversity.add(
+                key, fingerprint, score,
+                generation=generation,
+                description=getattr(solution, "description", ""),
+            )
+            _set_metadata(solution, "behavior_fingerprint",
+                          [float(value) for value in fingerprint])
+            _set_metadata(solution, "behavior_descriptor",
+                          behavior_descriptor(fingerprint))
+            _set_metadata(solution, "behavior_family", diversity_info["family"])
+            _set_metadata(solution, "behavioral_novelty",
+                          float(diversity_info["novelty"]))
+            _set_metadata(solution, "behavior_cell",
+                          list(diversity_info["cell"]))
+            self._log_diversity(key, diversity_info, entry, score)
+
+        # El archivo de ranking guarda candidatos unicos. Antes una repeticion
+        # se agregaba con la misma clave y su HV penalizado sobrescribia el de
+        # la primera evaluacion (el mejor podia bajar solo por repetir codigo).
+        # Ahora la repeticion reutiliza el ranking del original y la penalizacion
+        # queda solo en `ranking_score`, que es lo que ve LLaMEA.
+        if cached_hit:
+            rank = self.archive.rank(key)
+        else:
+            rank = self.archive.add(ranking_score, novelty, key=key)
+        total = len(self.archive)
+        best = self.archive.best()
+
         # Parada temprana y mejor-hasta-ahora: se sigue el mejor ranking. Si no
         # mejora en `patience` evaluaciones seguidas, se corta la corrida.
         self._track_best(ranking_score, solution)
-
-        rank = self.archive.add(ranking_score, novelty, key=key)
-        total = len(self.archive)
-        best = self.archive.best()
         reuse = " (reused cached evaluation)" if cached_hit else ""
         frame_note = (
             "normalized with the consolidated front of the reference operators and "
@@ -1074,6 +1252,7 @@ class OperatorEvaluator:
             f"Per-instance HV: {[None if hv is None else round(hv, 6) for hv in per_instance]}."
             f"{degenerate_note}{duplicate_note}{reuse}"
         )
+        feedback += self._behavioral_feedback(diversity_info, entry)
         solution.set_scores(ranking_score, feedback)
         return solution
 
@@ -1088,14 +1267,24 @@ class OperatorEvaluator:
             namespace = compile_operator(solution.code)
         except ValueError as e:
             return {"fronts": None, "per_instance": [], "score": None,
-                    "error": str(e), "exception": e, "novelty": 0.0}
+                    "error": str(e), "exception": e, "novelty": 0.0,
+                    "fingerprint": None}
 
         # Chequeo barato de degeneracion ANTES del MOEA: si el operador solo
         # copia a un padre no vale la pena correr las instancias.
         ok, novelty, reason = recombination_novelty(namespace["crossover"])
         if not ok:
             return {"fronts": None, "per_instance": [], "score": None,
-                    "error": reason, "exception": ValueError(reason), "novelty": 0.0}
+                    "error": reason, "exception": ValueError(reason), "novelty": 0.0,
+                    "fingerprint": None}
+
+        # Huella conductual sobre pares de padres fijos. Es independiente del
+        # MOEA y se reutiliza si el LLM repite el codigo. Si el operador falla
+        # en algun par, `behavior_fingerprint` devuelve None y la evaluacion
+        # sigue: la diversidad es un diagnostico, no un requisito de validez.
+        fingerprint = behavior_fingerprint(
+            namespace["crossover"], timeout=OPERATOR_CALL_TIMEOUT
+        )
 
         instances = self._ensure_instances()
         init_params(**self._params_overrides())
@@ -1117,6 +1306,7 @@ class OperatorEvaluator:
                     "error": f"Crossover failed on an instance: {type(e).__name__}: {e}",
                     "exception": e,
                     "novelty": novelty,
+                    "fingerprint": fingerprint,
                 }
             if self.normalize:
                 fronts.append(front)
@@ -1128,11 +1318,13 @@ class OperatorEvaluator:
 
         if self.normalize:
             return {"fronts": fronts, "per_instance": [], "score": None,
-                    "error": None, "exception": None, "novelty": novelty}
+                    "error": None, "exception": None, "novelty": novelty,
+                    "fingerprint": fingerprint}
 
         return {"fronts": None, "per_instance": list(fronts),
                 "score": float(np.mean(fronts)), "error": None,
-                "exception": None, "novelty": novelty}
+                "exception": None, "novelty": novelty,
+                "fingerprint": fingerprint}
 
     # -- artefactos ------------------------------------------------------- #
     def _save_candidate_fronts(self, key, entry, solution):
@@ -1156,10 +1348,11 @@ class OperatorEvaluator:
         digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
         filename = f"candidate-{digest}.npz"
         np.savez_compressed(os.path.join(self.fronts_dir, filename), **arrays)
+        generation = getattr(solution, "generation", None)
         record = {
             "time": datetime.now().isoformat(timespec="seconds"),
             "key_sha1": digest,
-            "generation": getattr(solution, "generation", None),
+            "generation": int(generation) if generation is not None else None,
             "name": getattr(solution, "name", None),
             "instances": [os.path.basename(path) for path in self.instance_paths],
             "saved_instances": sorted(arrays),
@@ -1167,8 +1360,9 @@ class OperatorEvaluator:
             "score_at_evaluation": entry.get("score"),
             "novelty": entry.get("novelty"),
         }
-        with open(os.path.join(self.fronts_dir, "manifest.jsonl"), "a") as handle:
-            handle.write(json.dumps(record) + "\n")
+        with self._fronts_lock:
+            with open(os.path.join(self.fronts_dir, "manifest.jsonl"), "a") as handle:
+                handle.write(json.dumps(record) + "\n")
 
     def save_frame(self, path=None):
         """Guarda el marco de normalizacion final por instancia.
@@ -1213,7 +1407,8 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
                     seed=42, model_name="MOEAD", mutation=False,
                     instance_timeout=INSTANCE_TIMEOUT, normalize=True,
                     bounds=None, reference_operators=None, archive=None,
-                    frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0):
+                    frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0,
+                    diversity_feedback=True, diversity_log=None):
     """Construye la funcion de fitness que consume LLaMEA.
 
     @param train_instances: lista de rutas de instancias (train o test).
@@ -1255,4 +1450,6 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
         fronts_dir=fronts_dir,
         repeat_penalty=repeat_penalty,
         patience=patience,
+        diversity_feedback=diversity_feedback,
+        diversity_log=diversity_log,
     )

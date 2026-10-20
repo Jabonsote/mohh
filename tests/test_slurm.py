@@ -413,6 +413,53 @@ def test_llamea_all_is_one_command():
     assert "--export=ALL" in content
     # Puede correr en el login (modulo opcional).
     assert "command -v module" in content
+    # Un solo comando: prepara el ambiente si falta y no encadena jobs.
+    assert "ixachi-setup-env.sh" in content
+    assert "WITH_VLLM=1" in content
+    assert "SLURM_JOB_ID" in content  # no permite sbatch dentro de un job
+    assert "DRY_RUN" in content
+    assert "WAIT" in content
+
+
+def test_llamea_short_alias_delegates_to_the_one_command():
+    content = _read("llamea.sh")
+    assert "llamea-all.sh" in content
+    assert "exec bash" in content
+
+
+@pytest.mark.parametrize("script", ["llamea-single.slrm",
+                                    "llamea-vllm-server.slrm"])
+def test_gpu_jobs_never_download_on_a_compute_node(script):
+    """El job GPU debe fallar rapido si falta el modelo, no intentar bajar 20 GB."""
+    content = _read(script)
+    # Puede aparecer en el mensaje de ayuda ("en el login: ..."), pero no como
+    # comando ejecutado por el job.
+    assert not re.search(r"^\s*python scripts/mohh_models\.py download",
+                         content, re.MULTILINE)
+    assert "mohh_models.py verify" in content
+    assert "llamea-all.sh" in content  # instruccion accionable
+
+
+def test_llamea_full_chain_is_deprecated_by_default():
+    content = _read("llamea-full-chain.sh")
+    assert "ALLOW_TWO_JOBS" in content
+    assert "exec bash slurm/llamea-all.sh" in content
+
+
+def test_setup_env_does_not_send_users_to_a_separate_download_job():
+    content = _read("ixachi-setup-env.sh")
+    assert "llamea-download-model.slrm" not in content
+    assert "bash slurm/llamea-all.sh" in content
+
+
+@pytest.mark.parametrize("script", ["llamea.sh", "llamea-all.sh",
+                                    "llamea-single.slrm"])
+def test_one_command_scripts_have_valid_bash_syntax(script):
+    result = subprocess.run(
+        ["bash", "-n", os.path.join(SLURM_DIR, script)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_llamea_generate_passes_diversity_flags_to_the_search():

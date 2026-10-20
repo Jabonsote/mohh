@@ -448,6 +448,9 @@ def test_llamea_kwargs_enable_diversity_mechanisms():
     assert kwargs["parent_selection"] == "tournament"
     assert kwargs["adaptive_mutation"] is True
     assert kwargs["tournament_size"] == 3
+    # Hooks conductuales nativos de LLaMEA (novelty/clearing/map_elites).
+    assert callable(kwargs["distance_metric"])
+    assert callable(kwargs["behavior_descriptor"])
     assert "niching" not in kwargs  # "none" no se pasa a LLaMEA
 
     args.niching = "map_elites"
@@ -587,6 +590,16 @@ def test_memory_block_lists_recent_mechanisms_only():
     assert "- a" not in block
     assert "Do NOT repeat" in block
     assert memory_block([]) == ""
+    assert memory_block(["a"], limit=0) == ""
+
+
+def test_description_and_memory_block_are_bounded():
+    """Una linea gigante del LLM no debe inflar todas las peticiones siguientes."""
+    description = "x" * 5000
+    assert len(extract_description(f"# Description: {description}\n")) == 240
+    block = memory_block([description] * 20, limit=12)
+    assert len(block) <= 4200
+    assert block.count("\n- ") <= 12
 
 
 def test_operator_memory_is_injected_and_bounded(monkeypatch):
@@ -761,6 +774,10 @@ class _ScriptedLLM:
 
 def test_llamea_end_to_end_with_scripted_llm(tmp_path, monkeypatch):
     from llamea import LLaMEA
+    from mohh.llamea.diversity import (
+        solution_behavior_descriptor,
+        solution_distance,
+    )
 
     monkeypatch.chdir(tmp_path)
     response = "# Description: OX crossover\n# Code:\n```python\n" + EXAMPLE_CODE + "\n```\n"
@@ -785,6 +802,8 @@ def test_llamea_end_to_end_with_scripted_llm(tmp_path, monkeypatch):
         parent_selection="tournament",
         tournament_size=2,
         adaptive_mutation=True,
+        distance_metric=solution_distance,
+        behavior_descriptor=solution_behavior_descriptor,
     )
     best = llamea.run()
     assert best.code.strip()

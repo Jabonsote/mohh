@@ -26,6 +26,11 @@ _DESCRIPTION_RE = re.compile(r"#\s*(?:Description|Design idea)\s*:\s*(.+)",
 #: dejar instrucciones nuevas despues del formato de salida.
 _OUTPUT_FORMAT_MARKER = "Answer in exactly this format:"
 
+#: Una descripcion es una linea del LLM; se acota para que 12 recuerdos no
+#: consuman el contexto ni inflen el costo por generacion.
+_MAX_DESCRIPTION_CHARS = 240
+_MAX_MEMORY_BLOCK_CHARS = 4000
+
 
 def extract_description(text: str) -> str:
     """Primera linea de `# Description:` / `# Design idea:` de una respuesta.
@@ -35,7 +40,7 @@ def extract_description(text: str) -> str:
     task prompt, que no es un operador).
     """
     match = _DESCRIPTION_RE.search(text or "")
-    return match.group(1).strip() if match else ""
+    return match.group(1).strip()[:_MAX_DESCRIPTION_CHARS] if match else ""
 
 
 def memory_block(descriptions, limit: int = 12) -> str:
@@ -44,18 +49,28 @@ def memory_block(descriptions, limit: int = 12) -> str:
     El fallo observado en `b200` fue generar 108 veces el mismo operador. El
     `--repeat-penalty` castiga la repeticion en el ranking, pero el modelo sigue
     gastando generaciones en ella; recordarle explicitamente lo ya intentado es
-    mas barato que descartar el candidato despues.
+    mas barato que descartar el candidato despues. Cada descripcion y el bloque
+    completo estan acotados para que la memoria no infle el contexto ni el costo.
     """
-    items = [d.strip() for d in descriptions if d and d.strip()]
-    if not items:
+    items = [d.strip()[:_MAX_DESCRIPTION_CHARS] for d in descriptions
+             if d and d.strip()]
+    if not items or limit <= 0:
         return ""
-    items = items[-limit:]
-    lines = "\n".join(f"- {d}" for d in items)
+    # Ultimos `limit` mecanismos, sin pasarse del presupuesto de caracteres.
+    lines = []
+    used = 0
+    for description in reversed(items[-limit:]):
+        line = f"- {description}"
+        if lines and used + len(line) + 1 > _MAX_MEMORY_BLOCK_CHARS:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    lines.reverse()
     return (
         "\n\n# Mechanisms already generated in this run\n"
         "Do NOT repeat or lightly paraphrase these operators. Deliberately "
         "choose a different combination of order-, position-, adjacency- or "
-        "cycle-based ideas:\n" + lines + "\n"
+        "cycle-based ideas:\n" + "\n".join(lines) + "\n"
     )
 
 
@@ -103,7 +118,8 @@ def ensure_model(model_id: str, allow_download: bool = True,
     if not allow_download:
         raise FileNotFoundError(
             f"Modelo no encontrado en {_hf_cache_dir()} ni como ruta local: "
-            f"{model_id}. Descargalo con: python scripts/ensure_model.py {model_id}"
+            f"{model_id}. Descargalo con: python scripts/mohh_models.py download "
+            f"{model_id}"
         )
 
     print(f"Descargando modelo: {model_id} ...")

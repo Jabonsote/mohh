@@ -19,8 +19,9 @@
 # MO_GENERATIONS, MO_POPULATION_SIZE, TEMPERATURE (0.7), TOP_P (0.8), TOP_K (20),
 # SAMPLING_REPETITION_PENALTY (1.05), MAX_TOKENS (4096), OPERATOR_MEMORY (12),
 # SEED, EVAL_TEST=1, EVAL_REPEATS, MUTATION=1, COMMA=1, REFINE_ONLY=1,
-# NO_SAVE_FRONTS=1, REPEAT_PENALTY (0.5), PATIENCE (0), STALL_TIMEOUT (3600),
-# PARENT_SELECTION (tournament), NICHING (none), EXPERIMENT_NAME, CATEGORY,
+# NO_SAVE_FRONTS=1, REPEAT_PENALTY (0.5), DIVERSITY_FEEDBACK (1),
+# PATIENCE (0), STALL_TIMEOUT (3600), PARENT_SELECTION (tournament),
+# NICHING (none), EXPERIMENT_NAME, CATEGORY,
 # PORT, PROFILE, MODEL, GPU_MEM_UTIL, MAX_MODEL_LEN, TENSOR_PARALLEL,
 # VLLM_ARGS (del perfil), EXTRA_VLLM_ARGS (override), EXTRA.
 # COMPARE=1 agrega, en el mismo job, la comparacion pareada del mejor operador
@@ -74,18 +75,22 @@ export HF_HOME="$MODEL_ROOT"
 export HUGGINGFACE_HUB_CACHE="$MODEL_ROOT/hub"
 echo "Raiz de modelos: $MODEL_ROOT"
 
-# 1. Modelo: debe estar en la raiz persistente (se baja en el login). Si falta,
-#    se intenta (solo funciona si este nodo tiene salida a internet).
+# 1. Modelo: debe estar ya en la raiz persistente. Los nodos de computo no
+#    tienen internet, asi que aqui NO se descarga: se falla rapido y se le dice
+#    al usuario que use el comando unico del login, que baja el modelo y envia
+#    este mismo job. Asi nunca se queda un job ocupando cola para fallar en red.
 if ! python scripts/mohh_models.py verify "$MODEL" >/dev/null 2>&1; then
-    echo "AVISO: '$MODEL' no esta en la raiz persistente; intentando descargar."
-    python scripts/mohh_models.py download "$MODEL"
+    echo "ERROR: '$MODEL' no esta en la raiz persistente." >&2
+    echo "       En el login, un solo comando (baja el modelo y envia el job):" >&2
+    echo "         PROFILE=$PROFILE bash slurm/llamea-all.sh" >&2
+    exit 1
 fi
 # vLLM necesita la RUTA local (los pesos viven en <raiz>/<org>--<modelo>, no en
 # el cache de HF). El nombre servido sigue siendo el ID para el cliente.
 MODEL_PATH="$(python scripts/mohh_models.py path "$MODEL")"
 if [ ! -f "$MODEL_PATH/config.json" ]; then
     echo "ERROR: no se encontro el modelo en $MODEL_PATH" >&2
-    echo "Descargalo en el login: python scripts/mohh_models.py download $MODEL" >&2
+    echo "         PROFILE=$PROFILE bash slurm/llamea-all.sh   # en el login" >&2
     exit 1
 fi
 echo "Pesos locales:  $MODEL_PATH"
@@ -168,6 +173,9 @@ if [ "${REFINE_ONLY:-0}" = "1" ]; then
 fi
 if [ "${NO_SAVE_FRONTS:-0}" = "1" ]; then
     ARGS+=(--no-save-fronts)
+fi
+if [ "${DIVERSITY_FEEDBACK:-1}" = "0" ]; then
+    ARGS+=(--no-diversity-feedback)
 fi
 if [ -n "${EXTRA:-}" ]; then
     # shellcheck disable=SC2206

@@ -26,6 +26,16 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# La cadena de dos jobs se conserva solo para reutilizar un servidor ya
+# cargado. El camino normal es UN job con `llamea-all.sh`: un solo JobID, una
+# sola espera de cola y el modelo se baja en el login dentro del mismo comando.
+if [ "${ALLOW_TWO_JOBS:-0}" != "1" ]; then
+    echo "AVISO: la cadena de dos jobs ya no es el camino recomendado."
+    echo "       Se usa el job unico: bash slurm/llamea-all.sh"
+    echo "       (para forzar la cadena: ALLOW_TWO_JOBS=1 bash slurm/llamea-full-chain.sh)"
+    exec bash slurm/llamea-all.sh
+fi
+
 source slurm/llamea-gpu-profile.sh
 echo "Perfil ${PROFILE}: modelo=$MODEL  constraint=$CONSTRAINT"
 

@@ -268,6 +268,8 @@ Defaults and the flags that matter:
 | `--solver MOEAD` | inner MOEA (`MOEAD`, `NSGAII`, `SMSEMOA`) | `MOEAD` |
 | `--mo-generations` / `--mo-population-size` | inner MOEA budget | `30` / `30` |
 | `--repeat-penalty F` | diversity pressure: ranking score is multiplied by `F` when the code was already evaluated (`1.0` disables) | `0.5` |
+| `--operator-memory N` | inject the last `N` mechanism descriptions into the prompt | `0` (CLI), `12` (cluster job) |
+| `--no-diversity-feedback` | stop adding the behavioral diagnosis to the prompt (measurement/logging continue) | feedback on |
 | `--patience N` | early stop after `N` evaluations without improving the best HV (`0` = off) | `0` |
 | `--parent-selection` | LLaMEA parent selection: `random`, `roulette`, `tournament` | `tournament` |
 | `--adaptive-mutation` / `--no-adaptive-mutation` | LLaMEA adaptive mutation | on |
@@ -303,22 +305,23 @@ git clone -b cluster https://github.com/Jabonsote/mohh.git
 cd mohh
 git pull origin cluster
 
-# 1. Create the environment ONCE, on the login node (no admin rights needed:
-#    it all goes into ./.conda-env, visible from the compute nodes).
-module load python/miniforge
-WITH_VLLM=1 bash slurm/ixachi-setup-env.sh
-
-# 2. ONE COMMAND: download the model (login) + submit the single GPU job
-#    (vLLM server + LLaMEA search). `big-quant` (32B AWQ) is the proven
-#    default; `coder30b-awq` is the evidence-based upgrade for A100/H100.
+# 1. ONE COMMAND. On the first run it creates ./.conda-env (with vLLM) if it
+#    does not exist, downloads/verifies the model in the persistent root, and
+#    submits ONE GPU job that serves vLLM + runs the search. There is no
+#    separate model job and no second queue wait.
 PROFILE=big-quant BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-PROFILE=coder30b-awq BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+
+# Shorter alias with exactly the same behavior.
+BUDGET=1000 EVAL_TEST=1 bash slurm/llamea.sh
 
 # Full pipeline in the SAME job: search + test evaluation + paired comparison
 # of the best operator against OX/PBX/PMX/CX/ERX (11 repetitions, same frame).
 PROFILE=coder30b-awq BUDGET=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
 
-# 3. Monitor.
+# Optional: wait on the login until the job ends and print the tail.
+WAIT=1 PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh
+
+# 2. Monitor (the command above already prints the JobID).
 squeue --user=$USER
 tail -f llamea-single-*.out             # server load + per-generation search
 cat llamea-single-*.err                 # empty = clean
@@ -326,6 +329,11 @@ tail -f results/searches/LLaMEA_single/llamea.log     # per-generation log
 tail -f results/searches/LLaMEA_single/error.log      # warnings/tracebacks only
 cat results/searches/LLaMEA_single/progress.txt       # best-so-far
 ```
+
+If the model is missing, the login wrapper downloads it **before** submitting.
+The GPU job never downloads: it fails fast with the exact command to run on the
+login. This avoids spending a GPU allocation (and queue time) on a node that has
+no internet. `DRY_RUN=1` prints the `sbatch` command without submitting.
 
 #### GPU/model profiles (big models)
 
@@ -364,10 +372,11 @@ PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh           # sanity
 PROFILE=list bash slurm/llamea-all.sh                                  # catalog
 ```
 
-#### Alternative: a persistent server + separate searches
+#### Alternative (advanced): a persistent server + separate searches
 
-Use this when you will run **many** searches against the same loaded model
-(avoids reloading the 32B weights for every run).
+The normal path is the single GPU job above. Only use two jobs when you will
+run **many** searches against the same loaded model (avoids reloading the 32B
+weights for every run). It requires two queue waits, so it is not the default.
 
 ```bash
 # Server (long-lived GPU job).
@@ -377,10 +386,11 @@ tail -f llamea-vllm-*.out               # wait for "Uvicorn running on ...:8000"
 # Each search points at the server node (it can autodetect it by JobID).
 BUDGET=1000 EVAL_TEST=1 LLAMEA_SERVER_JOBID=<jobid-vllm> \
   sbatch slurm/llamea-generate.slrm
-
-# Or chain both with the dependency after the server starts.
-BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-full-chain.sh
 ```
+
+`slurm/llamea-full-chain.sh` now redirects to the single-job command unless you
+set `ALLOW_TWO_JOBS=1`; this prevents accidentally submitting two chained jobs
+and waiting twice in the queue.
 
 Extra environment knobs for the search jobs: `SOLVER`, `MO_GENERATIONS`,
 `MO_POPULATION_SIZE`, `TEMPERATURE` (0.7 in the single job), `TOP_P` (0.8),
@@ -464,11 +474,46 @@ Everything lands under `results/<category>/<name>/`:
 | `individuals.jsonl` | one record per candidate (name, fitness, code sha1, seed) |
 | `prompts/` | the exact prompt of each generation + per-turn token counts |
 | `fronts/` | raw Pareto fronts per candidate (evidence; `--no-save-fronts` to skip) |
+| `diversity.json`, `diversity.jsonl` | behavioral fingerprint, family, novelty, MAP-Elites cell and coverage per operator |
 | `checkpoint.json`, `best_so_far.py` | durable state — a crash never loses the best operator |
 | `seeds.json` | every seed used and the policy |
 | `tokens.json`, `metrics.json` | tokens, inference time, GPU seconds (vLLM `/metrics`), energy |
 | `progress.txt`, `llamea.log`, `error.log` | monitoring + traceback-only log |
 | `llamea_logs/exp-*/` | LLaMEA's own logs (`report.md`, `evolution.png`, `code/`) |
+
+### Behavioral diversity (not code hashes)
+
+Counting distinct code hashes overestimates diversity: a renamed OX is a new
+hash but the same mechanism. The evaluator therefore probes each valid operator
+on fixed parent pairs (sizes 11, 24, 50, 100) and computes a 14-feature
+**behavioral fingerprint**: recombination strength, distance/bias to each
+parent, position/order/adjacency preservation, edge-union preservation, runs
+and parent switches. From it:
+
+- **Behavioral novelty** = distance to the closest operator already tried
+  (low = syntactic rewrite of the same mechanism).
+- **Families** = closest classic mechanism (`order`, `position`, `cycle`,
+  `adjacency`) or `exploratory`/`copy`/`mixed`.
+- **MAP-Elites archive** = best HV per cell of recombination x structure; its
+  coverage shows which mechanism regions remain unexplored.
+- The feedback given to the LLM includes the family, novelty, closest previous
+  operator and the least-explored direction (a light ReEvo-style reflection).
+- LLaMEA's native `distance_metric` and `behavior_descriptor` hooks use the
+  fingerprint, so `--niching novelty`, `clearing` and `map_elites` operate on
+  behavior instead of code length/tokens.
+
+Inspect a run after it finishes (or after a crash, from `diversity.jsonl`):
+
+```bash
+python scripts/analyze_diversity.py results/searches/LLaMEA_single \
+    --plot results/searches/LLaMEA_single/diversity.png
+python scripts/analyze_llamea_runs.py 'results/searches/*' \
+    --summary --csv results/bakeoff.csv
+```
+
+The summary now reports `distinct` (code) vs `mecanismos` (behavior), novelty,
+archive coverage and family counts. `--no-diversity-feedback` keeps measuring
+and logging but stops adding the diagnosis to the prompt.
 
 ### Persistent model weights
 

@@ -331,12 +331,19 @@ python -m mohh.llamea.run \
     --eval-test --save-bounds
 ```
 
-En el cluster (**un solo comando**, recomendado: descarga en el login y envía un
-job que sirve el 32B AWQ y corre la búsqueda):
+En el cluster (**un solo comando**, recomendado: en la primera ejecución crea el
+ambiente, descarga el modelo en el login y envía **un solo job** que sirve el
+32B AWQ y corre la búsqueda):
 
 ```bash
 PROFILE=big-quant BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+# alias equivalente
+BUDGET=1000 EVAL_TEST=1 bash slurm/llamea.sh
 ```
+
+No se envía un job separado para descargar el modelo. El job GPU nunca descarga:
+si faltan los pesos, falla de inmediato con el comando exacto para ejecutar en
+el login, sin ocupar la cola de GPU.
 
 Alternativa con un servidor ya cargado (el cliente solo necesita el ID):
 
@@ -346,11 +353,14 @@ CATEGORY=searches NAME=qwen32b_moead_b100 \
 MODEL=Qwen/Qwen2.5-Coder-32B-Instruct-AWQ ./scripts/llamea_search.sh
 ```
 
-Encadenado servidor + búsqueda en dos jobs (reutiliza el servidor):
+Solo si vas a reutilizar un servidor ya cargado entre muchas búsquedas:
+`slurm/llamea-full-chain.sh` redirige por defecto al job único; para forzar los
+dos jobs usa `ALLOW_TWO_JOBS=1`. El camino normal no necesita dos esperas de cola.
 
 ```bash
 PROFILE=h100-fp16 BUDGET=200 EVAL_TEST=1 \
-  EXPERIMENT_NAME=qwen32b_moead_b200 bash slurm/llamea-full-chain.sh
+  EXPERIMENT_NAME=qwen32b_moead_b200 ALLOW_TWO_JOBS=1 \
+  bash slurm/llamea-full-chain.sh
 ```
 
 Cada corrida deja `run.json` (configuración + comando exacto),

@@ -37,12 +37,15 @@ Puntos clave del diseño:
 
 | Script | Descripción |
 |---|---|
-| `slurm/llamea-vllm-server.slrm` | Carga el modelo en GPU (partición `gpu`) y lo sirve por `/v1` hasta el time limit. Verifica/descarga el modelo antes de servir. |
-| `slurm/llamea-generate.slrm` | Corre la búsqueda LLaMEA contra el servidor vLLM. Acepta `LLAMEA_SERVER_HOST` o `LLAMEA_SERVER_JOBID` (autodetecta el nodo con `squeue`) y espera al servidor. |
-| `slurm/llamea-full-chain.sh` | Encadena ambos jobs: envía el servidor y la búsqueda con `--dependency=after` (la búsqueda espera con `--wait-server`). |
+| `slurm/llamea-all.sh` / `llamea.sh` | **Comando único**: prepara el ambiente, descarga el modelo en el login y envía un solo job GPU con vLLM + búsqueda. |
+| `slurm/llamea-single.slrm` | Job único: sirve el modelo en `127.0.0.1`, corre LLaMEA, evaluación test y comparación opcional; falla rápido si faltan los pesos. |
+| `slurm/llamea-vllm-server.slrm` | Servidor persistente (avanzado): carga el modelo en GPU y lo sirve por `/v1`. |
+| `slurm/llamea-generate.slrm` | Búsqueda contra un servidor persistente. Acepta `LLAMEA_SERVER_HOST` o `LLAMEA_SERVER_JOBID`. |
+| `slurm/llamea-full-chain.sh` | Cadena de dos jobs (avanzado). Por defecto redirige al job único; `ALLOW_TWO_JOBS=1` la fuerza. |
 | `scripts/ensure_model.py` | Verifica/descarga el modelo en el cache de HuggingFace (`--check` solo verifica). |
 | `scripts/local_openai_server.py` | Servidor OpenAI-compatible mínimo (transformers + FastAPI) para **pruebas locales sin vLLM** (misma interfaz `/v1/models` y `/v1/chat/completions`). |
-| `scripts/analyze_llamea_runs.py` | Resume los directorios `exp-*` que deja LLaMEA: operadores válidos/inválidos, errores más frecuentes y operadores válidos distintos (`--list-codes`). |
+| `scripts/analyze_llamea_runs.py` | Resume los directorios `exp-*` que deja LLaMEA: validez, mecanismos conductuales, errores, HV, tokens y latencia (`--summary`, `--csv`, `--list-codes`). |
+| `scripts/analyze_diversity.py` | Mapa conductual, novedad, familias y cobertura MAP-Elites de una corrida (`diversity.json` o `diversity.jsonl`), con `--plot`/`--csv`. |
 
 ### `tests/test_llamea.py`
 
@@ -174,7 +177,12 @@ python -m mohh.llamea.run \
   --eval-test --test-instances 8
 ```
 
-### B) Cluster: servidor vLLM + búsqueda (dos jobs)
+### B) Cluster: servidor vLLM + búsqueda (dos jobs) — histórico
+
+> **Ya no es el camino recomendado.** Usa `bash slurm/llamea-all.sh`: prepara
+> el ambiente si falta, descarga el modelo en el login y envía **un solo job**
+> con vLLM + búsqueda. Esta sección queda como referencia para reutilizar un
+> servidor ya cargado (`ALLOW_TWO_JOBS=1`).
 
 ```bash
 # 1. Servidor con el modelo cargado en GPU (partición gpu)
@@ -539,13 +547,17 @@ reemplaza, como camino recomendado, por **un único job GPU** que:
 3. corre `mohh.llamea.run` contra ese servidor (con `--wait-server`);
 4. apaga el servidor y el sampler de GPU en el `trap EXIT`.
 
-`slurm/llamea-all.sh` es el **único comando** desde el login: descarga el
-modelo (el login tiene internet; los nodos de cómputo no) y envía
-`slurm/llamea-single.slrm`. El servidor y la búsqueda comparten nodo, así que
-no hay que esperar a que aparezca un job ajeno ni adivinar el host.
+`slurm/llamea-all.sh` (alias `slurm/llamea.sh`) es el **único comando** desde
+el login: en la primera ejecución crea `.conda-env` con vLLM si falta,
+verifica/descarga el modelo (el login tiene internet; los nodos de cómputo no)
+y envía `slurm/llamea-single.slrm`. El servidor y la búsqueda comparten nodo, así
+que no hay que esperar a que aparezca un job ajeno ni adivinar el host.
 
-La cadena de dos jobs (`llamea-full-chain.sh`) se conserva para reutilizar un
-servidor ya cargado entre varias búsquedas.
+El job GPU **no descarga**: si faltan los pesos falla de inmediato con el
+comando a ejecutar en el login, en lugar de gastar una asignación de GPU en un
+nodo sin internet. La cadena de dos jobs (`llamea-full-chain.sh`) queda solo
+para reutilizar un servidor ya cargado; por defecto redirige al job único salvo
+`ALLOW_TWO_JOBS=1`.
 
 ### 9.2 Perfiles de GPU con modelos grandes
 
@@ -583,6 +595,29 @@ repetía el mismo operador 108 veces en `b200`):
 `EarlyStop` se lanza desde el evaluador y `run.py` cierra con el mejor operador
 guardado; el checkpoint y `best_so_far.py` ya están en disco.
 
+### 9.3.1 Diversidad conductual (2026-10)
+
+El hash de código no mide diversidad: dos reescrituras del mismo OX son hashes
+distintos y el mismo mecanismo. `src/mohh/llamea/diversity.py` mide **lo que
+hace** el operador sobre pares de padres fijos (n = 11, 24, 50, 100) y resume 14
+características en `[0,1]`: recombinción, distancia/sesgo a cada padre,
+preservación de posiciones, orden (Kendall), adyacencia, unión de aristas,
+rachas y cambios de padre.
+
+| Mecanismo | Uso | Evidencia |
+|---|---|---|
+| Novedad conductual | distancia al operador ya evaluado más cercano | novelty search (Lehman & Stanley) |
+| Archivo MAP-Elites | rejilla recombinción × estructura; mejor HV por celda | Mouret & Clune (2015) |
+| Familias | `order`, `position`, `cycle`, `adjacency`, `exploratory`, `copy`, `mixed`; se pide la menos representada | diagnóstico explícito |
+| Reflexión en feedback | familia, novedad, duplicado conductual y dirección poco explorada | ReEvo / EoH |
+| Hooks de LLaMEA | `distance_metric` y `behavior_descriptor` conductuales; `--niching novelty/clearing/map_elites` dejan de mirar el texto | LLaMEA 1.4 |
+
+Artefactos: `diversity.json` (resumen + fingerprints), `diversity.jsonl`
+(traza incremental), columnas `behavior_*` en `generation_summary.jsonl` y
+`individuals.jsonl`, y `scripts/analyze_diversity.py` para el mapa conductual.
+`--no-diversity-feedback` desactiva solo el texto extra del prompt; la medición
+y el archivo siguen activos. Ver `tests/test_llamea_diversity.py`.
+
 ### 9.4 Evaluación final repetida
 
 `--eval-repeats R` repite la evaluación en test con semillas distintas y
@@ -600,7 +635,9 @@ con `R = 1` se conserva el marco GE de siempre.
 `tests/test_slurm.py` valida los perfiles (default 32B), la sintaxis y el
 contrato del job único (vLLM + búsqueda + `127.0.0.1`), el comando único y el
 paso de las nuevas banderas. `tests/test_llamea.py` cubre `EarlyStop` y
-`_llamea_kwargs`. Suite completa: `166 passed, 1 skipped`.
+`_llamea_kwargs`; `tests/test_llamea_diversity.py` cubre fingerprint, familias,
+archivo, pickling y la regresión de repeticiones. Suite completa:
+`203 passed, 1 skipped`.
 
 ---
 

@@ -132,6 +132,33 @@ def run_record(dirname):
             except (OSError, ValueError):
                 pass
 
+    # Diversidad conductual: `diversity.json` es la fuente principal; para
+    # corridas ya terminadas sin ese archivo se usa la ultima generacion.
+    diversity = {}
+    diversity_path = os.path.join(exp_dir, "diversity.json")
+    if os.path.exists(diversity_path):
+        try:
+            with open(diversity_path) as handle:
+                payload = json.load(handle)
+            if isinstance(payload, dict):
+                diversity = payload.get("summary", {})
+        except (OSError, ValueError):
+            diversity = {}
+    if not diversity:
+        summary_path = os.path.join(dirname, "generation_summary.jsonl")
+        if os.path.exists(summary_path):
+            try:
+                with open(summary_path) as handle:
+                    last = [json.loads(line) for line in handle if line.strip()][-1]
+                diversity = {
+                    "unique_behavior": last.get("behavior_unique"),
+                    "mean_novelty": last.get("behavior_mean_novelty"),
+                    "archive_coverage": last.get("behavior_archive_coverage"),
+                    "family_counts": last.get("behavior_family_counts") or {},
+                }
+            except (OSError, ValueError, IndexError):
+                diversity = {}
+
     total_tokens = tokens.get("total_tokens")
     requests = tokens.get("requests")
     seconds = tokens.get("inference_seconds")
@@ -146,6 +173,13 @@ def run_record(dirname):
         "valid": len(valid_rows),
         "validity_rate": (len(valid_rows) / evaluated) if evaluated else 0.0,
         "distinct": distinct,
+        # `distinct` es texto; `behavior_unique` es mecanismos distintos. La
+        # brecha entre ambos es exactamente el anclaje conductual.
+        "behavior_unique": diversity.get("unique_behavior"),
+        "behavior_entropy": diversity.get("behavior_entropy"),
+        "behavior_novelty": diversity.get("mean_novelty"),
+        "behavior_coverage": diversity.get("archive_coverage"),
+        "behavior_families": diversity.get("family_counts") or {},
         "best_fit": best,
         "tokens_total": total_tokens,
         "tokens_per_eval": (total_tokens / evaluated) if total_tokens and evaluated else None,
@@ -160,9 +194,11 @@ def run_record(dirname):
 
 SUMMARY_COLUMNS = [
     "run", "experiment", "model", "budget", "temperature", "operator_memory",
-    "evaluated", "valid", "validity_rate", "distinct", "best_fit",
-    "tokens_total", "tokens_per_eval", "requests", "inference_seconds",
-    "seconds_per_request", "test_fitness", "frame", "stop_reason",
+    "evaluated", "valid", "validity_rate", "distinct", "behavior_unique",
+    "behavior_entropy", "behavior_novelty", "behavior_coverage",
+    "behavior_families", "best_fit", "tokens_total", "tokens_per_eval",
+    "requests", "inference_seconds", "seconds_per_request", "test_fitness",
+    "frame", "stop_reason",
 ]
 
 
@@ -181,19 +217,23 @@ def summarize_table(pattern, csv_path=None):
         return []
 
     records = [run_record(d) for d in dirs]
-    header = ("| run | modelo | validos | distintos | mejor HV | tokens/eval | "
-              "s/peticion | test HV |")
+    header = ("| run | modelo | validos | codigos | mecanismos | cobertura | "
+              "mejor HV | tokens/eval | s/peticion | test HV |")
     print(header)
-    print("|---|---|---:|---:|---:|---:|---:|---:|")
+    print("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|")
     for r in records:
         model = r["model"].split("/")[-1] or "?"
         rate = 100.0 * r["validity_rate"]
         tokens = "-" if r["tokens_per_eval"] is None else f"{r['tokens_per_eval']:.0f}"
         seconds = "-" if r["seconds_per_request"] is None else f"{r['seconds_per_request']:.1f}"
         test = "-" if r["test_fitness"] is None else f"{r['test_fitness']:.6f}"
+        behavior = ("-" if r["behavior_unique"] is None
+                    else str(r["behavior_unique"]))
+        coverage = ("-" if r["behavior_coverage"] is None
+                    else f"{100.0 * r['behavior_coverage']:.0f}%")
         print(f"| {r['experiment']} | {model} | {r['valid']}/{r['evaluated']} "
-              f"({rate:.0f}%) | {r['distinct']} | {r['best_fit']:.6f} | {tokens} | "
-              f"{seconds} | {test} |")
+              f"({rate:.0f}%) | {r['distinct']} | {behavior} | {coverage} | "
+              f"{r['best_fit']:.6f} | {tokens} | {seconds} | {test} |")
 
     if csv_path:
         os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)

@@ -58,7 +58,16 @@ from mohh.llamea.prompts import (
     SKELETON_PROMPT,
     OUTPUT_FORMAT_PROMPT,
 )
-from mohh.llamea.reporting import ResultsExperimentLogger, write_report, write_seeds
+from mohh.llamea.diversity import (
+    solution_behavior_descriptor,
+    solution_distance,
+)
+from mohh.llamea.reporting import (
+    ResultsExperimentLogger,
+    _atomic_write_json,
+    write_report,
+    write_seeds,
+)
 from mohh.llamea.vllm import VLLM_LLM, model_is_available, wait_for_server
 
 
@@ -155,7 +164,8 @@ def _model_revision(model):
     return None
 
 
-def _make_evaluator(paths, args, bounds=None, archive=None, fronts_dir=None):
+def _make_evaluator(paths, args, bounds=None, archive=None, fronts_dir=None,
+                    diversity_log=None):
     return build_evaluator(
         paths,
         mo_generations=args.mo_generations,
@@ -172,6 +182,8 @@ def _make_evaluator(paths, args, bounds=None, archive=None, fronts_dir=None):
         fronts_dir=fronts_dir,
         repeat_penalty=getattr(args, "repeat_penalty", 0.5),
         patience=getattr(args, "patience", 0),
+        diversity_feedback=getattr(args, "diversity_feedback", True),
+        diversity_log=diversity_log,
     )
 
 
@@ -181,8 +193,8 @@ def _llamea_kwargs(args):
     Atacan directamente el anclaje observado (el modelo repite el mismo
     operador): seleccion por torneo (LLaMEA usa `random` por defecto), mutacion
     adaptativa, guia por caracteristicas del AST, niching (clearing/novelty/
-    map_elites con descriptor derivado del codigo) y tamano del archivo de
-    novedad. No se toca el nucleo GE ni el motor de LLaMEA.
+    map_elites con el descriptor conductual del evaluador) y tamano del archivo
+    de novedad. No se toca el nucleo GE ni el motor de LLaMEA.
     """
     kwargs = {
         "parent_selection": args.parent_selection,
@@ -190,6 +202,13 @@ def _llamea_kwargs(args):
         "adaptive_mutation": args.adaptive_mutation,
         "feature_guided_mutation": args.feature_guided_mutation,
         "novelty_k": args.novelty_k,
+        # Hooks nativos de LLaMEA: la distancia y el descriptor leen la huella
+        # conductual que el evaluador deja en `Solution.metadata`. Asi
+        # `--niching novelty`, `clearing` y `map_elites` comparan lo que hace el
+        # operador, no cuantas lineas o tokens tiene el codigo. Si un candidato
+        # no tiene fingerprint se cae a la distancia de codigo original.
+        "distance_metric": solution_distance,
+        "behavior_descriptor": solution_behavior_descriptor,
     }
     if args.novelty_archive_size is not None:
         kwargs["novelty_archive_size"] = args.novelty_archive_size
@@ -323,7 +342,10 @@ def run_llamea(args):
 
     bounds = _load_bounds(args.bounds_file) if args.bounds_file else None
     fronts_dir = None if args.no_save_fronts else os.path.join(exp_dir, "fronts")
-    fitness = _make_evaluator(train_paths, args, bounds=bounds, fronts_dir=fronts_dir)
+    fitness = _make_evaluator(
+        train_paths, args, bounds=bounds, fronts_dir=fronts_dir,
+        diversity_log=os.path.join(exp_dir, "diversity.jsonl"),
+    )
 
     config = {
         "command": shlex.join([sys.executable] + sys.argv),
@@ -351,6 +373,7 @@ def run_llamea(args):
                     "skeleton" if args.skeleton_example else "ox"),
         "comma": args.comma,
         "repeat_penalty": args.repeat_penalty,
+        "diversity_feedback": args.diversity_feedback,
         "patience": args.patience,
         "parent_selection": args.parent_selection,
         "tournament_size": args.tournament_size,
@@ -439,6 +462,9 @@ def run_llamea(args):
         operator_memory=args.operator_memory,
     )
     ResultsExperimentLogger.token_source = llm
+    # Diversidad conductual por generacion (mecanismos distintos, entropia,
+    # novedad y cobertura del archivo). El evaluador ya la acumula.
+    ResultsExperimentLogger.diversity_source = fitness
 
     from llamea import LLaMEA
 
@@ -522,6 +548,7 @@ def run_llamea(args):
     counters = (llamea.logger.counters()
                 if llamea.logger is not None and hasattr(llamea.logger, "counters")
                 else {})
+    diversity_stats = fitness.duplicate_stats()
     info.update({
         "train_fitness": train_fitness,
         # Aclaracion para quien lea el JSON: `train_fitness` es el valor que
@@ -535,19 +562,25 @@ def run_llamea(args):
         "description": best.description,
         "log_dir": log_dir,
         "evaluations": len(fitness.archive),
+        "evaluated_total": diversity_stats.get("evaluations"),
         "best_hv_ranking": fitness.archive.best(),
-        "diversity": fitness.duplicate_stats(),
+        "diversity": diversity_stats,
         # Trazabilidad del proceso: semillas, diversidad y costo.
         "seeds": seeds,
         "seeds_file": os.path.join(exp_dir, "seeds.json"),
         "distinct_operators": counters.get("distinct_operators"),
-        "evaluated_valid": counters.get("evaluated_valid"),
-        "validity_rate": (
-            counters["evaluated_valid"] / args.budget
-            if counters.get("evaluated_valid") is not None and args.budget else None
-        ),
+        "evaluated_valid": diversity_stats.get("valid_evaluations"),
+        # Tasa de validez real: evaluaciones con HV definido / evaluaciones
+        # totales. Antes se dividia por `budget` y podia superar 100%.
+        "validity_rate": diversity_stats.get("validity_rate"),
         "stop_reason": stop_reason,
         "cost": cost,
+    })
+    # Traza completa de diversidad (fingerprints incluidos) para auditoria y
+    # para regenerar el mapa conductual sin volver a ejecutar el LLM/MOEA.
+    _atomic_write_json(os.path.join(exp_dir, "diversity.json"), {
+        "summary": diversity_stats,
+        "entries": fitness.diversity_entries(),
     })
 
     # 5b. Marco de normalizacion final. El HV del mejor candidato y el de la
@@ -822,6 +855,11 @@ def main(argv=None):
                              "el ranking) cuando el codigo ya se habia evaluado. 1.0 "
                              "lo desactiva. Ataca el anclaje del modelo (repeticion "
                              "literal del mismo operador).")
+    parser.add_argument("--no-diversity-feedback", dest="diversity_feedback",
+                        action="store_false", default=True,
+                        help="No agregar el diagnostico conductual (familia, novedad, "
+                             "cobertura) al feedback del LLM. La medicion y el "
+                             "archivo se siguen guardando.")
     # Diversidad y parada temprana (mecanismos de LLaMEA 1.4).
     parser.add_argument("--patience", type=int, default=0,
                         help="Parada temprana: corta tras N evaluaciones sin mejora "
@@ -844,7 +882,8 @@ def main(argv=None):
                         choices=["none", "sharing", "clearing", "novelty", "map_elites"],
                         default="none",
                         help="Niching de LLaMEA (presion de diversidad sobre el "
-                             "archivo; map_elites usa un descriptor del codigo).")
+                             "archivo). novelty/clearing/map_elites usan el "
+                             "fingerprint conductual del operador, no el texto.")
     parser.add_argument("--niche-radius", type=float, default=None)
     parser.add_argument("--adaptive-niche-radius", action="store_true")
     parser.add_argument("--clearing-interval", type=int, default=None)
