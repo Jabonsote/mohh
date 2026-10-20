@@ -16,12 +16,13 @@
 #     PROFILE=h100-fp16 sbatch --constraint=H100 slurm/llamea-single.slrm
 #
 # Opciones por entorno: BUDGET (1000), SOLVER, TRAIN_INSTANCES, TEST_INSTANCES,
-# MO_GENERATIONS, MO_POPULATION_SIZE, TEMPERATURE, MAX_TOKENS (4096), SEED,
-# EVAL_TEST=1, EVAL_REPEATS, MUTATION=1, COMMA=1, REFINE_ONLY=1,
+# MO_GENERATIONS, MO_POPULATION_SIZE, TEMPERATURE (0.7), TOP_P (0.8), TOP_K (20),
+# SAMPLING_REPETITION_PENALTY (1.05), MAX_TOKENS (4096), OPERATOR_MEMORY (12),
+# SEED, EVAL_TEST=1, EVAL_REPEATS, MUTATION=1, COMMA=1, REFINE_ONLY=1,
 # NO_SAVE_FRONTS=1, REPEAT_PENALTY (0.5), PATIENCE (0), STALL_TIMEOUT (3600),
 # PARENT_SELECTION (tournament), NICHING (none), EXPERIMENT_NAME, CATEGORY,
 # PORT, PROFILE, MODEL, GPU_MEM_UTIL, MAX_MODEL_LEN, TENSOR_PARALLEL,
-# EXTRA_VLLM_ARGS, EXTRA.
+# VLLM_ARGS (del perfil), EXTRA_VLLM_ARGS (override), EXTRA.
 # COMPARE=1 agrega, en el mismo job, la comparacion pareada del mejor operador
 # contra los clasicos (COMPARE_SPLIT=test, COMPARE_REPEATS=11, COMPARE_NAME).
 #
@@ -52,6 +53,7 @@ echo "Perfil:         $PROFILE"
 echo "Modelo:         $MODEL"
 echo "Constraint:     $CONSTRAINT"
 echo "max-model-len:  $MAX_MODEL_LEN   gpu-mem-util: $GPU_MEM_UTIL"
+echo "vLLM args:      ${VLLM_ARGS:-} ${EXTRA_VLLM_ARGS:-}"
 
 # vLLM usa varios hilos para tokenizacion/planificacion; el MOEA interno es
 # pymoo/numpy y no escala con 24 nucleos, asi que se deja un hilo BLAS.
@@ -113,7 +115,7 @@ python -m vllm.entrypoints.openai.api_server \
     --gpu-memory-utilization "$GPU_MEM_UTIL" \
     --max-model-len "$MAX_MODEL_LEN" \
     --tensor-parallel-size "${TENSOR_PARALLEL:-1}" \
-    ${EXTRA_VLLM_ARGS:-} &
+    ${VLLM_ARGS:-} ${EXTRA_VLLM_ARGS:-} &
 VLLM_PID=$!
 
 cleanup() {
@@ -130,8 +132,12 @@ ARGS=(
     --wait-server
     --server-timeout "${SERVER_TIMEOUT:-1800}"
     --budget "${BUDGET:-1000}"
-    --temperature "${TEMPERATURE:-0.2}"
+    --temperature "${TEMPERATURE:-0.7}"
+    --top-p "${TOP_P:-0.8}"
+    --top-k "${TOP_K:-20}"
+    --sampling-repetition-penalty "${SAMPLING_REPETITION_PENALTY:-1.05}"
     --max-tokens "${MAX_TOKENS:-4096}"
+    --operator-memory "${OPERATOR_MEMORY:-12}"
     --repeat-penalty "${REPEAT_PENALTY:-0.5}"
     --patience "${PATIENCE:-0}"
     --stall-timeout "${STALL_TIMEOUT:-3600}"

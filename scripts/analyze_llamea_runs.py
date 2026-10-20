@@ -23,6 +23,7 @@ Uso:
 """
 
 import argparse
+import csv
 import glob
 import hashlib
 import json
@@ -100,6 +101,110 @@ def token_info(dirname):
             "mean_gen": mean}
 
 
+def experiment_dir(dirname):
+    """`.../<exp>/llamea_logs/exp-*` -> `.../<exp>`."""
+    return os.path.dirname(os.path.dirname(dirname))
+
+
+def run_record(dirname):
+    """Metricas comparables de una corrida, para el bake-off de modelos.
+
+    Usa el `log.jsonl` (operadores), `run.json` (modelo/muestreo),
+    `tokens.json` (tokens/latencia) y `llamea_best_info.json` (test).
+    """
+    rows = load_rows(dirname)
+    evaluated = len(rows)
+    valid_rows = [r for r in rows
+                  if not r.get("error") and float(r.get("fitness") or 0) > 0]
+    distinct = len({hashlib.sha1((r.get("code") or "").strip().encode()).hexdigest()
+                    for r in valid_rows})
+    best = max((float(r.get("fitness") or 0) for r in valid_rows), default=0.0)
+
+    exp_dir = experiment_dir(dirname)
+    run, info, tokens = {}, {}, {}
+    for name, target in (("run.json", run), ("llamea_best_info.json", info),
+                         ("tokens.json", tokens)):
+        path = os.path.join(exp_dir, name)
+        if os.path.exists(path):
+            try:
+                with open(path) as handle:
+                    target.update(json.load(handle))
+            except (OSError, ValueError):
+                pass
+
+    total_tokens = tokens.get("total_tokens")
+    requests = tokens.get("requests")
+    seconds = tokens.get("inference_seconds")
+    return {
+        "run": os.path.relpath(dirname, os.getcwd()),
+        "experiment": os.path.basename(exp_dir),
+        "model": run.get("model", ""),
+        "budget": run.get("budget"),
+        "temperature": run.get("temperature"),
+        "operator_memory": run.get("operator_memory", 0),
+        "evaluated": evaluated,
+        "valid": len(valid_rows),
+        "validity_rate": (len(valid_rows) / evaluated) if evaluated else 0.0,
+        "distinct": distinct,
+        "best_fit": best,
+        "tokens_total": total_tokens,
+        "tokens_per_eval": (total_tokens / evaluated) if total_tokens and evaluated else None,
+        "requests": requests,
+        "inference_seconds": seconds,
+        "seconds_per_request": (seconds / requests) if seconds and requests else None,
+        "test_fitness": info.get("test_fitness"),
+        "frame": info.get("frame"),
+        "stop_reason": info.get("stop_reason"),
+    }
+
+
+SUMMARY_COLUMNS = [
+    "run", "experiment", "model", "budget", "temperature", "operator_memory",
+    "evaluated", "valid", "validity_rate", "distinct", "best_fit",
+    "tokens_total", "tokens_per_eval", "requests", "inference_seconds",
+    "seconds_per_request", "test_fitness", "frame", "stop_reason",
+]
+
+
+def summarize_table(pattern, csv_path=None):
+    """Tabla de una linea por corrida: validez, diversidad, HV, tokens, latencia.
+
+    Es la evidencia que hay que mirar para elegir modelo: los benchmarks de
+    codigo (HumanEval, etc.) no predicen el anclaje ni la tasa de operadores
+    validos en este bucle. Corre el mismo `--budget`/`--seed` con cada perfil y
+    compara esta tabla.
+    """
+    dirs = sorted(glob.glob(pattern, recursive=True))
+    dirs = [d for d in dirs if os.path.isdir(d) and os.path.exists(os.path.join(d, "log.jsonl"))]
+    if not dirs:
+        print(f"Sin corridas con log.jsonl que coincidan con {pattern!r}")
+        return []
+
+    records = [run_record(d) for d in dirs]
+    header = ("| run | modelo | validos | distintos | mejor HV | tokens/eval | "
+              "s/peticion | test HV |")
+    print(header)
+    print("|---|---|---:|---:|---:|---:|---:|---:|")
+    for r in records:
+        model = r["model"].split("/")[-1] or "?"
+        rate = 100.0 * r["validity_rate"]
+        tokens = "-" if r["tokens_per_eval"] is None else f"{r['tokens_per_eval']:.0f}"
+        seconds = "-" if r["seconds_per_request"] is None else f"{r['seconds_per_request']:.1f}"
+        test = "-" if r["test_fitness"] is None else f"{r['test_fitness']:.6f}"
+        print(f"| {r['experiment']} | {model} | {r['valid']}/{r['evaluated']} "
+              f"({rate:.0f}%) | {r['distinct']} | {r['best_fit']:.6f} | {tokens} | "
+              f"{seconds} | {test} |")
+
+    if csv_path:
+        os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+        with open(csv_path, "w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=SUMMARY_COLUMNS)
+            writer.writeheader()
+            writer.writerows(records)
+        print(f"\nCSV: {csv_path}")
+    return records
+
+
 def summarize(pattern, list_codes=False):
     dirs = sorted(glob.glob(pattern, recursive=True))
     # Quedarse solo con directorios que tengan log.jsonl (evita falsos positivos).
@@ -165,8 +270,16 @@ def main():
                              "(default: results/**/exp-*).")
     parser.add_argument("--list-codes", action="store_true",
                         help="Imprimir el codigo de los operadores validos distintos.")
+    parser.add_argument("--summary", action="store_true",
+                        help="Tabla compacta (una fila por corrida) para comparar "
+                             "modelos/perfiles: validez, distintos, HV, tokens y latencia.")
+    parser.add_argument("--csv", default=None,
+                        help="Guardar la tabla resumen en CSV (implica --summary).")
     args = parser.parse_args()
-    summarize(args.pattern, list_codes=args.list_codes)
+    if args.summary or args.csv:
+        summarize_table(args.pattern, csv_path=args.csv)
+    else:
+        summarize(args.pattern, list_codes=args.list_codes)
 
 
 if __name__ == "__main__":

@@ -337,6 +337,10 @@ def run_llamea(args):
         "mo_population_size": args.mo_population_size,
         "seed": args.seed,
         "temperature": args.temperature,
+        "top_p": args.top_p,
+        "top_k": args.top_k,
+        "sampling_repetition_penalty": args.sampling_repetition_penalty,
+        "operator_memory": args.operator_memory,
         "max_tokens": args.max_tokens,
         "train_instances": len(train_paths),
         "normalize": args.normalize,
@@ -382,7 +386,11 @@ def run_llamea(args):
         "eval_test": args.seed,
         "llm_sampling": {
             "temperature": args.temperature,
+            "top_p": args.top_p,
+            "top_k": args.top_k,
+            "repetition_penalty": args.sampling_repetition_penalty,
             "max_tokens": args.max_tokens,
+            "operator_memory": args.operator_memory,
             "note": ("el servidor muestrea; sin semilla fija, asi que la busqueda no "
                      "es reproducible bit a bit aunque el MOEA si lo sea"),
         },
@@ -425,6 +433,10 @@ def run_llamea(args):
         temperature=args.temperature,
         timeout=args.request_timeout,
         max_tokens=args.max_tokens,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        sampling_repetition_penalty=args.sampling_repetition_penalty,
+        operator_memory=args.operator_memory,
     )
     ResultsExperimentLogger.token_source = llm
 
@@ -661,6 +673,13 @@ def run_llamea(args):
         usage["history"] = getattr(llm, "usage_history", [])
         usage["max_tokens"] = args.max_tokens
         usage["temperature"] = args.temperature
+        usage["top_p"] = args.top_p
+        usage["top_k"] = args.top_k
+        usage["sampling_repetition_penalty"] = args.sampling_repetition_penalty
+        usage["operator_memory"] = (
+            llm.operator_memory_snapshot()
+            if hasattr(llm, "operator_memory_snapshot") else {}
+        )
         usage["seeds"] = seeds
         with open(os.path.join(exp_dir, "tokens.json"), "w") as file:
             json.dump(usage, file, indent=2)
@@ -720,6 +739,20 @@ def main(argv=None):
     parser.add_argument("--base-url", default="http://localhost:8000/v1",
                         help="Endpoint OpenAI-compatible del servidor (vLLM).")
     parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--top-p", type=float, default=None,
+                        help="Nucleus sampling (top_p). Qwen recomienda 0.8 para "
+                             "sus modelos Coder; None = default del servidor.")
+    parser.add_argument("--top-k", type=int, default=None,
+                        help="top_k (extension de vLLM; va en extra_body). Qwen "
+                             "recomienda 20 para sus modelos Coder.")
+    parser.add_argument("--sampling-repetition-penalty", type=float, default=None,
+                        help="repetition_penalty del muestreo (extension de vLLM). "
+                             "No confundir con --repeat-penalty, que penaliza en el "
+                             "ranking los operadores repetidos. Qwen recomienda 1.05.")
+    parser.add_argument("--operator-memory", type=int, default=0,
+                        help="Numero de mecanismos recientes que se recuerdan en el "
+                             "prompt para evitar el anclaje (0 = desactivado). El job "
+                             "del cluster usa 12.")
     parser.add_argument("--request-timeout", type=float, default=600,
                         help="Timeout por peticion al LLM (segundos).")
     parser.add_argument("--max-tokens", type=int, default=None,

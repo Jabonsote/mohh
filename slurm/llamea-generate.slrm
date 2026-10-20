@@ -21,7 +21,9 @@
 # (4096), NO_EXAMPLE=1, SKELETON_EXAMPLE=1 (mutuamente excluyentes).
 # REPEAT_PENALTY (0.5, presion de diversidad; 1.0 = off), PATIENCE (0, parada
 # temprana), PARENT_SELECTION (tournament), NICHING (none), EVAL_REPEATS (1),
-# STALL_TIMEOUT (3600, watchdog anti-cuelgue), NO_SAVE_FRONTS=1.
+# STALL_TIMEOUT (3600, watchdog anti-cuelgue), NO_SAVE_FRONTS=1,
+# OPERATOR_MEMORY (0; 12 recomendado), TOP_P, TOP_K,
+# SAMPLING_REPETITION_PENALTY (extensiones de muestreo de vLLM).
 #
 # El entorno (module + conda env .conda-env) lo prepara slurm/ixachi-setup-env.sh
 # la primera vez, en el login; aqui solo se carga, como en la etapa GE.
@@ -111,6 +113,12 @@ else
     TOKENS_ARGS="--max-tokens 4096"
 fi
 
+SAMPLING_ARGS="--operator-memory ${OPERATOR_MEMORY:-0}"
+[ -n "${TOP_P:-}" ] && SAMPLING_ARGS="${SAMPLING_ARGS} --top-p ${TOP_P}"
+[ -n "${TOP_K:-}" ] && SAMPLING_ARGS="${SAMPLING_ARGS} --top-k ${TOP_K}"
+[ -n "${SAMPLING_REPETITION_PENALTY:-}" ] && \
+    SAMPLING_ARGS="${SAMPLING_ARGS} --sampling-repetition-penalty ${SAMPLING_REPETITION_PENALTY}"
+
 FRONTS_ARG=""
 if [ "${NO_SAVE_FRONTS:-0}" = "1" ]; then
     FRONTS_ARG="--no-save-fronts"
@@ -133,6 +141,7 @@ python -m mohh.llamea.run \
     --budget "${BUDGET:-1000}" \
     --temperature "${TEMPERATURE:-0.2}" \
     --repeat-penalty "${REPEAT_PENALTY:-0.5}" \
+    $SAMPLING_ARGS \
     --patience "${PATIENCE:-0}" \
     --stall-timeout "${STALL_TIMEOUT:-3600}" \
     --parent-selection "${PARENT_SELECTION:-tournament}" \

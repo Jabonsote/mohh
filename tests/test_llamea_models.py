@@ -116,6 +116,36 @@ def test_configure_hf_env_points_to_root(tmp_path, monkeypatch):
     assert os.environ["HUGGINGFACE_HUB_CACHE"].startswith(root)
 
 
+def test_check_free_space_refuses_when_disk_is_full(tmp_path):
+    import shutil
+
+    free = shutil.disk_usage(tmp_path).free
+    models.check_free_space(str(tmp_path), 1)  # hay espacio de sobra
+    with pytest.raises(RuntimeError, match="Espacio insuficiente"):
+        models.check_free_space(str(tmp_path), free + 1)
+
+
+def test_download_model_checks_remote_size_before_download(tmp_path, monkeypatch):
+    monkeypatch.setenv("MOHH_MODELS_DIR", str(tmp_path))
+    called = {"snapshot": 0}
+
+    class FakeHfApi:
+        def model_info(self, *args, **kwargs):
+            class Info:
+                siblings = [type("S", (), {"size": 10 ** 18})()]
+            return Info()
+
+    def fake_snapshot(**_kwargs):  # pragma: no cover - no debe llamarse
+        called["snapshot"] += 1
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", type(
+        "m", (), {"HfApi": FakeHfApi,
+                  "snapshot_download": staticmethod(fake_snapshot)})())
+    with pytest.raises(RuntimeError, match="Espacio insuficiente"):
+        models.download_model("org/huge")
+    assert called["snapshot"] == 0
+
+
 def test_cli_root_and_list(tmp_path, monkeypatch, capsys):
     import importlib.util
 

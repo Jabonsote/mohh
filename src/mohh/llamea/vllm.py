@@ -10,11 +10,53 @@ otro nodo apuntando a `http://<nodo-del-servidor>:8000/v1`.
 """
 
 import os
+import re
 import time
 
 from llamea.llm import OpenAI_LLM
 
 from mohh.llamea.parsing import strip_thinking, repair_code, extract_code_block
+
+
+#: Descripcion de una linea que LLaMEA pide en el formato de salida.
+_DESCRIPTION_RE = re.compile(r"#\s*(?:Description|Design idea)\s*:\s*(.+)",
+                             re.IGNORECASE)
+
+#: Marcador del bloque de formato; la memoria se inserta justo antes para no
+#: dejar instrucciones nuevas despues del formato de salida.
+_OUTPUT_FORMAT_MARKER = "Answer in exactly this format:"
+
+
+def extract_description(text: str) -> str:
+    """Primera linea de `# Description:` / `# Design idea:` de una respuesta.
+
+    Se usa para construir la memoria de mecanismos ya intentados. Devuelve ""
+    si la respuesta no trae descripcion (p. ej. la reescritura adaptativa del
+    task prompt, que no es un operador).
+    """
+    match = _DESCRIPTION_RE.search(text or "")
+    return match.group(1).strip() if match else ""
+
+
+def memory_block(descriptions, limit: int = 12) -> str:
+    """Bloque de prompt con los mecanismos recientes, para evitar anclaje.
+
+    El fallo observado en `b200` fue generar 108 veces el mismo operador. El
+    `--repeat-penalty` castiga la repeticion en el ranking, pero el modelo sigue
+    gastando generaciones en ella; recordarle explicitamente lo ya intentado es
+    mas barato que descartar el candidato despues.
+    """
+    items = [d.strip() for d in descriptions if d and d.strip()]
+    if not items:
+        return ""
+    items = items[-limit:]
+    lines = "\n".join(f"- {d}" for d in items)
+    return (
+        "\n\n# Mechanisms already generated in this run\n"
+        "Do NOT repeat or lightly paraphrase these operators. Deliberately "
+        "choose a different combination of order-, position-, adjacency- or "
+        "cycle-based ideas:\n" + lines + "\n"
+    )
 
 
 def _hf_cache_dir() -> str:
@@ -114,10 +156,16 @@ class VLLM_LLM(OpenAI_LLM):
 
     def __init__(self, model, base_url="http://localhost:8000/v1",
                  api_key="EMPTY", temperature=0.8, timeout=600,
-                 max_tokens=None, **kwargs):
+                 max_tokens=None, top_p=None, top_k=None,
+                 sampling_repetition_penalty=None, operator_memory=0, **kwargs):
         super().__init__(api_key=api_key, model=model, temperature=temperature, **kwargs)
         self.base_url = base_url
         self.max_tokens = max_tokens
+        self.top_p = top_p
+        self.top_k = top_k
+        self.sampling_repetition_penalty = sampling_repetition_penalty
+        self.operator_memory = max(0, int(operator_memory or 0))
+        self._memory = []
         self._client_kwargs["base_url"] = base_url
         self._client_kwargs.setdefault("timeout", timeout)
         from openai import OpenAI
@@ -144,6 +192,18 @@ class VLLM_LLM(OpenAI_LLM):
             def create(self, *args, **kwargs):
                 if owner.max_tokens is not None and "max_tokens" not in kwargs:
                     kwargs["max_tokens"] = owner.max_tokens
+                if owner.top_p is not None and "top_p" not in kwargs:
+                    kwargs["top_p"] = owner.top_p
+                # top_k y repetition_penalty son extensiones de vLLM: van en
+                # extra_body para que el cliente OpenAI no las rechace.
+                extra = dict(kwargs.get("extra_body") or {})
+                if owner.top_k is not None:
+                    extra.setdefault("top_k", owner.top_k)
+                if owner.sampling_repetition_penalty is not None:
+                    extra.setdefault("repetition_penalty",
+                                     owner.sampling_repetition_penalty)
+                if extra:
+                    kwargs["extra_body"] = extra
                 start = time.perf_counter()
                 try:
                     response = raw.create(*args, **kwargs)
@@ -200,13 +260,49 @@ class VLLM_LLM(OpenAI_LLM):
         return dict(self.usage)
 
     def query(self, session_messages, **kwargs):
+        messages = session_messages
+        if self.operator_memory and self._memory:
+            # Copia superficial: no mutar la lista que arma LLaMEA (la usa para
+            # loguear la conversacion).
+            messages = [dict(message) for message in session_messages]
+            if messages:
+                content = str(messages[-1].get("content", ""))
+                note = memory_block(self._memory, self.operator_memory)
+                if _OUTPUT_FORMAT_MARKER in content:
+                    content = content.replace(
+                        _OUTPUT_FORMAT_MARKER, note + _OUTPUT_FORMAT_MARKER, 1
+                    )
+                else:
+                    content += note
+                messages[-1]["content"] = content
         # Guardar el tamano del prompt para estimar tokens si el servidor no
         # devuelve `usage`.
         self._last_message_chars = sum(
-            len(str(message.get("content", ""))) for message in session_messages
+            len(str(message.get("content", ""))) for message in messages
         )
-        response = super().query(session_messages, **kwargs)
-        return strip_thinking(response)
+        response = strip_thinking(super().query(messages, **kwargs))
+        self._remember(response)
+        return response
+
+    def _remember(self, response):
+        """Guarda la descripcion del operador recien generado (memoria acotada)."""
+        if not self.operator_memory:
+            return
+        description = extract_description(response or "")
+        if not description or description in self._memory:
+            return
+        self._memory.append(description)
+        if len(self._memory) > self.operator_memory:
+            del self._memory[0]
+
+    def operator_memory_snapshot(self):
+        """Estado de la memoria de mecanismos (para tokens.json/reportes)."""
+        return {
+            "enabled": bool(self.operator_memory),
+            "size": len(self._memory),
+            "limit": self.operator_memory,
+            "descriptions": list(self._memory),
+        }
 
     def __setstate__(self, state):
         super().__setstate__(state)

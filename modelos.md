@@ -20,22 +20,56 @@ HuggingFace (`~/.cache/huggingface/hub/models--<org>--<modelo>`, respeta
 
 ---
 
-## 1. VRAM de referencia (fp16, sin KV cache extra)
+## 1. Modelos: evidencia, VRAM y elección
 
-| Modelo | Parámetros | VRAM fp16 | Caso de uso |
-|---|---|---|---|
-| Qwen/Qwen2.5-0.5B-Instruct | 0.5B | ~1 GB | **Pruebas locales / smoke test** |
-| Qwen/Qwen2.5-Coder-1.5B-Instruct | 1.5B | ~3.3 GB | Pruebas locales de código si hay ≥4 GB libres (no cabe junto a otro modelo que ocupe la GPU) |
-| Qwen/Qwen2.5-1.5B-Instruct | 1.5B | ~3 GB | Pruebas rápidas (cabe en 12 GB) |
-| **Qwen/Qwen2.5-Coder-7B-Instruct** | 7B | ~15 GB | **Recomendado en 24 GB**: escribe código correcto |
-| Qwen/Qwen2.5-7B-Instruct | 7B | ~15 GB | **Default en 24 GB**: buen balance |
-| Qwen/Qwen2.5-Coder-14B-Instruct | 14B | ~29 GB | A100 40 GB / H100 |
-| **Qwen/Qwen2.5-Coder-32B-Instruct-AWQ** | 32B | ~19-21 GB | **Default del cluster**: cabe en A10 24 GB, A100 40 GB y H100 80 GB |
-| **Qwen/Qwen2.5-Coder-32B-Instruct** | 32B | ~65 GB | **H100 80 GB**: el de más calidad |
-| Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4 | 32B | ~18 GB | Alternativa cuantizada (GPTQ) |
-| Meta-Llama-3.1-8B-Instruct | 8B | ~16 GB | 24 GB |
-| Meta-Llama-3.1-70B-Instruct | 70B | ~140 GB | 50 GB: solo cuantizado agresivo o `--tensor-parallel-size 2` |
-| deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct | 16B MoE (2.4B act.) | ~31 GB (AWQ ~9 GB) | 24 GB: alternativa fuerte en código |
+### 1.1 Qué dice la evidencia de código
+
+La tarea del bucle es **sintetizar una función Python corta** (`crossover(x, y)`)
+que cumpla un contrato estricto y use numpy. Los benchmarks relevantes son los
+de generación de funciones (HumanEval, HumanEval+, MBPP, BigCodeBench,
+LiveCodeBench), no los agentivos (SWE-bench), que miden otra cosa.
+
+| Modelo | Params (activos) | Licencia | HE | HE+ | MBPP | BCB full/hard | LCB | Fuente |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| `Qwen/Qwen2.5-Coder-32B-Instruct` | 32B | Apache-2.0 | 92.7 | 87.2 | 90.2 | 49.6 / 27.0 | 31.4 | Qwen2.5-Coder report, Table 16 |
+| `Qwen/Qwen2.5-Coder-14B-Instruct` | 14B | Apache-2.0 | 89.6 | 87.2 | 86.2 | 48.4 / 22.2 | 23.4 | idem |
+| `Qwen/Qwen2.5-Coder-7B-Instruct` | 7B | Apache-2.0 | 88.4 | 84.1 | 83.5 | 41.0 / 18.2 | 18.2 | idem |
+| `deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct` | 16B (2.4B) | DeepSeek License | 81.1 | 75.6 | 82.8 | 36.8 / 16.2 | 16.3 | idem |
+| `Qwen/Qwen3-Coder-30B-A3B-Instruct` | 30.5B (3.3B) | Apache-2.0 | 92.1† | 89.0† | — | — | ~40† | medición de terceros; card oficial con figura |
+| `ByteDance-Seed/Seed-Coder-8B-Instruct` | 8B | MIT | 84.8 | — | 85.2 | 53.3 / 26.4 | 24.7 | Seed-Coder card (harness propio) |
+
+† El `HumanEval 92.1 / HumanEval+ 89.0` de Qwen3-Coder-30B-A3B es un *anchor*
+medido por terceros sobre el modelo base (no una tabla oficial en texto); el
+`LiveCodeBench ~40` viene de otro harness. Tómalo como indicativo, no como una
+fila comparable al pie de la letra con las de Qwen2.5-Coder. La card oficial de
+Qwen3-Coder publica la comparación como imagen y el modelo es **non-thinking**
+(no genera ` thinking`), lo que simplifica el parseo.
+
+Lectura:
+
+- **32B vs 14B**: la diferencia en HumanEval es 3 puntos (92.7 vs 89.6), pero
+  el 32B cuesta ~2.3× más cómputo por token. Para 1000 generaciones, el
+  throughput importa tanto como el benchmark.
+- **Qwen3-Coder-30B-A3B** es el punto dulce: calidad de 32B en HumanEval+ (89.0
+  vs 87.2), solo **3.3B parámetros activos** (MoE) y 256k de contexto. En vLLM
+  sobre H100 se han medido ~1200 tok/s a concurrencia 32 (benchmark de terceros,
+  Massed Compute), frente a un denso 32B. Eso reduce el tiempo de una corrida
+  de 1000 generaciones de horas a bastante menos.
+- **Seed-Coder-8B** es el mejor ≤8B en BigCodeBench (53.3/26.4) y tiene licencia
+  MIT; cabe en A10 24 GB en fp16 (~16 GB) dejando KV cache.
+- **DeepSeek-Coder-V2-Lite** ya no compite en calidad (HE 81.1) y su licencia es
+  custom; se conserva como alternativa si ya está descargado.
+- **Devstral-Small-2507** (24B, Apache-2.0) y **GLM-4-32B-0414** (32B, MIT) son
+  buenos modelos, pero su evidencia fuerte es agentiva (SWE-bench, tool use),
+  no la síntesis de una función aislada. No se justifica el costo extra.
+- **gpt-oss-120b** (117B/5.1B activos, Apache-2.0) cabe en H100 y es fuerte en
+  código, pero es un modelo de razonamiento: el CoT consume tokens y el
+  presupuesto de 1000 generaciones se vuelve mucho más caro. Queda como
+  experimento, no como default.
+- **Qwen3-Coder-Next** (80B/3B activos, Apache-2.0) es la evolución natural,
+  pero su FP8 oficial ocupa ~80 GB y no cabe en una H100 con KV cache; haría
+  falta AWQ/MXFP4 (menos evidencia) o `--tensor-parallel-size 2`. No hay perfil
+  todavía; es candidato para cuando el cluster tenga 2 GPUs por job.
 
 Por qué `-Coder` y no solo "más grande": en las corridas locales el fallo típico
 del 0.5B fue **escribir código degenerado pero válido** (`return x`,
@@ -44,6 +78,40 @@ afinado en código del mismo tamaño escribe mejor código; por eso
 `Qwen2.5-Coder-7B-Instruct` es la primera opción antes que un genérico más
 grande.
 
+### 1.2 Cuantización: 4-bit es seguro, 2-3 bits no
+
+La evidencia sobre cuantización de modelos de código es consistente:
+
+- Un estudio sobre modelos de hasta 34B encuentra que **4-bit reduce ~70 % la
+  memoria sin degradación significativa** en generación de código; 3 y 2 bits sí
+  pierden calidad ([arXiv:2503.07103](https://arxiv.org/abs/2503.07103)).
+- En modelos de razonamiento, **W8A8 y W4A16 son lossless**; por debajo de 4
+  bits la caída es grande y los modelos chicos sufren más
+  ([arXiv:2504.04823](https://arxiv.org/abs/2504.04823)).
+- Un estudio de robustez incluso reporta que los modelos cuantizados a 4-bit
+  aguantan mejor perturbaciones adversariales, sin perder capacidad
+  ([arXiv:2506.22776](https://arxiv.org/abs/2506.22776)).
+
+Conclusión práctica: **AWQ W4A16** es la opción correcta para A100 40 GB/A10
+24 GB; **FP8** es preferible en H100 (más preciso que 4-bit y entra de sobra);
+**fp16/bf16** queda para la corrida de referencia sin cuantizar. No uses 3-bit
+ni 2-bit para este bucle.
+
+### 1.3 VRAM de referencia
+
+VRAM de pesos, sin KV cache; el KV cache y las activaciones dependen de
+`--max-model-len` y del tamaño del prompt.
+
+| Modelo | fp16/bf16 | 4-bit AWQ | FP8 | Nota |
+|---|---:|---:|---:|---|
+| Qwen2.5-1.5B-Instruct | ~3 GB | — | — | smoke |
+| Qwen2.5-Coder-7B-Instruct | ~15 GB | ~5 GB | ~8 GB | A10 con contexto corto |
+| Seed-Coder-8B-Instruct | ~16 GB | ~6 GB | ~9 GB | A10 24 GB |
+| Qwen2.5-Coder-14B-Instruct | ~29 GB | ~10 GB | ~15 GB | A100 40 GB / A10 AWQ |
+| Qwen2.5-Coder-32B-Instruct | ~65 GB | ~19-21 GB | ~33 GB | H100 fp16; AWQ en A100 |
+| Qwen3-Coder-30B-A3B-Instruct | ~61 GB | ~18 GB | ~31 GB | MoE 3.3B activos |
+| DeepSeek-Coder-V2-Lite | ~31 GB | ~9 GB | ~16 GB | 16B MoE (2.4B activos) |
+
 Notas:
 
 - vLLM reserva memoria para el KV cache. Para prompts largos (el bucle evolutivo
@@ -51,24 +119,53 @@ Notas:
   `--gpu-memory-utilization` (default 0.9). Si hay OOM: bajarlo
   (`GPU_MEM_UTIL=0.8` en el `.slrm`) o acortar `--max-model-len`
   (`MAX_MODEL_LEN=8192`).
-- **Elección por VRAM disponible**: el cluster tiene tres GPUs y
-  `slurm/llamea-gpu-profile.sh` elige el modelo más grande que cabe en cada una:
+- **Elección por GPU**: `slurm/llamea-gpu-profile.sh` elige el modelo y, en
+  algunos perfiles, argumentos de vLLM (`coder30b-awq` fuerza
+  `--quantization awq_marlin`; `coder30b-fp8` usa `--kv-cache-dtype fp8`):
 
-  | GPU | VRAM | `PROFILE` | Modelo |
-  |---|---|---|---|
-  | A100 | 40 GB | `big-quant` (default) | `Qwen2.5-Coder-32B-Instruct-AWQ` (~19-21 GB) |
-  | H100 | 80 GB | `h100-fp16` | `Qwen2.5-Coder-32B-Instruct` fp16 (~65 GB) |
-  | A100 | 40 GB | `a100-fp16` | `Qwen2.5-Coder-14B-Instruct` fp16 (~29 GB) |
-  | A10 | 24 GB | `a10-quant` | `Qwen2.5-Coder-14B-Instruct-AWQ` (~10 GB) |
+  | GPU | VRAM | `PROFILE` | Modelo | Por qué |
+  |---|---|---|---|---|
+  | H100 | 80 GB | `coder30b-fp8` | Qwen3-Coder-30B-A3B FP8 (~31 GB) | mejor calidad/velocidad, FP8 oficial, 32k contexto |
+  | H100 | 80 GB | `h100-fp16` | Qwen2.5-Coder-32B fp16 (~65 GB) | referencia sin cuantizar, ya validada |
+  | A100 | 40 GB | `coder30b-awq` | Qwen3-Coder-30B-A3B AWQ (~18 GB) | 30B con 3.3B activos; cuantización de comunidad |
+  | A100 | 40 GB | `big-quant` (default) | Qwen2.5-Coder-32B AWQ (~20 GB) | fallback probado, cuantización oficial |
+  | A10 | 24 GB | `coder8b` | Seed-Coder-8B fp16 (~16 GB) | mejor ≤8B en BigCodeBench, KV holgado |
+  | A10 | 24 GB | `a10-quant` | Qwen2.5-Coder-14B AWQ (~10 GB) | más parámetros, ya validado |
+  | cualquiera | — | `smoke` | Qwen2.5-1.5B | sanity check |
 
-  `big-quant` es el default porque es el **mayor número de parámetros** que
-  cabe con contexto largo en las GPUs grandes (A100 40 GB y H100 80 GB). En una
-  A10 (24 GB) usar `PROFILE=a10-quant`; el 32B AWQ no deja KV cache suficiente
-  para 16k de contexto. Si el job cae en una H100, `PROFILE=h100-fp16` da la
-  versión sin cuantizar.
+  `big-quant` sigue siendo el **default** para no invalidar las corridas ya
+  hechas. Para una corrida nueva en A100/H100, `coder30b-awq` es la apuesta
+  basada en evidencia; en H100, `coder30b-fp8`. En A10, `coder8b` deja más KV
+  cache que `coder30b-awq-a10` (30B AWQ en 24 GB va justo).
+  `coder30b-awq` usa un AWQ de comunidad (`QuantTrio`); verifica el manifiesto
+  antes de confiar en él y, si algo falla, vuelve a `big-quant`.
 - **En esta máquina de pruebas (RTX 3060, 12 GB)**: usar `Qwen2.5-0.5B/1.5B`.
 - Los modelos `-Instruct` tienen chat template: el prompt de LLaMEA va como
   mensaje de usuario y la respuesta se parsea por bloques ```` ```python ````.
+- `scripts/mohh_models.py download` consulta el tamaño remoto y **falla antes de
+  descargar** si la raíz persistente no tiene cuota (margen del 15 %). Para
+  reproducibilidad exacta, fija la revisión:
+  `python scripts/mohh_models.py download <modelo> --revision <sha>`.
+
+### 1.4 Cómo elegir con evidencia de *esta* tarea
+
+Los benchmarks de código no predicen el anclaje (repetir el mismo operador) ni
+la tasa de operadores válidos en LLaMEA. Para decidir entre dos perfiles, corre
+el mismo presupuesto y semilla con cada uno y compara:
+
+```bash
+# Dos corridas cortas, mismo seed y budget, en la misma GPU.
+PROFILE=coder30b-awq BUDGET=50 SEED=42 EXPERIMENT_NAME=bakeoff_30b \
+  bash slurm/llamea-all.sh
+
+# Cuando terminen, tabla comparativa (validez, distintos, HV, tokens, latencia).
+python scripts/analyze_llamea_runs.py 'results/searches/bakeoff_*' \
+  --summary --csv results/bakeoff.csv
+```
+
+La tabla `--summary` es la evidencia que importa: `validos`, `distintos`,
+`mejor HV`, `tokens/eval` y `s/llamada`. Un modelo con mejor HumanEval pero que
+repite el 90 % de las veces pierde frente a uno más chico y diverso.
 
 ---
 
@@ -80,12 +177,15 @@ Notas:
 # Servidor persistente (opcional; el default es el job único de la sección B
 # del README: `bash slurm/llamea-all.sh`).
 sbatch slurm/llamea-vllm-server.slrm                 # perfil big-quant (32B AWQ)
-PROFILE=h100-fp16 sbatch --constraint=H100 slurm/llamea-vllm-server.slrm
+PROFILE=coder30b-fp8 sbatch --constraint=H100 slurm/llamea-vllm-server.slrm
+PROFILE=coder30b-awq sbatch --constraint=A100 slurm/llamea-vllm-server.slrm
 ```
 
 Variables de entorno del `.slrm` (todas opcionales):
-`PROFILE` (`big-quant`), `MODEL`, `CONSTRAINT`, `PORT` (8000), `GPU_MEM_UTIL`
-(0.9), `MAX_MODEL_LEN`, `TENSOR_PARALLEL`, `EXTRA_VLLM_ARGS`. El script elige
+`PROFILE` (`big-quant`; `PROFILE=list` imprime el catálogo), `MODEL`,
+`CONSTRAINT`, `PORT` (8000), `GPU_MEM_UTIL` (0.9), `MAX_MODEL_LEN`,
+`TENSOR_PARALLEL`, `VLLM_ARGS` (del perfil, p. ej. `--quantization awq_marlin`
+o `--kv-cache-dtype fp8`) y `EXTRA_VLLM_ARGS` (override del usuario). El script elige
 el modelo con `slurm/llamea-gpu-profile.sh`, verifica los pesos en la raíz
 persistente (`python scripts/mohh_models.py root`) y deja el modelo cargado
 hasta el time limit (30 días).
@@ -171,9 +271,18 @@ En SLURM: `slurm/llamea-generate.slrm` hace esto mismo; se le pasa
 
 - `temperature=0.8` por default en `VLLM_LLM` (balance exploración/explotación);
   subir para más diversidad, bajar a 0.2-0.4 para operadores más conservadores
-  (`--temperature` o `TEMPERATURE`; `scripts/llamea_search.sh` usa 0.2).
-- `budget` = número de llamadas al LLM / generaciones (default 100; corridas
-  serias 100-200; con caché se pueden lanzar 1000 sin pagar reevaluaciones).
+  (`--temperature` o `TEMPERATURE`; `scripts/llamea_search.sh` usa 0.2 para
+  modelos chicos locales). El job del cluster usa **0.7 + top_p 0.8 + top_k 20 +
+  repetition_penalty 1.05**, los valores que recomienda Qwen para sus modelos
+  Coder. `top_k` y `repetition_penalty` van en `extra_body` (extensiones de
+  vLLM); `--sampling-repetition-penalty` es distinto de `--repeat-penalty`.
+- `--operator-memory N` recuerda en el prompt los últimos `N` mecanismos
+  generados y pide no repetirlos. Ataca el anclaje observado (108 copias del
+  mismo operador en `b200`) antes de gastar una evaluación; el job del cluster
+  usa `N=12`. `0` lo desactiva.
+- `budget` = número de llamadas al LLM / generaciones (default 1000 en el CLI y
+  en el job; corridas serias 100-1000; con caché se pueden lanzar 1000 sin pagar
+  reevaluaciones).
 - `n_parents`/`n_offspring`: `1/1` = un algoritmo por generación (por defecto);
   subir para búsqueda poblacional.
 - Modelos muy chicos (≤1.5B) generan código inválido con frecuencia: el fitness

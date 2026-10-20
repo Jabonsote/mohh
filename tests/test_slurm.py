@@ -312,6 +312,9 @@ def test_llamea_gpu_profile_defaults_to_big_model():
     ("h100-fp16", "32B"),
     ("a100-fp16", "14B"),
     ("a10-quant", "14B"),
+    ("coder30b-awq", "Qwen3-Coder-30B"),
+    ("coder30b-fp8", "FP8"),
+    ("coder8b", "Seed-Coder-8B"),
     ("smoke", "1.5B"),
 ])
 def test_llamea_gpu_profile_variants(profile, needle):
@@ -322,6 +325,45 @@ def test_llamea_gpu_profile_variants(profile, needle):
 def test_llamea_gpu_profile_respects_model_override():
     model, _constraint = _source_profile("h100-fp16", {"MODEL": "org/custom"})
     assert model == "org/custom"
+
+
+def _profile_vllm_args(profile):
+    result = subprocess.run(
+        ["bash", "-c",
+         "source slurm/llamea-gpu-profile.sh; echo \"$VLLM_ARGS\""],
+        cwd=REPO_DIR, capture_output=True, text=True,
+        env={**os.environ, "PROFILE": profile}, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+@pytest.mark.parametrize("profile", ["coder30b-awq", "coder30b-awq-a10"])
+def test_community_awq_profiles_select_marlin_explicitly(profile):
+    # Para el AWQ de comunidad no dependemos solo del autodetect de vLLM.
+    assert "awq_marlin" in _profile_vllm_args(profile)
+
+
+def test_proven_profiles_do_not_add_extra_vllm_flags():
+    # big-quant/a10-quant se dejan como estaban (autodetect de vLLM).
+    assert _profile_vllm_args("big-quant") == ""
+    assert _profile_vllm_args("a10-quant") == ""
+
+
+def test_fp8_profile_uses_fp8_kv_cache_on_h100():
+    args = _profile_vllm_args("coder30b-fp8")
+    assert "--kv-cache-dtype fp8" in args
+
+
+def test_llamea_profile_list_prints_catalog():
+    result = subprocess.run(
+        ["bash", "-c", "source slurm/llamea-gpu-profile.sh"],
+        cwd=REPO_DIR, capture_output=True, text=True, timeout=30,
+        env={**os.environ, "PROFILE": "list"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "coder30b-fp8" in result.stdout
+    assert "Seed-Coder-8B" in result.stdout
 
 
 @pytest.mark.parametrize("script", ["llamea-single.slrm", "llamea-all.sh"])
@@ -353,6 +395,11 @@ def test_llamea_single_job_serves_and_searches_in_one_job():
     # que intentaria descargar en un nodo sin internet).
     assert "mohh_models.py path" in content
     assert '--model "$MODEL_PATH"' in content
+    # Argumentos del perfil (cuantizacion/KV cache) y muestreo recomendado.
+    assert "${VLLM_ARGS:-}" in content
+    assert "--operator-memory" in content
+    assert "--top-p" in content
+    assert "--sampling-repetition-penalty" in content
 
 
 def test_llamea_all_is_one_command():
@@ -370,7 +417,8 @@ def test_llamea_all_is_one_command():
 
 def test_llamea_generate_passes_diversity_flags_to_the_search():
     content = _read("llamea-generate.slrm")
-    for flag in ("--patience", "--parent-selection", "--niching", "--eval-repeats"):
+    for flag in ("--patience", "--parent-selection", "--niching", "--eval-repeats",
+                 "--operator-memory"):
         assert flag in content, f"llamea-generate.slrm: falta {flag}"
 
 

@@ -601,3 +601,66 @@ con `R = 1` se conserva el marco GE de siempre.
 contrato del job único (vLLM + búsqueda + `127.0.0.1`), el comando único y el
 paso de las nuevas banderas. `tests/test_llamea.py` cubre `EarlyStop` y
 `_llamea_kwargs`. Suite completa: `166 passed, 1 skipped`.
+
+---
+
+## 10. Alternativas de modelo basadas en evidencia (2026-10)
+
+### 10.1 Catálogo de perfiles
+
+Se agregan perfiles para modelos con mejor evidencia en generación de código
+que el 32B AWQ, sin retirar los existentes:
+
+| `PROFILE` | Modelo | VRAM | GPU | Papel |
+|---|---|---:|---|---|
+| `coder30b-awq` | Qwen3-Coder-30B-A3B AWQ | ~18 GB | A100/H100 | recomendado A100/H100 |
+| `coder30b-fp8` | Qwen3-Coder-30B-A3B FP8 | ~31 GB | H100 | recomendado H100 |
+| `coder30b-awq-a10` | Qwen3-Coder-30B-A3B AWQ | ~18 GB | A10 | 30B en 24 GB, 8k |
+| `coder8b` | Seed-Coder-8B-Instruct | ~16 GB | A10 | mejor ≤8B en BigCodeBench |
+| `big-quant` (default) | Qwen2.5-Coder-32B AWQ | ~20 GB | A100/H100 | fallback probado |
+
+Cada perfil define `VLLM_ARGS` (`--quantization awq_marlin`,
+`--kv-cache-dtype fp8`), que se suma al override `EXTRA_VLLM_ARGS`.
+`PROFILE=list` imprime el catálogo. La justificación (HumanEval/HumanEval+/
+BigCodeBench/LCB, licencias y estudios de cuantización) está en `modelos.md` §1.
+
+Por qué Qwen3-Coder-30B-A3B: rinde como un 32B en HumanEval+ (89.0 vs 87.2)
+pero solo activa 3.3B parámetros, así que una corrida de 1000 generaciones es
+mucho más rápida; el 32B denso sigue disponible como referencia sin cuantizar
+(`h100-fp16`). El AWQ de 30B es de comunidad (`QuantTrio`): se verifica con
+`mohh_models.py verify` y, si vLLM no lo carga, se vuelve a `big-quant`.
+
+### 10.2 Memoria de mecanismos (anti-anclaje)
+
+`--operator-memory N` inyecta en el prompt los últimos `N` `# Description:` /
+`# Design idea:` generados y pide explícitamente no repetirlos. Es complementario
+a `--repeat-penalty`: este último castiga en el ranking después de evaluar; la
+memoria evita gastar la generación. El job del cluster usa `N=12`.
+
+### 10.3 Muestreo recomendado por el modelo
+
+El job único pasa `top_p=0.8`, `top_k=20` y `repetition_penalty=1.05`
+(recomendación de Qwen para sus modelos Coder) y sube `temperature` de 0.2 a
+0.7, porque 0.2 favorecía la copia del ejemplo. `top_k` y `repetition_penalty`
+viajan en `extra_body` (extensiones de vLLM); `--sampling-repetition-penalty`
+es distinto de `--repeat-penalty`.
+
+### 10.4 Evidencia en la tarea real
+
+`scripts/analyze_llamea_runs.py --summary [--csv PATH]` produce una fila por
+corrida con validez, operadores distintos, mejor HV, tokens por evaluación y
+segundos por petición. Es la tabla que decide entre perfiles: los benchmarks de
+código no miden el anclaje ni la tasa de operadores válidos del bucle.
+
+### 10.5 Preflight de disco
+
+`mohh_models.download_model` consulta el tamaño remoto (`HfApi.model_info`) y
+falla antes de descargar si la raíz persistente no tiene espacio (margen 15 %).
+Evita llenar LUSTRE a mitad de un 30B/80B y deja un mensaje accionable
+(`remove`, `MOHH_MODELS_DIR`, `SCRATCH`). Si la API no responde, avisa y sigue.
+
+### 10.6 Pruebas
+
+Se agregan pruebas de los perfiles nuevos, de `VLLM_ARGS` por perfil, del
+catálogo `PROFILE=list`, de la inyección/acotado de la memoria, del preflight
+de disco y de las nuevas banderas del job único.

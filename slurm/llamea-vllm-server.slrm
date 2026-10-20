@@ -54,6 +54,7 @@ echo "Nodo GPU: $SLURM_JOB_NODELIST"
 echo "JobID:    $SLURM_JOB_ID"
 echo "Modelo:   $MODEL"
 echo "Puerto:   $PORT"
+echo "vLLM:     ${VLLM_ARGS:-} ${EXTRA_VLLM_ARGS:-}"
 
 export OMP_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
@@ -140,7 +141,7 @@ python -m vllm.entrypoints.openai.api_server \
     --gpu-memory-utilization "$GPU_MEM_UTIL" \
     --tensor-parallel-size "$TENSOR_PARALLEL" \
     $MAXLEN_ARG \
-    ${EXTRA_VLLM_ARGS:-} &
+    ${VLLM_ARGS:-} ${EXTRA_VLLM_ARGS:-} &
 VLLM_PID=$!
 wait "$VLLM_PID"
 

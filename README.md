@@ -309,12 +309,14 @@ module load python/miniforge
 WITH_VLLM=1 bash slurm/ixachi-setup-env.sh
 
 # 2. ONE COMMAND: download the model (login) + submit the single GPU job
-#    (vLLM server + LLaMEA search). Big model by default (32B AWQ).
+#    (vLLM server + LLaMEA search). `big-quant` (32B AWQ) is the proven
+#    default; `coder30b-awq` is the evidence-based upgrade for A100/H100.
 PROFILE=big-quant BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+PROFILE=coder30b-awq BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
 
 # Full pipeline in the SAME job: search + test evaluation + paired comparison
 # of the best operator against OX/PBX/PMX/CX/ERX (11 repetitions, same frame).
-PROFILE=big-quant BUDGET=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
+PROFILE=coder30b-awq BUDGET=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
 
 # 3. Monitor.
 squeue --user=$USER
@@ -327,22 +329,39 @@ cat results/searches/LLaMEA_single/progress.txt       # best-so-far
 
 #### GPU/model profiles (big models)
 
-`slurm/llamea-gpu-profile.sh` picks the largest model that fits. Override with
-`MODEL=...`, `CONSTRAINT=...`, `MAX_MODEL_LEN=...`, `GPU_MEM_UTIL=...`.
+`slurm/llamea-gpu-profile.sh` picks the model and, for some profiles, its vLLM
+arguments (`coder30b-awq` forces `awq_marlin`; `coder30b-fp8` uses
+`--kv-cache-dtype fp8`). Override with
+`MODEL=...`, `CONSTRAINT=...`, `MAX_MODEL_LEN=...`, `GPU_MEM_UTIL=...`,
+`VLLM_ARGS=...`; `PROFILE=list` prints the catalog.
 
 | `PROFILE` | Model | VRAM | Fits on |
 |---|---|---|---|
 | `big-quant` (default) | `Qwen/Qwen2.5-Coder-32B-Instruct-AWQ` | ~19–21 GB | A100 40 GB, H100 80 GB |
+| `coder30b-awq` | `QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ` | ~18 GB | A100 40 GB, H100 80 GB |
+| `coder30b-fp8` | `Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8` | ~31 GB | H100 80 GB |
+| `coder30b-awq-a10` | `QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ` | ~18 GB | A10 24 GB, 8k context |
 | `h100-fp16` | `Qwen/Qwen2.5-Coder-32B-Instruct` | ~65 GB | H100 80 GB |
 | `a100-fp16` | `Qwen/Qwen2.5-Coder-14B-Instruct` | ~29 GB | A100 40 GB |
 | `a10-quant` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | ~10 GB | A10 24 GB |
+| `coder8b` | `ByteDance-Seed/Seed-Coder-8B-Instruct` | ~16 GB | A10 24 GB |
 | `smoke` | `Qwen/Qwen2.5-1.5B-Instruct` | ~3 GB | any (smoke tests only) |
+
+Evidence for the choice (HumanEval+/BigCodeBench and quantization studies) and
+the per-GPU recommendation are in [`modelos.md`](modelos.md) §1. In short:
+Qwen3-Coder-30B-A3B has 32B-class HumanEval+ (89.0) with only 3.3B active
+parameters, so it is much faster for 1000-generation runs; `big-quant` remains
+the proven fallback. `coder30b-awq` is a community AWQ — verify it before a long
+run and fall back to `big-quant` if vLLM fails to load it.
 
 Examples:
 
 ```bash
-PROFILE=h100-fp16 BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh      # sanity check
+PROFILE=coder30b-awq BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+PROFILE=coder30b-fp8 BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh  # H100
+PROFILE=coder8b BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh       # A10
+PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh           # sanity
+PROFILE=list bash slurm/llamea-all.sh                                  # catalog
 ```
 
 #### Alternative: a persistent server + separate searches
@@ -364,11 +383,18 @@ BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-full-chain.sh
 ```
 
 Extra environment knobs for the search jobs: `SOLVER`, `MO_GENERATIONS`,
-`MO_POPULATION_SIZE`, `TEMPERATURE`, `MAX_TOKENS` (4096), `MUTATION=1`,
-`COMMA=1`, `REFINE_ONLY=1`, `NO_SAVE_FRONTS=1`, `REPEAT_PENALTY`, `PATIENCE`,
-`PARENT_SELECTION`, `NICHING`, `EVAL_REPEATS`, `CATEGORY`, `EXPERIMENT_NAME`,
-`SEED`. Add `COMPARE=1` to run the paired comparison against the classics in
-the same job (`COMPARE_REPEATS=11`, `COMPARE_SPLIT=test`).
+`MO_POPULATION_SIZE`, `TEMPERATURE` (0.7 in the single job), `TOP_P` (0.8),
+`TOP_K` (20), `SAMPLING_REPETITION_PENALTY` (1.05), `MAX_TOKENS` (4096),
+`OPERATOR_MEMORY` (12), `MUTATION=1`, `COMMA=1`, `REFINE_ONLY=1`,
+`NO_SAVE_FRONTS=1`, `REPEAT_PENALTY`, `PATIENCE`, `PARENT_SELECTION`,
+`NICHING`, `EVAL_REPEATS`, `CATEGORY`, `EXPERIMENT_NAME`, `SEED`. Add
+`COMPARE=1` to run the paired comparison against the classics in the same job
+(`COMPARE_REPEATS=11`, `COMPARE_SPLIT=test`).
+
+`--operator-memory N` appends the last `N` generated mechanisms to the prompt
+and asks the model not to repeat them; `--repeat-penalty` still penalizes
+repeated code in the ranking. `--sampling-repetition-penalty` is the vLLM
+sampler's `repetition_penalty`, a different knob.
 
 ### C. Compare discovered operators against the classics
 
@@ -407,6 +433,24 @@ python scripts/collect_replicates.py 'results/searches/proc_r*' \
 
 `summary.md` gives the mean/median/sd of the best-per-run (the honest number),
 and `compare_args.txt` feeds those operators into `compare_operators.py`.
+
+### E. Choose a model with evidence from *this* loop
+
+Code benchmarks do not predict anchoring or the valid-operator rate. Run the
+same short budget/seed with each profile and compare:
+
+```bash
+PROFILE=coder30b-awq BUDGET=50 SEED=42 EXPERIMENT_NAME=bakeoff_30b \
+  bash slurm/llamea-all.sh
+PROFILE=big-quant BUDGET=50 SEED=42 EXPERIMENT_NAME=bakeoff_32b \
+  bash slurm/llamea-all.sh
+python scripts/analyze_llamea_runs.py 'results/searches/bakeoff_*' \
+  --summary --csv results/bakeoff.csv
+```
+
+The table reports valid operators, distinct mechanisms, best HV, tokens per
+evaluation and seconds per request — the numbers that decide which model is
+worth a 1000-generation run.
 
 ### Output artifacts (per search)
 

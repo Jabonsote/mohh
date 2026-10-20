@@ -16,7 +16,13 @@ import pytest
 from mohh.core.operators.operator_template import HH_Operator
 from mohh.llamea.fitness import build_evaluator, compile_operator
 from mohh.llamea.operator import LLMOperator
-from mohh.llamea.vllm import model_is_available, VLLM_LLM, wait_for_server
+from mohh.llamea.vllm import (
+    extract_description,
+    memory_block,
+    model_is_available,
+    VLLM_LLM,
+    wait_for_server,
+)
 
 INSTANCE = os.path.join(
     os.path.dirname(__file__), "..", "datasets", "mqap", "train", "KC23-2fl-1rl.txt"
@@ -567,6 +573,62 @@ def test_vllm_llm_extract_raises_without_code():
     llm = VLLM_LLM(model="m", base_url="http://localhost:9/v1")
     with pytest.raises(NoCodeException):
         llm.extract_algorithm_code("solo prosa, sin ningun bloque de codigo")
+
+
+def test_extract_description_reads_both_headers():
+    assert extract_description("# Description: order crossover\nx") == "order crossover"
+    assert extract_description("# Design idea: combine OX and CX\n") == "combine OX and CX"
+    assert extract_description("no header here") == ""
+
+
+def test_memory_block_lists_recent_mechanisms_only():
+    block = memory_block(["a", "b", "c"], limit=2)
+    assert "b" in block and "c" in block
+    assert "- a" not in block
+    assert "Do NOT repeat" in block
+    assert memory_block([]) == ""
+
+
+def test_operator_memory_is_injected_and_bounded(monkeypatch):
+    """La memoria anti-anclaje entra en el prompt y no muta la lista de LLaMEA."""
+    import llamea.llm as llamea_llm
+
+    llm = VLLM_LLM(model="m", base_url="http://localhost:9/v1",
+                   operator_memory=2)
+    prompts = []
+    replies = iter([
+        "# Description: first mechanism\n```python\npass\n```",
+        "# Description: second mechanism\n```python\npass\n```",
+        "# Description: third mechanism\n```python\npass\n```",
+        "# Description: fourth mechanism\n```python\npass\n```",
+    ])
+
+    def fake_query(self, session, **kwargs):
+        prompts.append([dict(message) for message in session])
+        return next(replies)
+
+    monkeypatch.setattr(llamea_llm.OpenAI_LLM, "query", fake_query)
+
+    original = [{"role": "user", "content": "task 1"}]
+    llm.query(original)
+    llm.query([{"role": "user", "content": "task 2"}])
+    llm.query([{"role": "user",
+                "content": "task 3\nAnswer in exactly this format:\n# Code:"}])
+    llm.query([{"role": "user", "content": "task 4"}])
+
+    # La lista original no se modifica.
+    assert original[0]["content"] == "task 1"
+    # En la cuarta peticion el limite de 2 ya desplazo al primer mecanismo.
+    assert "second mechanism" in prompts[3][-1]["content"]
+    assert "third mechanism" in prompts[3][-1]["content"]
+    assert "first mechanism" not in prompts[3][-1]["content"]
+    assert "fourth mechanism" not in prompts[3][-1]["content"]
+    # La memoria va antes del bloque de formato, no despues.
+    assert (prompts[2][-1]["content"].index("first mechanism")
+            < prompts[2][-1]["content"].index("Answer in exactly this format:"))
+    snapshot = llm.operator_memory_snapshot()
+    assert snapshot["size"] == 2
+    assert snapshot["descriptions"] == ["third mechanism", "fourth mechanism"]
 
 
 def test_vllm_llm_extract_requires_module_level_crossover():

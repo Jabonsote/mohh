@@ -234,6 +234,32 @@ def list_models(root: str | None = None) -> list:
     return found
 
 
+def remote_size(model_id: str, revision: str | None = None) -> int:
+    """Tamano total (bytes) que ocupan los archivos del modelo en el Hub.
+
+    Se consulta antes de descargar para fallar temprano si no hay cuota: un
+    30B AWQ son ~18 GB y un 80B FP8 ~80 GB. Si la API no esta disponible
+    (p. ej. tests sin red), el llamador debe continuar con un aviso.
+    """
+    from huggingface_hub import HfApi
+
+    info = HfApi().model_info(model_id, revision=revision, files_metadata=True)
+    return int(sum((sibling.size or 0) for sibling in info.siblings))
+
+
+def check_free_space(root: str, needed: int, margin: float = 1.15) -> None:
+    """Falla con un mensaje accionable si `root` no tiene espacio para `needed`."""
+    free = shutil.disk_usage(root).free
+    required = int(needed * margin)
+    if required > free:
+        raise RuntimeError(
+            f"Espacio insuficiente en {root}: se necesitan ~{human_size(required)} "
+            f"(modelo + margen) y hay {human_size(free)}. Libera cuota con "
+            f"`python scripts/mohh_models.py remove <modelo>` o define "
+            f"MOHH_MODELS_DIR/SCRATCH en otro disco persistente."
+        )
+
+
 def download_model(model_id: str, revision: str | None = None,
                    root: str | None = None, allow_download: bool = True,
                    hash_files: bool = False, max_workers: int = 8) -> str:
@@ -265,6 +291,13 @@ def download_model(model_id: str, revision: str | None = None,
     from huggingface_hub import snapshot_download
 
     os.makedirs(path, exist_ok=True)
+    try:
+        needed = remote_size(model_id, revision)
+    except Exception as error:  # noqa: BLE001 - la estimacion es best-effort
+        print(f"AVISO: no se pudo estimar el tamano remoto de {model_id}: {error}")
+    else:
+        check_free_space(root, needed)
+
     print(f"Descargando {model_id} en {path} (raiz persistente {root}) ...")
     snapshot_download(
         model_id,

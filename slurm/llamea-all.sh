@@ -12,7 +12,10 @@
 #
 # Opciones por entorno (se exportan al job con --export=ALL):
 #   PROFILE (big-quant)    perfil GPU/modelo (ver slurm/llamea-gpu-profile.sh):
-#                          big-quant | h100-fp16 | a100-fp16 | a10-fp16 | smoke
+#                          big-quant | coder30b-awq | coder30b-fp8 |
+#                          coder30b-awq-a10 | coder8b | h100-fp16 |
+#                          a100-fp16 | a10-quant | smoke
+#                          `PROFILE=list bash slurm/llamea-all.sh` imprime la tabla.
 #   MODEL                  override del modelo (id de HuggingFace)
 #   BUDGET (1000)          generaciones de la busqueda
 #   EVAL_TEST=1            evaluar el mejor operador en el conjunto de test

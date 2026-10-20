@@ -28,6 +28,10 @@
 #   MO_GENERATIONS (30)                  generaciones del MOEA interno
 #   MO_POPULATION_SIZE (30)              poblacion del MOEA interno
 #   TEMPERATURE (0.2)                    temperatura del LLM
+#   TOP_P / TOP_K                        muestreo nucleus / top-k (vacío = servidor)
+#   SAMPLING_REPETITION_PENALTY          repetition_penalty de vLLM (vacío = servidor)
+#   OPERATOR_MEMORY (0)                  mecanismos recientes recordados en el prompt
+#                                        (0 = off; 12 recomendado con modelos grandes)
 #   MAX_TOKENS (vacío)                   máximo de tokens de salida por petición
 #   REPEAT_PENALTY (0.5)                 presión de diversidad: castigo al
 #                                        ranking por repetir código (1.0 = off)
@@ -95,6 +99,11 @@ args=(
 [[ "${QUIET:-0}" == "1" ]] && args+=(--quiet)
 [[ -n "${BOUNDS_FILE:-}" ]] && args+=(--bounds-file "$BOUNDS_FILE")
 [[ -n "${MAX_TOKENS:-}" ]] && args+=(--max-tokens "$MAX_TOKENS")
+[[ -n "${TOP_P:-}" ]] && args+=(--top-p "$TOP_P")
+[[ -n "${TOP_K:-}" ]] && args+=(--top-k "$TOP_K")
+[[ -n "${SAMPLING_REPETITION_PENALTY:-}" ]] && \
+  args+=(--sampling-repetition-penalty "$SAMPLING_REPETITION_PENALTY")
+[[ -n "${OPERATOR_MEMORY:-}" ]] && args+=(--operator-memory "$OPERATOR_MEMORY")
 
 # shellcheck disable=SC2206
 [[ -n "${EXTRA:-}" ]] && args+=(${EXTRA})
