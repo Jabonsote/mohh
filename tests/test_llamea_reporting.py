@@ -54,6 +54,23 @@ def test_normalize_front_matches_project_formula():
     assert normalized.max() == 1.0
 
 
+def test_clip_to_reference_box_bounds_hv_of_better_front():
+    """Un candidato mejor que el panel no debe inflar el HV por encima de nadir**K."""
+    from mohh.core.utilities.algorithm.MO import compute_hypervolume
+    from mohh.llamea.fitness import clip_to_reference_box
+
+    # Marco del panel: [10, 10]..[20, 20]. El candidato esta en [0, 0],
+    # fuera del panel; sin recorte el HV seria (1.1-(-1))^2 > 1.1^2.
+    frame = np.array([[10.0, 10.0], [20.0, 20.0]])
+    candidate = np.array([[0.0, 0.0]])
+    vmin, vmax = frame.min(axis=0), frame.max(axis=0)
+    normalized = normalize_front(candidate, (vmin, vmax))
+    bounded = clip_to_reference_box(normalized)
+    hv = compute_hypervolume(np.full(2, 1.1), bounded)
+    assert hv == pytest.approx(1.1 ** 2)
+    assert hv <= 1.1 ** 2 + 1e-12
+
+
 def test_normalize_front_matches_original_formula_with_degenerate_column():
     """Formula del original; una columna degenerada da NaN (instancia invalida).
 
@@ -396,6 +413,119 @@ def test_vllm_llm_estimates_usage_when_missing():
     assert snapshot["prompt_tokens"] == 20
     assert snapshot["completion_tokens"] == 10
     assert snapshot["total_tokens"] == 30
+
+
+def test_vllm_llm_logs_raw_response_reasoning_and_params(tmp_path):
+    import threading
+
+    from mohh.llamea.vllm import VLLM_LLM
+
+    llm = VLLM_LLM.__new__(VLLM_LLM)
+    llm.reset_usage()
+    llm.model = "qwen-test"
+    llm.base_url = "http://localhost:9/v1"
+    llm.temperature = 0.3
+    llm.max_tokens = 512
+    llm.top_p = 0.8
+    llm.top_k = 20
+    llm.sampling_repetition_penalty = 1.05
+    llm.thinking = True
+    llm.request_context = {"experiment": "prueba"}
+    llm.request_log_path = os.path.join(tmp_path, "llm_requests.jsonl")
+    llm._request_lock = threading.Lock()
+    llm._request_index = 0
+    llm._last_elapsed = 1.25
+
+    class _Message:
+        content = "```python\ndef crossover(x, y):\n    return x\n```"
+        reasoning_content = "Primero considero el orden."
+
+    class _Choice:
+        message = _Message()
+        finish_reason = "stop"
+
+    class _Response:
+        id = "resp-1"
+        model = "qwen-test"
+        system_fingerprint = None
+        choices = [_Choice()]
+        usage = type("_Usage", (), {
+            "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
+            "completion_tokens_details": type("_Details", (), {"reasoning_tokens": 3})(),
+            "prompt_tokens_details": None,
+            "model_dump": lambda self: {"prompt_tokens": 10,
+                                        "completion_tokens": 5,
+                                        "total_tokens": 15},
+        })()
+
+    llm._last_response = _Response()
+    llm._write_request_log(
+        1, [{"role": "user", "content": "prompt completo"}], {},
+        raw=_Message.content, cleaned=_Message.content,
+    )
+    with open(llm.request_log_path) as file:
+        record = json.loads(file.readline())
+    assert record["prompt"] == "prompt completo"
+    assert record["response"]["reasoning_content"] == "Primero considero el orden."
+    assert record["response"]["raw_content"] == _Message.content
+    assert record["params"]["temperature"] == 0.3
+    assert record["params"]["max_tokens"] == 512
+    assert record["params"]["thinking"] is True
+    assert record["response"]["usage"]["total_tokens"] == 15
+
+
+def test_prompt_log_uses_exact_request_and_reasoning(tmp_path):
+    from mohh.llamea.reporting import write_prompt_log
+
+    with open(os.path.join(tmp_path, "conversationlog.jsonl"), "w") as file:
+        file.write(json.dumps({"role": "client", "content": "prompt LLaMEA",
+                               "time": 1.0}) + "\n")
+        file.write(json.dumps({"role": "qwen", "content": "respuesta limpia",
+                               "time": 2.0}) + "\n")
+    request = {
+        "request": 1,
+        "model": "qwen-test",
+        "prompt": "prompt exacto con memoria",
+        "messages": [{"role": "user", "content": "prompt exacto con memoria"}],
+        "params": {"temperature": 0.3, "max_tokens": 512, "thinking": "on"},
+        "response": {
+            "raw_content": "respuesta cruda con <thinking>razonamiento</thinking>",
+            "cleaned_content": "respuesta limpia",
+            "reasoning_content": "razonamiento interno",
+            "finish_reason": "stop",
+        },
+    }
+    with open(os.path.join(tmp_path, "llm_requests.jsonl"), "w") as file:
+        file.write(json.dumps(request) + "\n")
+
+    records = write_prompt_log(str(tmp_path))
+    assert records[0]["request"] == 1
+    assert records[0]["model"] == "qwen-test"
+    assert records[0]["params"]["temperature"] == 0.3
+    assert records[0]["reasoning_chars"] == len("razonamiento interno")
+    with open(os.path.join(tmp_path, "prompts", "gen-0000.md")) as file:
+        markdown = file.read()
+    assert "prompt exacto con memoria" in markdown
+    assert "razonamiento interno" in markdown
+    assert "respuesta cruda con" in markdown
+
+
+def test_vllm_llm_is_picklable_after_request_logging(tmp_path):
+    """LLaMEA picklea el objeto; el lock y la ultima respuesta no deben romperlo."""
+    import pickle
+
+    from mohh.llamea.vllm import VLLM_LLM
+
+    llm = VLLM_LLM(
+        model="qwen-test",
+        base_url="http://localhost:9/v1",
+        request_log_path=os.path.join(tmp_path, "llm_requests.jsonl"),
+    )
+    restored = pickle.loads(pickle.dumps(llm))
+    assert restored.model == "qwen-test"
+    assert restored.request_log_path == llm.request_log_path
+    assert restored.usage["requests"] == 0
+    assert hasattr(restored, "_request_lock")
 
 
 def test_tokens_summary_from_generation_log(tmp_path):

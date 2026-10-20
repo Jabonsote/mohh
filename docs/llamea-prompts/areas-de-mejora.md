@@ -99,8 +99,10 @@ original y sirve para la tabla de una corrida, pero el marco fijo del panel es u
 distintas entre sí y contra los clásicos.
 
 **Costo/beneficio.** Bajo; es requisito para publicar la comparación contra la
-tabla GE. Pendiente relacionado: `--eval-repeats` (§6), porque GE promedia
-varias repeticiones por instancia y aquí cada instancia se evalúa una vez.
+tabla GE. **Implementado:** la evaluación final (`--eval-repeats`, 11 por
+defecto) usa el marco fijo del panel y compara pareado contra cada clásico;
+`compare_operators.py` usa el marco consolidado y `--ge-protocol` para la
+tabla GE completa. El ranking *dentro* de la búsqueda sigue con una semilla.
 
 ### 1c. La tabla de una corrida no es una comparación (implementado)
 
@@ -142,11 +144,13 @@ diagnóstico (`feedback_b30`) sí gana **11 de 11** contra los cinco clásicos
 corrida sobrevaloraba al candidato de 100 generaciones y subestimaba al de 30.
 Detalle en [`comparacion-justa.md`](comparacion-justa.md).
 
-**Pendiente.** El fitness *durante* la búsqueda sigue usando una semilla por
-instancia (`--eval-repeats`): promediar R repeticiones reduciría el ruido del
-ranking a costa de R× el MOEA interno. Y la selección final sigue siendo
-post-hoc; lo correcto es seleccionar con train y validar en un conjunto aparte
-(punto 3).
+**Implementado después.** La evaluación final usa 11 repeticiones pareadas por
+defecto y reporta candidato vs clásicos con IC95 y Holm; `compare_operators.py`
+acepta `--ge-protocol` para el protocolo GE completo (3 solvers × 2 mutaciones ×
+300/105) y cuenta los fallos como HV 0 en vez de descartar el par. **Sigue
+pendiente** promediar repeticiones *dentro del bucle* (el ranking aún usa una
+semilla por instancia) y la selección final sigue siendo post-hoc; lo correcto
+es seleccionar con train y validar en un conjunto aparte (punto 3).
 
 ### 1d. `--mutation` era un no-op (implementado)
 
@@ -318,8 +322,10 @@ midiendo otra cosa que el experimento final.
 - Registrar `mo_generations`/`mo_population_size` en `run.json` (ya se hace) y
   no comparar HV entre corridas con presupuestos distintos.
 
-**Costo/beneficio.** Medio; primero hay que medir si el orden cambia (es un
-experimento barato con los 5 clásicos).
+**Implementado parcialmente.** `scripts/compare_operators.py --ge-protocol`
+permite la tabla final con 300/105, los tres solvers y ambas mutaciones bajo el
+mismo marco. El bucle de búsqueda conserva 30/30 para no multiplicar el costo;
+la calibración 30/30 vs 300/105 sobre los clásicos sigue pendiente.
 
 ### 9. Sin criterio de parada por estancamiento
 
@@ -438,10 +444,10 @@ el control a Python.
 | 3 | Selección final solo con train (+ validation) | Bajo | Alto |
 | 4 | `--patience` y presupuesto de tokens | Bajo | Medio |
 | 5 | Chequeo de degeneración (hecho) + feedback con diagnóstico (hecho) + 1 reintento | Medio | Alto |
-| 6 | `--eval-repeats` (3 semillas) | Medio | Medio |
+| 6 | `--eval-repeats` (hecho: 11 en test; falta promediar dentro del bucle) | Medio | Medio |
 | 7 | Sandbox de `exec` (subproceso + límites) | Medio | Medio |
 | 7b | Timeout del `exec` de código de módulo (hecho) | Bajo | Alto |
-| 8 | Calibrar el presupuesto interno 30/30 vs 300/105 | Medio | Medio |
+| 8 | Calibrar 30/30 vs 300/105 (tabla final: `--ge-protocol`, hecho) | Medio | Medio |
 | 9 | Ranking compartido si se paraleliza | Alto | Bajo hoy |
 | 10 | Reportes con media móvil y deduplicación de código | Bajo | Bajo |
 | 11 | Réplicas marco GE vs marco fijo (hecho: 3+3) | Bajo | Medio |

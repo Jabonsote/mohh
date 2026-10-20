@@ -13,13 +13,24 @@ valida:
     normalizado con `(f - vmin) / (vmax - vmin)` y nadir fijo `[1.1] * K`, igual
     que `experiment.py`. Si una instancia no tiene escala se excluye y se reporta;
   * **N repeticiones independientes** (por defecto 11) para estimar el ruido y
-    hacer una prueba no parametrica pareada (Wilcoxon).
+    hacer una prueba no parametrica pareada (Wilcoxon), con intervalo de
+    confianza de la diferencia y ajuste de Holm por comparaciones multiples;
+  * **protocolo configurable**: `--solver` acepta varios solvers y
+    `--mutation-both` evalua con y sin `Swap_Mutation`. `--ge-protocol` activa
+    el protocolo de la evaluacion GE (MOEAD, NSGAII y SMSEMOA; ambas mutaciones;
+    300/105; 11 repeticiones);
+  * un fallo de evaluacion (operador que lanza una excepcion en una instancia)
+    se cuenta como HV 0, no se descarta del par: descartarlo haria que un
+    operador roto pareciera mejor. ``--fail-policy`` permite abortar o excluir.
 
 Uso:
     python scripts/compare_operators.py \
         --operator descubierto=results/examples/llamea_found_operators/qwen25coder7b_moead_b100_ge.py \
         --operator ox=classic:ox --operator pbx=classic:pbx \
         --split test --repeats 11 --name b100_vs_clasicos
+
+    # Tabla final con el protocolo GE completo (caro):
+    python scripts/compare_operators.py ... --ge-protocol
 
 Salida: `results/evaluations/<name>/evaluation.json` y `report.md`.
 """
@@ -37,12 +48,18 @@ from mohh.llamea.fitness import (
     NADIR_FACTOR,
     _consolidated_frame,
     build_evaluator,
+    clip_to_reference_box,
     compile_operator,
     init_params,
     normalize_front,
 )
 from mohh.llamea.reference import REFERENCE_OPERATORS, namespace_for
 from mohh.llamea.run import _select_instances
+from mohh.llamea.statistics import (
+    add_holm,
+    minimum_detectable_difference,
+    paired_summary,
+)
 
 
 def load_operator(spec):
@@ -76,99 +93,173 @@ def load_operator(spec):
         return name, compile_operator(handle.read()), "discovered"
 
 
-def collect_fronts(operators, paths, args, existing=None):
+def build_protocols(args):
+    """Protocolos (solver, mutacion) que se evaluan con el mismo marco.
+
+    La evaluacion GE usa los tres solvers y las dos variantes de mutacion
+    (`NullMutation` y `Swap_Mutation`). Para reproducirla:
+    ``--solver MOEAD,NSGAII,SMSEMOA --mutation-both``. El default conserva una
+    sola combinacion para que una comparacion rapida siga siendo barata.
+    """
+    solvers = [value.strip() for value in str(args.solver).split(",") if value.strip()]
+    if not solvers:
+        raise SystemExit("--solver no puede estar vacio")
+    if args.mutation_both:
+        return [(solver, False) for solver in solvers] + \
+               [(solver, True) for solver in solvers]
+    return [(solver, bool(args.mutation)) for solver in solvers]
+
+
+def protocol_name(solver, mutation):
+    return f"{solver}+mut" if mutation else solver
+
+
+def collect_fronts(operators, paths, args, protocols, existing=None):
     """Corre el MOEA para cada (repeticion, operador, instancia).
 
     Si `existing` trae frentes ya calculados (con la misma semilla por
     repeticion), esos se reutilizan: sirve para agregar operadores a una
     comparacion ya corrida sin repetir el MOEA de los demas.
+
+    Un fallo se guarda como frente vacio. Asi ``hv_values`` puede contarlo como
+    HV 0 en el par (o abortar con ``--fail-policy abort``) en vez de eliminar
+    silenciosamente la instancia, que sesgaria la comparacion a favor del
+    operador que falla.
+
+    Devuelve ``(fronts, failures)``; ``failures`` mapea la clave a un mensaje.
     """
     fronts = dict(existing or {})
-    total = args.repeats * len(operators) * len(paths)
+    failures = {
+        key: "fallo recuperado de fronts.npz"
+        for key, front in fronts.items()
+        if front is not None and len(front) == 0
+    }
+    total = args.repeats * len(protocols) * len(operators) * len(paths)
     done = len(fronts)
     for rep in range(args.repeats):
-        # Una instancia (y una poblacion inicial) por repeticion, compartida por
-        # todos los operadores: asi la comparacion es pareada de verdad.
-        evaluator = build_evaluator(
-            paths,
-            mo_generations=args.mo_generations,
-            mo_population_size=args.mo_population_size,
-            seed=args.seed + rep,
-            model_name=args.solver,
-            mutation=args.mutation,
-            normalize=False,
-        )
-        instances = evaluator._ensure_instances()
-        for name, namespace, _kind in operators:
-            reused = 0
-            for index, instance in enumerate(instances):
-                if (name, rep, index) in fronts:
-                    reused += 1
-                    continue
-                try:
-                    front = evaluator._solve_front(instance, namespace)
-                except Exception as error:  # noqa: BLE001 - se reporta y sigue
-                    print(f"  AVISO rep={rep} {name} inst={index}: {error}")
-                    front = None
-                fronts[(name, rep, index)] = front
-                done += 1
-            if reused:
-                print(f"  rep {rep + 1}/{args.repeats}: {name} reutilizado "
-                      f"({reused}/{len(instances)})", flush=True)
-            else:
-                print(f"  rep {rep + 1}/{args.repeats}: {name} listo "
-                      f"({done}/{total})", flush=True)
-    return fronts
+        for solver, mutation in protocols:
+            protocol = protocol_name(solver, mutation)
+            # Una instancia (y una poblacion inicial) por repeticion,
+            # compartida por todos los operadores y protocolos: asi la
+            # comparacion es pareada de verdad.
+            evaluator = build_evaluator(
+                paths,
+                mo_generations=args.mo_generations,
+                mo_population_size=args.mo_population_size,
+                seed=args.seed + rep,
+                model_name=solver,
+                mutation=mutation,
+                normalize=False,
+            )
+            instances = evaluator._ensure_instances()
+            for name, namespace, _kind in operators:
+                reused = 0
+                for index, instance in enumerate(instances):
+                    key = (protocol, name, rep, index)
+                    if key in fronts:
+                        reused += 1
+                        continue
+                    try:
+                        front = evaluator._solve_front(instance, namespace)
+                        if front is None:
+                            raise RuntimeError("el MOEA no devolvio un frente")
+                    except Exception as error:  # noqa: BLE001 - se reporta y sigue
+                        print(f"  AVISO rep={rep} {protocol} {name} "
+                              f"inst={index}: {error}")
+                        front = np.empty((0, 0), dtype=float)
+                        failures[key] = f"{type(error).__name__}: {error}"
+                    fronts[key] = front
+                    done += 1
+                if reused:
+                    print(f"  rep {rep + 1}/{args.repeats} [{protocol}]: "
+                          f"{name} reutilizado ({reused}/{len(instances)})",
+                          flush=True)
+                else:
+                    print(f"  rep {rep + 1}/{args.repeats} [{protocol}]: "
+                          f"{name} listo ({done}/{total})", flush=True)
+    return fronts, failures
 
 
-def shared_frame(fronts, operators, n_instances, repeats):
+def shared_frame(fronts, operators, protocols, n_instances, repeats):
     """Marco por instancia: frente consolidado de TODAS las configuraciones."""
     frames = []
     for index in range(n_instances):
-        pieces = [fronts.get((name, rep, index))
+        pieces = [fronts.get((protocol_name(solver, mutation), name, rep, index))
+                  for solver, mutation in protocols
                   for name, _ns, _kind in operators
                   for rep in range(repeats)]
-        pieces = [p for p in pieces if p is not None]
+        pieces = [p for p in pieces if p is not None and len(p)]
         frames.append(_consolidated_frame(*pieces) if pieces else None)
     return frames
 
 
-def hv_values(fronts, operators, frames, repeats):
-    """HV de cada (operador, repeticion, instancia) en el marco comun."""
+def hv_values(fronts, operators, protocols, frames, repeats, failures=None,
+              fail_policy="zero"):
+    """HV de cada (operador, repeticion, instancia) en el marco comun.
+
+    ``frame is None`` significa que la instancia no tiene escala (``vmin ==
+    vmax``) y se excluye para todos los operadores, como en
+    ``experiment.py``. Un frente vacio es un fallo del operador en esa
+    instancia: con ``fail_policy="zero"`` cuenta como HV 0 (peor caso); con
+    ``"exclude"`` se elimina el par; con ``"abort"`` se detiene la comparacion.
+    """
+    failures = failures or {}
     values = {}
-    for name, _ns, _kind in operators:
-        for rep in range(repeats):
-            row = []
-            for index, frame in enumerate(frames):
-                front = fronts.get((name, rep, index))
-                if frame is None or front is None or len(front) == 0:
-                    row.append(None)
-                    continue
-                vmin, vmax = frame.min(axis=0), frame.max(axis=0)
-                if np.any(vmax == vmin):
-                    row.append(None)
-                    continue
-                normalized = normalize_front(front, (vmin, vmax))
-                if not np.all(np.isfinite(normalized)):
-                    row.append(None)
-                    continue
-                row.append(float(compute_hypervolume(
-                    np.full(normalized.shape[1], NADIR_FACTOR), normalized
-                )))
-            values[(name, rep)] = row
+    for solver, mutation in protocols:
+        protocol = protocol_name(solver, mutation)
+        for name, _ns, _kind in operators:
+            for rep in range(repeats):
+                row = []
+                for index, frame in enumerate(frames):
+                    key = (protocol, name, rep, index)
+                    front = fronts.get(key)
+                    if frame is None:
+                        row.append(None)
+                        continue
+                    if front is None or len(front) == 0:
+                        reason = failures.get(key, "sin frente")
+                        if fail_policy == "abort":
+                            raise RuntimeError(
+                                f"fallo en {protocol} {name} rep={rep} "
+                                f"inst={index}: {reason}"
+                            )
+                        if fail_policy == "zero":
+                            row.append(0.0)
+                        else:
+                            row.append(None)
+                        continue
+                    vmin, vmax = frame.min(axis=0), frame.max(axis=0)
+                    if np.any(vmax == vmin):
+                        row.append(None)
+                        continue
+                    normalized = normalize_front(front, (vmin, vmax))
+                    if not np.all(np.isfinite(normalized)):
+                        row.append(None)
+                        continue
+                    normalized = clip_to_reference_box(normalized)
+                    row.append(float(compute_hypervolume(
+                        np.full(normalized.shape[1], NADIR_FACTOR), normalized
+                    )))
+                values[(protocol, name, rep)] = row
     return values
 
 
-def per_run_scores(values, operators, repeats):
+def per_run_scores(values, operators, protocols, repeats):
+    """HV medio por repeticion, promediando instancias y protocolos."""
     scores = {}
     for name, _ns, _kind in operators:
-        scores[name] = [float(np.mean([v for v in values[(name, rep)] if v is not None]))
-                        if any(v is not None for v in values[(name, rep)]) else None
-                        for rep in range(repeats)]
+        scores[name] = []
+        for rep in range(repeats):
+            cells = [value
+                     for solver, mutation in protocols
+                     for value in values[(protocol_name(solver, mutation), name, rep)]
+                     if value is not None]
+            scores[name].append(float(np.mean(cells)) if cells else None)
     return scores
 
 
-def pairwise_design(fronts, rows, n_instances, repeats):
+def pairwise_design(fronts, rows, protocols, n_instances, repeats, failures=None,
+                    fail_policy="zero"):
     """Comparacion cabeza a cabeza: marco propio de cada pareja.
 
     Es lo que seria un experimento GE con dos configuraciones: el marco es el
@@ -183,63 +274,50 @@ def pairwise_design(fronts, rows, n_instances, repeats):
         for base in classics:
             frames = []
             for index in range(n_instances):
-                pieces = [fronts.get((name, rep, index))
-                          for name in (ours, base) for rep in range(repeats)]
-                pieces = [p for p in pieces if p is not None]
+                pieces = [fronts.get(
+                              (protocol_name(solver, mutation), name, rep, index))
+                          for solver, mutation in protocols
+                          for name in (ours, base)
+                          for rep in range(repeats)]
+                pieces = [p for p in pieces if p is not None and len(p)]
                 frames.append(_consolidated_frame(*pieces) if pieces else None)
             subset = [(ours, None, "discovered"), (base, None, "classic")]
-            values = hv_values(fronts, subset, frames, repeats)
-            scores = per_run_scores(values, subset, repeats)
-            diffs = [a - b for a, b in zip(scores[ours], scores[base])
-                     if a is not None and b is not None]
-            if not diffs:
+            values = hv_values(fronts, subset, protocols, frames, repeats,
+                               failures=failures, fail_policy=fail_policy)
+            scores = per_run_scores(values, subset, protocols, repeats)
+            if not any(value is not None for value in scores[ours]) or \
+                    not any(value is not None for value in scores[base]):
                 continue
-            stat, pvalue = wilcoxon(diffs)
-            ours_mean = float(np.mean([v for v in scores[ours] if v is not None]))
-            base_mean = float(np.mean([v for v in scores[base] if v is not None]))
-            results.append({
+            summary = paired_summary(scores[ours], scores[base])
+            if summary["pairs"] == 0:
+                continue
+            per_instance_operator = []
+            per_instance_baseline = []
+            for index in range(n_instances):
+                ours_rep = [values[(protocol_name(solver, mutation), ours, rep)][index]
+                            for solver, mutation in protocols
+                            for rep in range(repeats)
+                            if values[(protocol_name(solver, mutation), ours, rep)][index]
+                            is not None]
+                base_rep = [values[(protocol_name(solver, mutation), base, rep)][index]
+                            for solver, mutation in protocols
+                            for rep in range(repeats)
+                            if values[(protocol_name(solver, mutation), base, rep)][index]
+                            is not None]
+                per_instance_operator.append(
+                    float(np.mean(ours_rep)) if ours_rep else None
+                )
+                per_instance_baseline.append(
+                    float(np.mean(base_rep)) if base_rep else None
+                )
+            summary.update({
                 "operator": ours,
                 "baseline": base,
-                "pairs": len(diffs),
-                "wins": sum(1 for d in diffs if d > 0),
-                "losses": sum(1 for d in diffs if d < 0),
-                "ties": sum(1 for d in diffs if d == 0),
-                "operator_mean": ours_mean,
-                "baseline_mean": base_mean,
-                "mean_difference": float(np.mean(diffs)),
-                "relative": (ours_mean / base_mean - 1.0) if base_mean else None,
-                "cohens_dz": (float(np.mean(diffs) / np.std(diffs, ddof=1))
-                              if len(diffs) > 1 and np.std(diffs, ddof=1) > 0 else None),
-                "wilcoxon_statistic": stat,
-                "wilcoxon_p": pvalue,
-                "per_instance_operator": [
-                    float(np.mean([v for v in
-                                   (values[(ours, rep)][i] for rep in range(repeats))
-                                   if v is not None]))
-                    if any(v is not None for v in
-                           (values[(ours, rep)][i] for rep in range(repeats))) else None
-                    for i in range(n_instances)],
-                "per_instance_baseline": [
-                    float(np.mean([v for v in
-                                   (values[(base, rep)][i] for rep in range(repeats))
-                                   if v is not None]))
-                    if any(v is not None for v in
-                           (values[(base, rep)][i] for rep in range(repeats))) else None
-                    for i in range(n_instances)],
+                "per_instance_operator": per_instance_operator,
+                "per_instance_baseline": per_instance_baseline,
             })
+            results.append(summary)
     return results
-
-
-def wilcoxon(differences):
-    try:
-        from scipy.stats import wilcoxon as scipy_wilcoxon
-    except ImportError:  # pragma: no cover - scipy es dependencia de pymoo
-        return None, None
-    nonzero = [d for d in differences if d != 0]
-    if len(nonzero) < 2:
-        return None, None
-    result = scipy_wilcoxon(differences, zero_method="wilcox", alternative="two-sided")
-    return float(result.statistic), float(result.pvalue)
 
 
 def summarize(scores, operators):
@@ -269,27 +347,11 @@ def pairwise(scores, operators, rows):
     comparisons = []
     for ours in discovered:
         for base in classics:
-            diffs = [a - b for a, b in zip(scores[ours], scores[base])
-                     if a is not None and b is not None]
-            if not diffs:
+            summary = paired_summary(scores[ours], scores[base])
+            if summary["pairs"] == 0:
                 continue
-            stat, pvalue = wilcoxon(diffs)
-            ours_mean = float(np.mean([v for v in scores[ours] if v is not None]))
-            base_mean = float(np.mean([v for v in scores[base] if v is not None]))
-            comparisons.append({
-                "operator": ours,
-                "baseline": base,
-                "pairs": len(diffs),
-                "wins": sum(1 for d in diffs if d > 0),
-                "losses": sum(1 for d in diffs if d < 0),
-                "ties": sum(1 for d in diffs if d == 0),
-                "mean_difference": float(np.mean(diffs)),
-                "relative": (ours_mean / base_mean - 1.0) if base_mean else None,
-                "cohens_dz": (float(np.mean(diffs) / np.std(diffs, ddof=1))
-                              if len(diffs) > 1 and np.std(diffs, ddof=1) > 0 else None),
-                "wilcoxon_statistic": stat,
-                "wilcoxon_p": pvalue,
-            })
+            summary.update({"operator": ours, "baseline": base})
+            comparisons.append(summary)
     return comparisons
 
 
@@ -325,15 +387,7 @@ def rank_stability(scores, operators):
     mdd = None
     if len(ordered) >= 2:
         top, second = ordered[0], ordered[1]
-        diffs = [a - b for a, b in zip(scores[top], scores[second])
-                 if a is not None and b is not None]
-        if len(diffs) > 1 and float(np.std(diffs, ddof=1)) > 0:
-            try:
-                from scipy.stats import t as _student
-                tcrit = float(_student.ppf(0.975, len(diffs) - 1))
-            except Exception:  # pragma: no cover
-                tcrit = 2.0
-            mdd = tcrit * float(np.std(diffs, ddof=1)) / np.sqrt(len(diffs))
+        mdd = minimum_detectable_difference(scores[top], scores[second])
     return {
         "repeats": n_repeats,
         "wins_as_best": wins,
@@ -345,8 +399,26 @@ def rank_stability(scores, operators):
     }
 
 
-def write_report(path, name, args, rows, comparisons, frames, scores, values, operators,
-                 pairwise_results=None, stability=None):
+def _fmt(value, digits=6, signed=False):
+    if value is None:
+        return "-"
+    return f"{value:+.{digits}f}" if signed else f"{value:.{digits}f}"
+
+
+def _p(value):
+    return "-" if value is None else f"{value:.4f}"
+
+
+def _ci(row):
+    low, high = row.get("ci95_low"), row.get("ci95_high")
+    if low is None or high is None:
+        return "-"
+    return f"[{low:+.6f}, {high:+.6f}]"
+
+
+def write_report(path, name, args, rows, comparisons, frames, scores, values,
+                 operators, protocols, pairwise_results=None, stability=None,
+                 failures=None):
     lines = [f"# Comparacion de operadores: {name}", ""]
     lines += [
         "## Diseno",
@@ -355,8 +427,10 @@ def write_report(path, name, args, rows, comparisons, frames, scores, values, op
         f"- Repeticiones independientes: {args.repeats} (semilla = base + repeticion).",
         "- Semillas por repeticion: " + ", ".join(
             f"rep{rep}={args.seed + rep}" for rep in range(args.repeats)),
-        f"- MOEA interno: {args.solver}, {args.mo_generations} generaciones, "
-        f"poblacion {args.mo_population_size}, mutacion {args.mutation}.",
+        f"- MOEA interno: {args.mo_generations} generaciones, poblacion "
+        f"{args.mo_population_size}.",
+        "- Protocolos evaluados (solver, mutacion): " + ", ".join(
+            f"`{protocol_name(solver, mutation)}`" for solver, mutation in protocols),
         "- Mismas semillas para todos los operadores (comparacion pareada) y un "
         "solo marco por instancia: frente consolidado de todas las "
         "configuraciones, normalizacion `(f - vmin)/(vmax - vmin)` y nadir "
@@ -367,6 +441,19 @@ def write_report(path, name, args, rows, comparisons, frames, scores, values, op
                   if f is None or np.any(f.max(axis=0) == f.min(axis=0))]
     lines += ["- Instancias sin escala (excluidas de la media): "
               + (", ".join(degenerate) if degenerate else "ninguna"), ""]
+    if failures:
+        if args.fail_policy == "zero":
+            policy_note = "Un fallo cuenta como HV 0 en el par; no se descarta la instancia."
+        elif args.fail_policy == "exclude":
+            policy_note = "Un fallo descarta ese par (usa `zero` para el peor caso)."
+        else:
+            policy_note = "Un fallo aborta la comparacion."
+        lines += [f"- Fallos de evaluacion contabilizados: {len(failures)} "
+                  f"(politica `{args.fail_policy}`). {policy_note}", ""]
+        for (protocol, operator, rep, index), reason in sorted(failures.items()):
+            lines.append(f"  - `{protocol}` `{operator}` rep={rep} "
+                         f"`{os.path.basename(args.paths[index])}`: {reason}")
+        lines.append("")
 
     if stability:
         lines += ["## Ruido vs senal (estabilidad del ranking)", "",
@@ -402,48 +489,77 @@ def write_report(path, name, args, rows, comparisons, frames, scores, values, op
         )
     lines.append("")
 
+    if len(protocols) > 1:
+        lines += ["## HV por protocolo (media de instancias y repeticiones)", "",
+                  "El test principal promedia los protocolos; esta tabla muestra si "
+                  "la conclusion depende de un solver o de la mutacion.", "",
+                  "| Operador | Protocolo | Media |", "|---|---|---:|"]
+        for name, _ns, _kind in operators:
+            for solver, mutation in protocols:
+                protocol = protocol_name(solver, mutation)
+                cells = [value
+                         for rep in range(args.repeats)
+                         for value in values[(protocol, name, rep)]
+                         if value is not None]
+                mean = f"{np.mean(cells):.6f}" if cells else "-"
+                lines.append(f"| {name} | {protocol} | {mean} |")
+        lines.append("")
+
     if pairwise_results:
         lines += ["## Cabeza a cabeza (marco propio de la pareja)", "",
                   "Cada pareja se renormaliza con el frente consolidado de **esas dos**",
                   "configuraciones (lo que seria un experimento GE de dos configuraciones),",
-                  "para que un tercer operador no aplaste a los demas a HV ~0.", "",
-                  "| Operador | vs | Media op | Media clasico | Gana | Pierde | Dif. | Relativo | dz | p |",
-                  "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+                  "para que un tercer operador no aplaste a los demas a HV ~0. Las medias",
+                  "se calculan solo sobre los pares validos (misma repeticion).", "",
+                  "| Operador | vs | Pares | Falta | Media op | Media clasico | "
+                  "Gana | Pierde | Dif. media [IC95] | Relativo | dz | p | p Holm |",
+                  "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
         for c in pairwise_results:
-            p = "-" if c["wilcoxon_p"] is None else f"{c['wilcoxon_p']:.4f}"
-            dz = "-" if c["cohens_dz"] is None else f"{c['cohens_dz']:.2f}"
             rel = "-" if c["relative"] is None else f"{100 * c['relative']:+.1f}%"
+            dz = "-" if c["cohens_dz"] is None else f"{c['cohens_dz']:.2f}"
             lines.append(
-                f"| {c['operator']} | {c['baseline']} | {c['operator_mean']:.6f} | "
-                f"{c['baseline_mean']:.6f} | {c['wins']} | {c['losses']} | "
-                f"{c['mean_difference']:+.6f} | {rel} | {dz} | {p} |"
+                f"| {c['operator']} | {c['baseline']} | {c['pairs']} | "
+                f"{c['missing']} | {_fmt(c['operator_mean'])} | "
+                f"{_fmt(c['baseline_mean'])} | {c['wins']} | {c['losses']} | "
+                f"{_fmt(c['mean_difference'], signed=True)} {_ci(c)} | {rel} | "
+                f"{dz} | {_p(c['wilcoxon_p'])} | "
+                f"{_p(c.get('wilcoxon_p_holm'))} |"
             )
         lines.append("")
 
     if comparisons:
         lines += ["## Comparaciones pareadas (marco compartido de todos)", "",
-                  "| Operador | vs | Gana | Pierde | Empata | Dif. media | Relativo | dz | p (Wilcoxon) |",
-                  "|---|---|---:|---:|---:|---:|---:|---:|---:|"]
+                  "| Operador | vs | Pares | Falta | Gana | Pierde | Empata | "
+                  "Dif. media [IC95] | Relativo | dz | p | p Holm |",
+                  "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
         for c in comparisons:
-            p = "-" if c["wilcoxon_p"] is None else f"{c['wilcoxon_p']:.4f}"
-            dz = "-" if c["cohens_dz"] is None else f"{c['cohens_dz']:.2f}"
             rel = "-" if c["relative"] is None else f"{100 * c['relative']:+.1f}%"
+            dz = "-" if c["cohens_dz"] is None else f"{c['cohens_dz']:.2f}"
             lines.append(
-                f"| {c['operator']} | {c['baseline']} | {c['wins']} | {c['losses']} | "
-                f"{c['ties']} | {c['mean_difference']:+.6f} | {rel} | {dz} | {p} |"
+                f"| {c['operator']} | {c['baseline']} | {c['pairs']} | "
+                f"{c['missing']} | {c['wins']} | {c['losses']} | {c['ties']} | "
+                f"{_fmt(c['mean_difference'], signed=True)} {_ci(c)} | {rel} | "
+                f"{dz} | {_p(c['wilcoxon_p'])} | "
+                f"{_p(c.get('wilcoxon_p_holm'))} |"
             )
-        lines += ["", "p de Wilcoxon pareado de dos colas; con 11 pares el minimo "
-                  f"alcanzable es {2 / 2 ** args.repeats:.4f}. Con 5 clasicos conviene "
-                  "leerlo con Bonferroni (0.05 / numero de comparaciones).", ""]
+        lines += ["", "p de Wilcoxon pareado de dos colas; `p Holm` controla la "
+                  "familia de comparaciones de la tabla. La diferencia media y su "
+                  "IC95 se calculan sobre los pares con ambos valores; `Falta` "
+                  "cuenta repeticiones no pareadas. Con "
+                  f"{args.repeats} pares el p minimo alcanzable es "
+                  f"{2 / 2 ** args.repeats:.4f}.", ""]
 
-    lines += ["## HV por instancia (media de las repeticiones)", ""]
+    lines += ["## HV por instancia (media de protocolos y repeticiones)", ""]
     header = "| Instancia | " + " | ".join(name for name, _n, _k in operators) + " |"
     lines += [header, "|---|" + "---:|" * len(operators)]
     for index in range(len(args.paths)):
         cells = []
         for name, _ns, _kind in operators:
-            vals = [values[(name, rep)][index] for rep in range(args.repeats)
-                    if values.get((name, rep), [None] * len(args.paths))[index] is not None]
+            vals = [values[(protocol_name(solver, mutation), name, rep)][index]
+                    for solver, mutation in protocols
+                    for rep in range(args.repeats)
+                    if values[(protocol_name(solver, mutation), name, rep)][index]
+                    is not None]
             cells.append("-" if not vals else f"{np.mean(vals):.6f}")
         lines.append(f"| {os.path.basename(args.paths[index])} | " + " | ".join(cells) + " |")
     lines.append("")
@@ -459,24 +575,59 @@ def main():
                         help="nombre=ruta.py o nombre=classic:ox (repetible)")
     parser.add_argument("--split", choices=["train", "test"], default="test")
     parser.add_argument("--instances", type=int, default=8)
-    parser.add_argument("--repeats", type=int, default=11)
-    parser.add_argument("--mo-generations", type=int, default=30)
-    parser.add_argument("--mo-population-size", type=int, default=30)
-    parser.add_argument("--solver", default="MOEAD")
-    parser.add_argument("--mutation", action="store_true")
+    parser.add_argument("--repeats", type=int, default=None,
+                        help="repeticiones independientes (default 11)")
+    parser.add_argument("--mo-generations", type=int, default=None,
+                        help="generaciones del MOEA interno (default 30; 300 con --ge-protocol)")
+    parser.add_argument("--mo-population-size", type=int, default=None,
+                        help="poblacion del MOEA interno (default 30; 105 con --ge-protocol)")
+    parser.add_argument("--solver", default=None,
+                        help="MOEAD, NSGAII, SMSEMOA o lista separada por comas "
+                             "(default MOEAD; los tres con --ge-protocol)")
+    parser.add_argument("--mutation", action="store_true",
+                        help="evaluar con Swap_Mutation")
+    parser.add_argument("--mutation-both", action="store_true",
+                        help="evaluar con y sin Swap_Mutation (como la evaluacion GE)")
+    parser.add_argument("--ge-protocol", action="store_true",
+                        help="atajo para la evaluacion GE: los tres solvers, ambas "
+                             "mutaciones, 300/105 y 11 repeticiones. Los valores "
+                             "explicitos de --solver/--mutation/--mo-* tienen prioridad.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--out", default="results/evaluations")
     parser.add_argument("--name", default=None)
+    parser.add_argument("--fail-policy", choices=["zero", "exclude", "abort"],
+                        default="zero",
+                        help="que hacer si un operador falla en una instancia: "
+                             "zero = HV 0 (default, conserva el par); exclude = "
+                             "descarta el par; abort = detiene la comparacion.")
     parser.add_argument("--save-fronts", action="store_true",
                         help="guarda los frentes en fronts.npz (permite reanalizar sin repetir el MOEA)")
     parser.add_argument("--load-fronts", action="store_true",
                         help="reutiliza fronts.npz del directorio de salida para los (operador, repeticion, instancia) ya calculados")
     args = parser.parse_args()
 
+    # Defaults que dependen de --ge-protocol. Un valor explicito del usuario
+    # siempre gana; `None` distingue "no lo especifique" de "quiero 30/30".
+    if args.repeats is None:
+        args.repeats = 11
+    if args.mo_generations is None:
+        args.mo_generations = 300 if args.ge_protocol else 30
+    if args.mo_population_size is None:
+        args.mo_population_size = 105 if args.ge_protocol else 30
+    if args.solver is None:
+        args.solver = ("MOEAD,NSGAII,SMSEMOA" if args.ge_protocol else "MOEAD")
+    if args.ge_protocol and not args.mutation:
+        args.mutation_both = True
+    protocols = build_protocols(args)
+
     init_params(RANDOM_SEED=args.seed)
     all_paths = instance_paths(train=args.split == "train")
     args.paths = _select_instances(all_paths, args.instances, args.seed)
     operators = [load_operator(spec) for spec in args.operator]
+    names = [name for name, _ns, _kind in operators]
+    duplicated = {name for name in names if names.count(name) > 1}
+    if duplicated:
+        raise SystemExit(f"nombres de operador repetidos: {sorted(duplicated)}")
 
     name = args.name or "vs_".join(n for n, _ns, _k in operators)
     out_dir = os.path.join(args.out, name)
@@ -484,6 +635,9 @@ def main():
 
     print(f"Operadores: {', '.join(n for n, _a, _b in operators)}")
     print(f"Instancias: {args.split} ({len(args.paths)}), repeticiones: {args.repeats}")
+    print("Protocolos: " + ", ".join(
+        protocol_name(solver, mutation) for solver, mutation in protocols))
+    default_protocol = protocol_name(*protocols[0])
     existing = None
     if args.load_fronts:
         npz_path = os.path.join(out_dir, "fronts.npz")
@@ -491,21 +645,35 @@ def main():
             with np.load(npz_path) as data:
                 existing = {}
                 for key in data.files:
-                    op_name, rep, index = key.split("|")
-                    existing[(op_name, int(rep), int(index))] = data[key]
+                    parts = key.split("|")
+                    if len(parts) == 3:
+                        # Formato anterior: un solo solver/mutacion.
+                        op_name, rep, index = parts
+                        protocol = default_protocol
+                    elif len(parts) == 4:
+                        protocol, op_name, rep, index = parts
+                    else:
+                        raise SystemExit(f"clave invalida en fronts.npz: {key!r}")
+                    existing[(protocol, op_name, int(rep), int(index))] = data[key]
             print(f"Reutilizando {len(existing)} frentes de {npz_path}")
         else:
             print(f"AVISO: no hay {npz_path}; se recalcula todo")
     start = time.time()
-    fronts = collect_fronts(operators, args.paths, args, existing)
+    fronts, failures = collect_fronts(operators, args.paths, args, protocols,
+                                      existing)
     print(f"MOEA terminado en {time.time() - start:.1f}s; calculando HV...")
 
-    frames = shared_frame(fronts, operators, len(args.paths), args.repeats)
-    values = hv_values(fronts, operators, frames, args.repeats)
-    scores = per_run_scores(values, operators, args.repeats)
+    frames = shared_frame(fronts, operators, protocols, len(args.paths),
+                          args.repeats)
+    values = hv_values(fronts, operators, protocols, frames, args.repeats,
+                       failures=failures, fail_policy=args.fail_policy)
+    scores = per_run_scores(values, operators, protocols, args.repeats)
     rows = summarize(scores, operators)
-    comparisons = pairwise(scores, operators, rows)
-    pairwise_results = pairwise_design(fronts, rows, len(args.paths), args.repeats)
+    comparisons = add_holm(pairwise(scores, operators, rows))
+    pairwise_results = add_holm(
+        pairwise_design(fronts, rows, protocols, len(args.paths), args.repeats,
+                        failures=failures, fail_policy=args.fail_policy)
+    )
     stability = rank_stability(scores, operators)
 
     result = {
@@ -527,6 +695,14 @@ def main():
             "mo_generations": args.mo_generations,
             "mo_population_size": args.mo_population_size,
             "mutation": args.mutation,
+            "mutation_both": args.mutation_both,
+            "ge_protocol": args.ge_protocol,
+            "protocols": [
+                {"solver": solver, "mutation": mutation,
+                 "name": protocol_name(solver, mutation)}
+                for solver, mutation in protocols
+            ],
+            "fail_policy": args.fail_policy,
             "frame": "consolidated over every operator and repetition",
             "nadir_factor": NADIR_FACTOR,
             "degenerate_instances": [
@@ -534,14 +710,44 @@ def main():
                 for i, frame in enumerate(frames)
                 if frame is None or np.any(frame.max(axis=0) == frame.min(axis=0))
             ],
+            "failed_runs": len(failures),
         },
         "operators": rows,
         "comparisons": comparisons,
         "pairwise_head_to_head": pairwise_results,
         "rank_stability": stability,
         "per_run_scores": scores,
-        "per_instance_hv": {name: [values[(name, rep)] for rep in range(args.repeats)]
-                            for name, _ns, _k in operators},
+        "per_protocol_scores": {
+            name: {
+                protocol_name(solver, mutation): [
+                    float(np.mean([
+                        v for v in values[(protocol_name(solver, mutation), name, rep)]
+                        if v is not None
+                    ]))
+                    if any(v is not None
+                           for v in values[(protocol_name(solver, mutation), name, rep)])
+                    else None
+                    for rep in range(args.repeats)
+                ]
+                for solver, mutation in protocols
+            }
+            for name, _ns, _k in operators
+        },
+        "per_instance_hv": {
+            name: {
+                protocol_name(solver, mutation): [
+                    values[(protocol_name(solver, mutation), name, rep)]
+                    for rep in range(args.repeats)
+                ]
+                for solver, mutation in protocols
+            }
+            for name, _ns, _k in operators
+        },
+        "failures": [
+            {"protocol": protocol, "operator": operator, "repeat": rep,
+             "instance": os.path.basename(args.paths[index]), "reason": reason}
+            for (protocol, operator, rep, index), reason in sorted(failures.items())
+        ],
         # Semilla efectiva de cada corrida del MOEA interno (operador x repeticion).
         "run_seeds": [
             {"operator": name, "repeat": rep, "seed": args.seed + rep}
@@ -552,15 +758,15 @@ def main():
     if args.save_fronts:
         np.savez_compressed(
             os.path.join(out_dir, "fronts.npz"),
-            **{f"{name}|{rep}|{index}": np.asarray(front)
-               for (name, rep, index), front in fronts.items()
+            **{f"{protocol}|{name}|{rep}|{index}": np.asarray(front)
+               for (protocol, name, rep, index), front in fronts.items()
                if front is not None},
         )
     with open(os.path.join(out_dir, "evaluation.json"), "w") as handle:
         json.dump(result, handle, indent=2)
     write_report(os.path.join(out_dir, "report.md"), name, args, rows,
-                 comparisons, frames, scores, values, operators,
-                 pairwise_results, stability)
+                 comparisons, frames, scores, values, operators, protocols,
+                 pairwise_results, stability, failures)
     print(f"Guardado en {out_dir}")
 
 

@@ -1,8 +1,9 @@
 
 import re
 
-THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-STRAY_THINK_RE = re.compile(r"</?think>", re.IGNORECASE)
+THINK_RE = re.compile(r"<(think|thinking|reasoning)>.*?</\1>",
+                      re.DOTALL | re.IGNORECASE)
+STRAY_THINK_RE = re.compile(r"</?(?:think|thinking|reasoning)>", re.IGNORECASE)
 FENCE_RE = re.compile(r"```(?:python|py|diff)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 FENCE_OPEN_RE = re.compile(r"```(?:python|py)?\s*\n(.*)", re.DOTALL | re.IGNORECASE)
 MAIN_GUARD_RE = re.compile(

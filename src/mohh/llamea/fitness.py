@@ -438,6 +438,20 @@ def normalize_front(front, bounds):
         return (np.asarray(front, dtype=float) - vmin) / (vmax - vmin)
 
 
+def clip_to_reference_box(front, nadir=NADIR_FACTOR):
+    """Recorta objetivos al caja [0, nadir] antes de calcular HV.
+
+    En el marco GE el candidato forma parte del marco, asi que sus puntos
+    normalizados ya caen en [0, 1]. En el marco estacionario (panel fijo) un
+    candidato puede ser **mejor** que el mejor punto del panel; sin recortar,
+    sus coordenadas negativas inflan el HV por encima del maximo teorico
+    ``nadir**K`` y rompen la comparacion. Recortar a 0 cuenta esa mejora como
+    el volumen completo hasta el nadir, que es el maximo que el HV puede
+    expresar; los puntos peores que el nadir aportan 0.
+    """
+    return np.clip(np.asarray(front, dtype=float), 0.0, float(nadir))
+
+
 def _consolidated_frame(*point_sets):
     """Frente no dominado de la union de varios conjuntos de puntos.
 
@@ -868,6 +882,7 @@ class OperatorEvaluator:
             if not np.all(np.isfinite(normalized)):  # pragma: no cover - salvaguarda
                 values.append(None)
                 continue
+            normalized = clip_to_reference_box(normalized)
             values.append(float(compute_hypervolume(
                 np.full(normalized.shape[1], NADIR_FACTOR), normalized
             )))
@@ -1100,6 +1115,7 @@ class OperatorEvaluator:
                 from mohh.core.utilities.algorithm.MO import compute_hypervolume
 
                 normalized = normalize_front(front, (vmin, vmax))
+                normalized = clip_to_reference_box(normalized)
                 values[index] = float(compute_hypervolume(
                     np.full(normalized.shape[1], NADIR_FACTOR), normalized
                 ))

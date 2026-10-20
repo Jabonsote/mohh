@@ -68,6 +68,7 @@ from mohh.llamea.reporting import (
     write_report,
     write_seeds,
 )
+from mohh.llamea.statistics import add_holm, paired_summary
 from mohh.llamea.vllm import VLLM_LLM, model_is_available, wait_for_server
 
 
@@ -87,11 +88,32 @@ class _EvalSolution:
 
 
 def _select_instances(paths, amount, seed):
+    # `os.listdir` no garantiza orden entre sistemas de ficheros. Ordenar antes
+    # de muestrear hace que el mismo `--seed` seleccione las mismas instancias en
+    # el cluster y en local (la comparacion pareada depende de ello).
+    ordered = sorted(str(path) for path in paths)
     if amount == "all":
-        return list(paths)
+        return ordered
     amount = int(amount)
     rng = random.Random(seed)
-    return rng.sample(list(paths), min(amount, len(paths)))
+    return rng.sample(ordered, min(amount, len(ordered)))
+
+
+def _merge_reference_scores(history, scores, rep):
+    """Alinea los HV de referencia con la repeticion `rep` (incluye fallos).
+
+    Un clasico puede faltar en una repeticion (p. ej. su MOEA falla). Se
+    rellena con `None` hasta `rep`, se agrega el valor actual y se conserva la
+    alineacion para el Wilcoxon pareado. No se rellena de mas: cada llamada
+    agrega exactamente una posicion por clasico.
+    """
+    for name in scores:
+        rows = history.setdefault(name, [])
+        if len(rows) < rep:
+            rows.extend([None] * (rep - len(rows)))
+    for name in history:
+        history[name].append(scores.get(name))
+    return history
 
 
 def _load_bounds(path):
@@ -369,8 +391,12 @@ def run_llamea(args):
         "top_p": args.top_p,
         "top_k": args.top_k,
         "sampling_repetition_penalty": args.sampling_repetition_penalty,
+        "thinking": args.thinking,
         "operator_memory": args.operator_memory,
         "max_tokens": args.max_tokens,
+        "request_log": os.path.join(exp_dir, "llm_requests.jsonl"),
+        "prompt_log_root": log_base,
+        "prompt_log": None,
         "train_instances": len(train_paths),
         "normalize": args.normalize,
         "bounds_file": args.bounds_file,
@@ -420,6 +446,7 @@ def run_llamea(args):
             "top_k": args.top_k,
             "repetition_penalty": args.sampling_repetition_penalty,
             "max_tokens": args.max_tokens,
+            "thinking": args.thinking,
             "operator_memory": args.operator_memory,
             "note": ("el servidor muestrea; sin semilla fija, asi que la busqueda no "
                      "es reproducible bit a bit aunque el MOEA si lo sea"),
@@ -467,6 +494,15 @@ def run_llamea(args):
         top_k=args.top_k,
         sampling_repetition_penalty=args.sampling_repetition_penalty,
         operator_memory=args.operator_memory,
+        thinking=(None if args.thinking == "auto" else args.thinking == "on"),
+        request_log_path=os.path.join(exp_dir, "llm_requests.jsonl"),
+        request_context={
+            "experiment": args.experiment_name,
+            "solver": args.solver,
+            "mutation": bool(args.mutation),
+            "combine": bool(args.combine),
+            "seed": args.seed,
+        },
     )
     ResultsExperimentLogger.token_source = llm
     # Diversidad conductual por generacion (mecanismos distintos, entropia,
@@ -583,6 +619,8 @@ def run_llamea(args):
         ),
         "description": best.description,
         "log_dir": log_dir,
+        "request_log": os.path.join(exp_dir, "llm_requests.jsonl"),
+        "prompt_log": os.path.join(log_dir, "prompts"),
         "evaluations": len(fitness.archive),
         "evaluated_total": diversity_stats.get("evaluations"),
         "best_hv_ranking": fitness.archive.best(),
@@ -658,37 +696,64 @@ def run_llamea(args):
         test_paths = _select_instances(instance_paths(train=False), args.test_instances, args.seed)
         repeats = max(1, args.eval_repeats)
         print(f"Evaluando el mejor operador en {len(test_paths)} instancias de test "
-              f"({repeats} repeticion(es))...")
+              f"({repeats} repeticion(es), marco fijo del panel)...")
         test_fronts_dir = (None if args.no_save_fronts
                            else os.path.join(exp_dir, "fronts_test"))
         hvs, rep_seeds = [], []
-        baseline_hv = None
+        candidate_by_rep = []          # alineado con reference_by_rep, incluye fallos
+        reference_by_rep = {}          # clasico -> [HV por repeticion]
+        test_failures = []
         degenerate = None
+        test_frame = ("stationary (panel de referencia)" if args.normalize
+                      else "none (HV crudo)")
         for rep in range(repeats):
-            # Con varias repeticiones se fija el marco al panel de referencia
-            # (`stationary`): asi las semillas son comparables entre si. Con una
-            # sola, se conserva el marco GE de siempre.
+            # El marco final se fija al panel de referencia (`stationary`) en
+            # TODAS las repeticiones, no solo cuando hay varias: un marco que
+            # incluye al propio candidato lo favorece y no es un metro fijo.
+            # El marco GE completo (todas las configuraciones) lo reconstruye
+            # `scripts/compare_operators.py`; aqui solo se reporta candidato vs
+            # clasicos con el mismo criterio y las mismas semillas.
             rep_args = argparse.Namespace(**vars(args))
             rep_args.seed = args.seed + rep * 7919
             rep_args.patience = 0
             rep_args.repeat_penalty = 1.0
-            if repeats > 1:
-                rep_args.stationary_frame = True
-            rep_dir = test_fronts_dir if (test_fronts_dir is None or repeats == 1) \
-                else os.path.join(test_fronts_dir, f"rep-{rep}")
+            rep_args.stationary_frame = True
+            rep_dir = (test_fronts_dir if (test_fronts_dir is None or repeats == 1)
+                       else os.path.join(test_fronts_dir, f"rep-{rep}"))
             test_fitness = _make_evaluator(test_paths, rep_args, fronts_dir=rep_dir)
+            evaluated = None
+            failure_reason = None
             try:
                 evaluated = test_fitness(_EvalSolution(best.code))
-            except Exception:
+            except Exception as error:  # noqa: BLE001 - se reporta y sigue
                 logger.exception("Fallo la evaluacion en test (rep %d)", rep)
-                evaluated = None
+                failure_reason = f"{type(error).__name__}: {error}"
             if evaluated is None:
-                continue
-            if np.isfinite(evaluated.fitness):
-                hvs.append(float(evaluated.fitness))
+                failure_reason = failure_reason or "sin resultado"
+            elif not np.isfinite(evaluated.fitness):
+                failure_reason = "fitness no finito"
+            if failure_reason is None:
+                value = float(evaluated.fitness)
+            else:
+                # Mismo criterio que la busqueda y que compare_operators.py:
+                # un fallo es HV 0, no un par perdido (descartarlo sesgaria).
+                value = 0.0
+                test_failures.append({"repeat": rep, "seed": rep_args.seed,
+                                      "reason": failure_reason})
+            hvs.append(value)
+            candidate_by_rep.append(value)
             rep_seeds.append(rep_args.seed)
+
             if test_fitness.normalize:
-                baseline_hv = test_fitness.reference_scores()
+                try:
+                    reference = test_fitness.reference_scores()
+                except Exception:  # noqa: BLE001 - no perder el informe final
+                    logger.exception("No se pudieron calcular los HV de referencia "
+                                     "en test (rep %d)", rep)
+                    reference = {}
+                # Si un clasico aparece por primera vez en una repeticion
+                # posterior, las anteriores cuentan como no pareadas.
+                _merge_reference_scores(reference_by_rep, reference, rep)
                 degenerate = test_fitness.frame_degenerate_instances()
             if rep_dir:
                 try:
@@ -700,24 +765,63 @@ def run_llamea(args):
             info["test_fitness"] = float(np.mean(hvs))
             info["test_fitness_repeats"] = {
                 "n": len(hvs),
+                "attempts": len(candidate_by_rep),
+                "failed": len(test_failures),
                 "values": [round(v, 6) for v in hvs],
                 "mean": float(np.mean(hvs)),
                 "sd": float(np.std(hvs, ddof=1)) if len(hvs) > 1 else 0.0,
                 "min": float(np.min(hvs)),
                 "max": float(np.max(hvs)),
-                "frame": ("stationary (panel de referencia)" if repeats > 1
-                          else info.get("frame")),
+                "frame": test_frame,
                 "seeds": rep_seeds,
             }
-            if baseline_hv:
-                info["test_reference_hv"] = baseline_hv
+            info["test_frame"] = test_frame
             if degenerate is not None:
-                info["test_degenerate_instances"] = degenerate
-            info["test_seeds"] = {"moea_internal": rep_seeds, "selection": args.seed}
+                info["test_degenerate_instances"] = sorted(set(degenerate))
+            info["test_seeds"] = {
+                "moea_internal": rep_seeds,
+                "selection": args.seed,
+                "policy": ("seeds = base + rep*7919; el candidato y todos los "
+                           "clasicos usan la misma poblacion inicial en cada rep"),
+            }
+            if test_failures:
+                info["test_failures"] = test_failures
+                print(f"AVISO: {len(test_failures)} evaluacion(es) de test "
+                      "fallaron y se contaron como HV 0.")
+            if reference_by_rep:
+                reference_mean = {
+                    name: float(np.mean([v for v in values if v is not None]))
+                    for name, values in reference_by_rep.items()
+                    if any(v is not None for v in values)
+                }
+                info["test_reference_hv"] = reference_mean
+                info["test_reference_hv_repeats"] = reference_by_rep
+                test_comparison = []
+                for name, values in reference_by_rep.items():
+                    summary = paired_summary(candidate_by_rep, values)
+                    if summary["pairs"] == 0:
+                        continue
+                    summary.update({"operator": "llamea_best", "baseline": name})
+                    test_comparison.append(summary)
+                add_holm(test_comparison)
+                info["test_comparison"] = test_comparison
             print(f"Test fitness (HV, {len(hvs)} rep): {info['test_fitness']:.6f} "
                   f"(sd {info['test_fitness_repeats']['sd']:.6f})")
-            if baseline_hv:
-                print(f"Test HV de la linea base en el mismo marco: {baseline_hv}")
+            if info.get("test_reference_hv"):
+                best_name, best_value = max(
+                    info["test_reference_hv"].items(), key=lambda item: item[1]
+                )
+                print(f"Mejor clasico en test, mismo marco: "
+                      f"{best_name.upper()} = {best_value:.6f}")
+                rows = info.get("test_comparison") or []
+                for row in rows:
+                    if row["baseline"] == best_name:
+                        p = row.get("wilcoxon_p_holm")
+                        p_text = "-" if p is None else f"{p:.4f}"
+                        print(f"Candidato vs {best_name.upper()}: "
+                              f"{row['wins']}/{row['pairs']} victorias, "
+                              f"dif {row['mean_difference']:+.6f}, "
+                              f"p Holm={p_text}")
 
     with open(os.path.join(exp_dir, "llamea_best_info.json"), "w") as file:
         json.dump(info, file, indent=2)
@@ -731,6 +835,8 @@ def run_llamea(args):
         usage["top_p"] = args.top_p
         usage["top_k"] = args.top_k
         usage["sampling_repetition_penalty"] = args.sampling_repetition_penalty
+        usage["thinking"] = args.thinking
+        usage["request_log"] = os.path.join(exp_dir, "llm_requests.jsonl")
         usage["operator_memory"] = (
             llm.operator_memory_snapshot()
             if hasattr(llm, "operator_memory_snapshot") else {}
@@ -748,7 +854,9 @@ def run_llamea(args):
             before=metrics_before,
             after=metrics_after,
             history=getattr(llm, "usage_history", []),
-            extra={"seeds": seeds, "gpu_snapshot": gpu_snapshot},
+            extra={"seeds": seeds, "gpu_snapshot": gpu_snapshot,
+                   "request_log": os.path.join(exp_dir, "llm_requests.jsonl"),
+                   "thinking": args.thinking},
         )
         info["metrics_file"] = os.path.join(exp_dir, "metrics.json")
     except Exception:  # noqa: BLE001
@@ -770,6 +878,8 @@ def run_llamea(args):
         "best_hv_final_frame": best_final,
         "test_fitness": info.get("test_fitness"),
         "test_reference_hv": info.get("test_reference_hv"),
+        "test_comparison": info.get("test_comparison"),
+        "test_failures": info.get("test_failures"),
         "seeds": seeds,
         "stop_reason": info.get("stop_reason"),
         "distinct_operators": info.get("distinct_operators"),
@@ -778,7 +888,8 @@ def run_llamea(args):
     paths = write_report(log_dir, title=f"LLaMEA {args.experiment_name}",
                          frame_info=frame_info,
                          cost=cost,
-                         usage_history=getattr(llm, "usage_history", []))
+                         usage_history=getattr(llm, "usage_history", []),
+                         request_log=os.path.join(exp_dir, "llm_requests.jsonl"))
     for kind, path in paths.items():
         print(f"{kind}: {path}")
 
@@ -808,6 +919,13 @@ def main(argv=None):
                         help="Numero de mecanismos recientes que se recuerdan en el "
                              "prompt para evitar el anclaje (0 = desactivado). El job "
                              "del cluster usa 12.")
+    parser.add_argument("--thinking", choices=["auto", "on", "off"], default="auto",
+                        help="Modo de razonamiento del modelo. auto no toca el "
+                             "template del servidor; on/off fuerza "
+                             "chat_template_kwargs.enable_thinking (Qwen3 y "
+                             "similares) y registra reasoning_content. Con on, "
+                             "sube --max-tokens para no gastar el presupuesto "
+                             "razonando.")
     parser.add_argument("--request-timeout", type=float, default=600,
                         help="Timeout por peticion al LLM (segundos).")
     parser.add_argument("--max-tokens", type=int, default=None,
@@ -937,9 +1055,10 @@ def main(argv=None):
                         help="Vecinos para el puntaje de novedad (niching=novelty).")
     parser.add_argument("--novelty-archive-size", type=int, default=None,
                         help="Tamano del archivo de novedad (default de LLaMEA: 100).")
-    parser.add_argument("--eval-repeats", type=int, default=1,
-                        help="Repeticiones de la evaluacion final en test (reporta "
-                             "media y desviacion del HV; 1 = solo una).")
+    parser.add_argument("--eval-repeats", type=int, default=11,
+                        help="Repeticiones de la evaluacion final en test (default 11, "
+                             "como N_EXPERIMENTS; reporta media, desviacion y "
+                             "comparacion pareada contra los clasicos). 1 = solo una.")
     parser.add_argument("--reference-operators", default="ox,pbx,pmx,cx,erx",
                         help="Panel de operadores de referencia para los limites, "
                              "separados por coma (subconjunto de ox,pbx,pmx,cx,erx).")

@@ -20,7 +20,7 @@
 # SAVE_BOUNDS (nombre del json), BOUNDS_FILE, REFERENCE_OPERATORS, MAX_TOKENS
 # (4096), NO_EXAMPLE=1, SKELETON_EXAMPLE=1 (mutuamente excluyentes).
 # REPEAT_PENALTY (0.5, presion de diversidad; 1.0 = off), PATIENCE (0, parada
-# temprana), PARENT_SELECTION (tournament), NICHING (none), EVAL_REPEATS (1),
+# temprana), PARENT_SELECTION (tournament), NICHING (none), EVAL_REPEATS (11),
 # STALL_TIMEOUT (3600, watchdog anti-cuelgue), NO_SAVE_FRONTS=1,
 # OPERATOR_MEMORY (0; 12 recomendado), TOP_P, TOP_K,
 # SAMPLING_REPETITION_PENALTY (extensiones de muestreo de vLLM).
@@ -146,7 +146,7 @@ python -m mohh.llamea.run \
     --stall-timeout "${STALL_TIMEOUT:-3600}" \
     --parent-selection "${PARENT_SELECTION:-tournament}" \
     --niching "${NICHING:-none}" \
-    --eval-repeats "${EVAL_REPEATS:-1}" \
+    --eval-repeats "${EVAL_REPEATS:-11}" \
     --n-parents "${N_PARENTS:-1}" \
     --n-offspring "${N_OFFSPRING:-1}" \
     --max-workers "${MAX_WORKERS:-1}" \

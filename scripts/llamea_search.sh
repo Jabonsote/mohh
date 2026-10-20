@@ -30,6 +30,8 @@
 #   TEMPERATURE (0.2)                    temperatura del LLM
 #   TOP_P / TOP_K                        muestreo nucleus / top-k (vacío = servidor)
 #   SAMPLING_REPETITION_PENALTY          repetition_penalty de vLLM (vacío = servidor)
+#   THINKING (auto)                      auto | on | off (enable_thinking del template;
+#                                        on necesita más MAX_TOKENS)
 #   OPERATOR_MEMORY (0)                  mecanismos recientes recordados en el prompt
 #                                        (0 = off; 12 recomendado con modelos grandes)
 #   MAX_TOKENS (vacío)                   máximo de tokens de salida por petición
@@ -40,7 +42,8 @@
 #   PARENT_SELECTION (tournament)        random | roulette | tournament
 #   NICHING (none)                       none | sharing | clearing | novelty |
 #                                        map_elites (presión de diversidad)
-#   EVAL_REPEATS (1)                     repeticiones de la evaluación final
+#   EVAL_REPEATS (11)                    repeticiones de la evaluación final
+#                                        (11 = comparación pareada vs clásicos)
 #   STALL_TIMEOUT (0)                    segundos sin generación nueva antes de
 #                                        abortar (watchdog; 0 = off)
 #   CATEGORY (searches)                  subcarpeta de results/
@@ -83,7 +86,7 @@ args=(
   --patience "${PATIENCE:-0}"
   --parent-selection "${PARENT_SELECTION:-tournament}"
   --niching "${NICHING:-none}"
-  --eval-repeats "${EVAL_REPEATS:-1}"
+  --eval-repeats "${EVAL_REPEATS:-11}"
   --stall-timeout "${STALL_TIMEOUT:-0}"
   --results-dir "results/$CATEGORY"
   --experiment-name "$NAME"
@@ -103,6 +106,7 @@ args=(
 [[ -n "${TOP_K:-}" ]] && args+=(--top-k "$TOP_K")
 [[ -n "${SAMPLING_REPETITION_PENALTY:-}" ]] && \
   args+=(--sampling-repetition-penalty "$SAMPLING_REPETITION_PENALTY")
+[[ -n "${THINKING:-}" ]] && args+=(--thinking "$THINKING")
 [[ -n "${OPERATOR_MEMORY:-}" ]] && args+=(--operator-memory "$OPERATOR_MEMORY")
 
 # shellcheck disable=SC2206

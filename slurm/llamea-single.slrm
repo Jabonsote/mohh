@@ -19,7 +19,8 @@
 # BUDGET (derivado: generaciones x hijos + padres = 2005), SOLVER,
 # TRAIN_INSTANCES, TEST_INSTANCES, MO_GENERATIONS, MO_POPULATION_SIZE,
 # TEMPERATURE (0.7), TOP_P (0.8), TOP_K (20), SAMPLING_REPETITION_PENALTY (1.05),
-# MAX_TOKENS (4096), OPERATOR_MEMORY (12), SEED, EVAL_TEST=1, EVAL_REPEATS,
+# MAX_TOKENS (4096), THINKING (auto; on/off fuerza enable_thinking),
+# OPERATOR_MEMORY (12), SEED, EVAL_TEST=1, EVAL_REPEATS (11),
 # MUTATION=1, COMMA=1, REFINE_ONLY=1, NO_SAVE_FRONTS=1, REPEAT_PENALTY (0.5),
 # DIVERSITY_FEEDBACK (1), PATIENCE (0), STALL_TIMEOUT (3600),
 # PARENT_SELECTION (tournament), NICHING (none), COMBINE (1; 0 = solo
@@ -32,7 +33,11 @@
 # 5 padres / 2 hijos: poblacion suficientemente diversa (una familia
 # conductual por padre) sin disparar el numero de llamadas al LLM.
 # COMPARE=1 agrega, en el mismo job, la comparacion pareada del mejor operador
-# contra los clasicos (COMPARE_SPLIT=test, COMPARE_REPEATS=11, COMPARE_NAME).
+# contra los clasicos de 1 y 2 hijos (COMPARE_SPLIT=test, COMPARE_REPEATS=11,
+# COMPARE_FAIL_POLICY=zero, COMPARE_NAME). COMPARE_GE_PROTOCOL=1 usa el protocolo
+# GE completo (3 solvers x 2 mutaciones x 300/105); COMPARE_SOLVERS,
+# COMPARE_MUTATION, COMPARE_MUTATION_BOTH y COMPARE_MO_* ajustan el protocolo
+# corto.
 #
 # El entorno (module + .conda-env con vLLM) lo prepara slurm/ixachi-setup-env.sh
 # con WITH_VLLM=1, la primera vez, en el login.
@@ -179,6 +184,7 @@ ARGS=(
     --top-p "${TOP_P:-0.8}"
     --top-k "${TOP_K:-20}"
     --sampling-repetition-penalty "${SAMPLING_REPETITION_PENALTY:-1.05}"
+    --thinking "${THINKING:-auto}"
     --max-tokens "${MAX_TOKENS:-4096}"
     --operator-memory "${OPERATOR_MEMORY:-12}"
     --repeat-penalty "${REPEAT_PENALTY:-0.5}"
@@ -186,7 +192,7 @@ ARGS=(
     --stall-timeout "${STALL_TIMEOUT:-3600}"
     --parent-selection "${PARENT_SELECTION:-tournament}"
     --niching "${NICHING:-none}"
-    --eval-repeats "${EVAL_REPEATS:-1}"
+    --eval-repeats "${EVAL_REPEATS:-11}"
     --solver "${SOLVER:-MOEAD}"
     --train-instances "${TRAIN_INSTANCES:-8}"
     --mo-generations "${MO_GENERATIONS:-30}"
@@ -240,17 +246,44 @@ if [ "${COMPARE:-0}" = "1" ]; then
     BEST_OPERATOR="$EXP_DIR/llamea_best_operator.py"
     if [ -f "$BEST_OPERATOR" ]; then
         echo "Comparando el mejor operador contra los clasicos ..."
-        python scripts/compare_operators.py \
-            --operator "llamea=$BEST_OPERATOR" \
-            --operator ox=classic:ox \
-            --operator pbx=classic:pbx \
-            --operator pmx=classic:pmx \
-            --operator cx=classic:cx \
-            --operator erx=classic:erx \
-            --split "${COMPARE_SPLIT:-test}" \
-            --repeats "${COMPARE_REPEATS:-11}" \
-            --name "${COMPARE_NAME:-${EXPERIMENT_NAME:-LLaMEA_single}_vs_clasicos}" \
+        COMPARE_ARGS=(
+            --operator "llamea=$BEST_OPERATOR"
+            --operator ox=classic:ox
+            --operator pbx=classic:pbx
+            --operator pmx=classic:pmx
+            --operator cx=classic:cx
+            --operator erx=classic:erx
+            --operator ox2=classic2:ox
+            --operator pbx2=classic2:pbx
+            --operator pmx2=classic2:pmx
+            --operator cx2=classic2:cx
+            --operator erx2=classic2:erx
+            --fail-policy "${COMPARE_FAIL_POLICY:-zero}"
+            --split "${COMPARE_SPLIT:-test}"
+            --repeats "${COMPARE_REPEATS:-11}"
+            --name "${COMPARE_NAME:-${EXPERIMENT_NAME:-LLaMEA_single}_vs_clasicos}"
             --save-fronts
+        )
+        if [ "${COMPARE_GE_PROTOCOL:-0}" = "1" ]; then
+            # Protocolo GE completo: 3 solvers x 2 mutaciones x 300/105.
+            # Es caro; usar solo para la tabla final de publicacion.
+            COMPARE_ARGS+=(--ge-protocol)
+        else
+            COMPARE_ARGS+=(--solver "${COMPARE_SOLVERS:-${SOLVER:-MOEAD}}")
+            if [ "${COMPARE_MUTATION:-0}" = "1" ]; then
+                COMPARE_ARGS+=(--mutation)
+            fi
+            if [ "${COMPARE_MUTATION_BOTH:-0}" = "1" ]; then
+                COMPARE_ARGS+=(--mutation-both)
+            fi
+            if [ -n "${COMPARE_MO_GENERATIONS:-}" ]; then
+                COMPARE_ARGS+=(--mo-generations "${COMPARE_MO_GENERATIONS}")
+            fi
+            if [ -n "${COMPARE_MO_POPULATION_SIZE:-}" ]; then
+                COMPARE_ARGS+=(--mo-population-size "${COMPARE_MO_POPULATION_SIZE}")
+            fi
+        fi
+        python scripts/compare_operators.py "${COMPARE_ARGS[@]}"
     else
         echo "AVISO: no existe $BEST_OPERATOR; se omite COMPARE=1." >&2
     fi

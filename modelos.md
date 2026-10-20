@@ -36,6 +36,7 @@ LiveCodeBench), no los agentivos (SWE-bench), que miden otra cosa.
 | `Qwen/Qwen2.5-Coder-7B-Instruct` | 7B | Apache-2.0 | 88.4 | 84.1 | 83.5 | 41.0 / 18.2 | 18.2 | idem |
 | `deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct` | 16B (2.4B) | DeepSeek License | 81.1 | 75.6 | 82.8 | 36.8 / 16.2 | 16.3 | idem |
 | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | 30.5B (3.3B) | Apache-2.0 | 92.1† | 89.0† | — | — | ~40† | medición de terceros; card oficial con figura |
+| `Qwen/Qwen3-Coder-Next` | 80B (3B) | Apache-2.0 | — | — | — | — | 58.9 | Technical Report 2603.00729, Table 6; EvalPlus 86.6 |
 | `ByteDance-Seed/Seed-Coder-8B-Instruct` | 8B | MIT | 84.8 | — | 85.2 | 53.3 / 26.4 | 24.7 | Seed-Coder card (harness propio) |
 
 † El `HumanEval 92.1 / HumanEval+ 89.0` de Qwen3-Coder-30B-A3B es un *anchor*
@@ -66,10 +67,15 @@ Lectura:
   código, pero es un modelo de razonamiento: el CoT consume tokens y el
   presupuesto de 1000 generaciones se vuelve mucho más caro. Queda como
   experimento, no como default.
-- **Qwen3-Coder-Next** (80B/3B activos, Apache-2.0) es la evolución natural,
-  pero su FP8 oficial ocupa ~80 GB y no cabe en una H100 con KV cache; haría
-  falta AWQ/MXFP4 (menos evidencia) o `--tensor-parallel-size 2`. No hay perfil
-  todavía; es candidato para cuando el cluster tenga 2 GPUs por job.
+- **Qwen3-Coder-Next** (80B/3B activos, Apache-2.0) es la evolución natural:
+  SWE-Bench Verified 70.6, LiveCodeBench v6 58.9 y EvalPlus 86.6, con solo 3B
+  activos. Su FP8 oficial ocupa ~80 GB y no cabe en una H100 con KV cache; el
+  AWQ W4A16 de `qtum/Qwen3-Coder-Next-AWQ` ocupa ~42 GB y sí deja ~30 GB para
+  KV en una H100 80 GB. Perfil `coder-next-awq` (solo H100). La cuantización
+  W4A16 sube la perplejidad de 7.74 a 12.53 en wikitext-2, así que hay que
+  validarla en esta tarea antes de adoptarla como default; el perfil es una
+  apuesta, no una garantía. En A100 40 GB no cabe el AWQ completo; la variante
+  REAP+AWQ (~34 GB) existe pero es experimental y no se ofrece como perfil.
 
 Por qué `-Coder` y no solo "más grande": en las corridas locales el fallo típico
 del 0.5B fue **escribir código degenerado pero válido** (`return x`,
@@ -77,6 +83,59 @@ del 0.5B fue **escribir código degenerado pero válido** (`return x`,
 afinado en código del mismo tamaño escribe mejor código; por eso
 `Qwen2.5-Coder-7B-Instruct` es la primera opción antes que un genérico más
 grande.
+
+### 1.1.1 GLM cuantizado: pequeño para local y grande para el cluster
+
+La familia GLM cubre los dos extremos que pediste. Los dos modelos son MIT y
+tienen una variante que corre en **llama.cpp** (GGUF) y otra que corre en
+**vLLM** (AWQ); no es el mismo archivo, es el mismo modelo base en dos formatos.
+
+| Uso | Modelo | Formato | VRAM de pesos | Contexto | Por qué |
+|---|---|---|---:|---:|---|
+| Local, RTX 3060 12 GB | `unsloth/GLM-Z1-9B-0414-GGUF` Q4_K_M | GGUF | ~6.2 GB | 32k (usar 8k) | 9B denso, razonamiento entrenado con RL en matemáticas/código/lógica; entra holgado en 12 GB |
+| Cluster, A100 40 GB / H100 80 GB | `QuantTrio/GLM-4.7-Flash-AWQ` | AWQ W4A16 | ~20 GB | 16k (subir con cuidado) | 30B totales / 3B activos; AIME25 91.6, GPQA 75.2, LCB v6 64.0, SWE-bench 59.2 |
+
+Evidencia de `GLM-4.7-Flash` (card oficial, tabla de benchmarks):
+
+| Benchmark | GLM-4.7-Flash | Qwen3-30B-A3B-Thinking-2507 |
+|---|---:|---:|
+| AIME 25 | 91.6 | 85.0 |
+| GPQA | 75.2 | 73.4 |
+| LiveCodeBench v6 | 64.0 | 66.0 |
+| SWE-bench Verified | 59.2 | 22.0 |
+| τ²-Bench | 79.5 | 49.0 |
+
+`GLM-Z1-9B-0414` es un modelo de razonamiento: la card oficial dice que se
+entrenó con las mismas técnicas que los Z1 grandes, con RL sobre matemáticas,
+código y lógica, y que está "a la cabeza entre los modelos open-source de su
+tamaño". No publica una tabla en texto comparable a la de arriba, así que se
+usa para **pruebas locales de humo**, no como evidencia para elegir el modelo
+del cluster. Para local también sirve `sllm/glm-z1-9b` de Ollama (~8.6 GB,
+quantización más alta), pero el Q4_K_M de Unsloth deja más VRAM para contexto.
+
+`GLM-4.7-Flash` es la opción grande recomendada porque entra en **una A100
+40 GB** y en **una H100 80 GB**, a diferencia de:
+
+- `GLM-4.7` completo (358B/32B activos, ~717 GB bf16): no cabe en una GPU.
+- `GLM-5.3-Flash` (~328 GB bf16): requiere varias H100; no hay perfil para la
+  partición actual.
+- `GLM-4.7-Flash` en A10 24 GB: los ~20 GB de pesos dejan muy poco KV cache;
+  para A10 es mejor `coder8b` o `a10-quant`.
+
+Requisito importante: `GLM-4.7-Flash` es una arquitectura `glm4_moe_lite` y
+vLLM/SGLang la soportan en **main/nightly** (el AWQ de QuantTrio se probó con
+`vllm==0.14.0rc2`). Si el `.conda-env` del cluster se creó con una versión
+vieja, actualízalo en el login antes de lanzar el perfil:
+
+```bash
+source .conda-env/bin/activate
+pip install -U vllm --pre --index-url https://pypi.org/simple \
+  --extra-index-url https://wheels.vllm.ai/nightly
+```
+
+El perfil `glm47-flash-awq` ya pasa `--reasoning-parser glm45`, así que el
+pensamiento sale en `reasoning_content` y queda registrado en
+`llm_requests.jsonl`; no se pierde ni se mezcla con el código final.
 
 ### 1.2 Cuantización: 4-bit es seguro, 2-3 bits no
 
@@ -110,6 +169,11 @@ VRAM de pesos, sin KV cache; el KV cache y las activaciones dependen de
 | Qwen2.5-Coder-14B-Instruct | ~29 GB | ~10 GB | ~15 GB | A100 40 GB / A10 AWQ |
 | Qwen2.5-Coder-32B-Instruct | ~65 GB | ~19-21 GB | ~33 GB | H100 fp16; AWQ en A100 |
 | Qwen3-Coder-30B-A3B-Instruct | ~61 GB | ~18 GB | ~31 GB | MoE 3.3B activos |
+| Qwen3-Coder-Next (80B/3B) | ~149 GB | ~42 GB | ~80 GB | solo H100 con AWQ o 2 GPUs |
+| GLM-4.7-Flash (30B/3B) | ~62 GB | ~20 GB | — | A100 40 GB / H100 80 GB; AWQ QuantTrio |
+| GLM-Z1-9B-0414 (9B) | ~19 GB | ~6.2 GB (GGUF Q4) | — | local 12 GB; 32k de contexto |
+| GLM-4.7 completo (358B/32B) | ~717 GB | — | — | no cabe en una GPU |
+| GLM-5.3-Flash (~328 GB bf16) | ~328 GB | — | — | varias H100; sin perfil |
 | DeepSeek-Coder-V2-Lite | ~31 GB | ~9 GB | ~16 GB | 16B MoE (2.4B activos) |
 
 Notas:
@@ -126,6 +190,8 @@ Notas:
   | GPU | VRAM | `PROFILE` | Modelo | Por qué |
   |---|---|---|---|---|
   | H100 | 80 GB | `coder30b-fp8` | Qwen3-Coder-30B-A3B FP8 (~31 GB) | mejor calidad/velocidad, FP8 oficial, 32k contexto |
+  | H100 | 80 GB | `coder-next-awq` | Qwen3-Coder-Next AWQ (~42 GB) | 80B/3B, LCB 58.9; deja ~30 GB para KV |
+  | H100 / A100 | 80 / 40 GB | `glm47-flash-awq` | GLM-4.7-Flash AWQ (~20 GB) | 30B/3B, AIME25 91.6, LCB v6 64.0, SWE 59.2; requiere vLLM main |
   | H100 | 80 GB | `h100-fp16` | Qwen2.5-Coder-32B fp16 (~65 GB) | referencia sin cuantizar, ya validada |
   | A100 | 40 GB | `coder30b-awq` | Qwen3-Coder-30B-A3B AWQ (~18 GB) | 30B con 3.3B activos; cuantización de comunidad |
   | A100 | 40 GB | `big-quant` (default) | Qwen2.5-Coder-32B AWQ (~20 GB) | fallback probado, cuantización oficial |
@@ -139,7 +205,17 @@ Notas:
   cache que `coder30b-awq-a10` (30B AWQ en 24 GB va justo).
   `coder30b-awq` usa un AWQ de comunidad (`QuantTrio`); verifica el manifiesto
   antes de confiar en él y, si algo falla, vuelve a `big-quant`.
-- **En esta máquina de pruebas (RTX 3060, 12 GB)**: usar `Qwen2.5-0.5B/1.5B`.
+  `glm47-flash-awq` usa `QuantTrio/GLM-4.7-Flash-AWQ` (~20 GB). Es la mejor
+  opción de razonamiento/matemáticas/código para A100/H100, pero exige vLLM
+  main/nightly y `--reasoning-parser glm45`; si el cluster tiene una versión
+  vieja de vLLM, actualízala o usa `coder30b-awq`.
+  `coder-next-awq` usa el AWQ de comunidad `qtum` (W4A16, compressed-tensors);
+  su perplejidad es +62 % frente al bf16, así que úsalo como candidato a
+  mejorar la búsqueda, no como reemplazo automático. La descarga son ~42 GB.
+- **En esta máquina de pruebas (RTX 3060, 12 GB)**: `GLM-Z1-9B-0414` Q4_K_M
+  (~6.2 GB) es la opción con razonamiento/matemáticas; `Qwen2.5-Coder-7B`
+  (~5 GB AWQ) es la opción más probada para generar operadores. Los 0.5B/1.5B
+  quedan solo para *smoke tests*.
 - Los modelos `-Instruct` tienen chat template: el prompt de LLaMEA va como
   mensaje de usuario y la respuesta se parsea por bloques ```` ```python ````.
 - `scripts/mohh_models.py download` consulta el tamaño remoto y **falla antes de
@@ -178,6 +254,8 @@ repite el 90 % de las veces pierde frente a uno más chico y diverso.
 # del README: `bash slurm/llamea-all.sh`).
 sbatch slurm/llamea-vllm-server.slrm                 # perfil big-quant (32B AWQ)
 PROFILE=coder30b-fp8 sbatch --constraint=H100 slurm/llamea-vllm-server.slrm
+PROFILE=coder-next-awq sbatch --constraint=H100 slurm/llamea-vllm-server.slrm
+PROFILE=glm47-flash-awq sbatch --constraint='A100|H100' slurm/llamea-vllm-server.slrm
 PROFILE=coder30b-awq sbatch --constraint=A100 slurm/llamea-vllm-server.slrm
 ```
 
@@ -189,6 +267,14 @@ o `--kv-cache-dtype fp8`) y `EXTRA_VLLM_ARGS` (override del usuario). El script
 usa además `--max-num-seqs 4`, `--enable-prefix-caching` y
 `--disable-log-requests`: LLaMEA hace una petición cada vez, los prompts
 comparten preámbulo y los prompts completos ya quedan en `prompts/`.
+
+`glm47-flash-awq` además exporta las variables que pide la card de QuantTrio
+(`VLLM_USE_DEEP_GEMM=0`, `VLLM_USE_FLASHINFER_MOE_FP16=1`,
+`VLLM_USE_FLASHINFER_SAMPLER=0`) y añade
+`--trust-remote-code --reasoning-parser glm45`. Si tu versión de vLLM no acepta
+`glm45`, quita ese argumento con
+`VLLM_ARGS="--trust-remote-code"`: el cliente también sabe separar etiquetas
+`<think>`, `<thinking>` y `<reasoning>`.
 
 El job único de búsqueda pide **16 CPUs, 64 GB y una GPU**. Es suficiente
 porque el cuello es la inferencia y el MOEA interno corre secuencial; 4 hilos
@@ -223,18 +309,42 @@ MODEL=qwen2.5-coder:7b-instruct BASE_URL=http://127.0.0.1:11434/v1 \
   ./scripts/llamea_search.sh
 ```
 
+La opción local con razonamiento es `GLM-Z1-9B-0414`:
+
+```bash
+# Opción A: Ollama (cuantización de ~8.6 GB).
+ollama pull sllm/glm-z1-9b
+MODEL=sllm/glm-z1-9b BASE_URL=http://127.0.0.1:11434/v1 \
+  NO_DOWNLOAD=1 BUDGET=30 NAME=glm_z1_9b_local \
+  ./scripts/llamea_search.sh
+
+# Opción B: llama.cpp con el Q4_K_M exacto (~6.2 GB).
+hf download unsloth/GLM-Z1-9B-0414-GGUF GLM-Z1-9B-0414-Q4_K_M.gguf \
+  --local-dir "$HOME/models/glm-z1-9b"
+llama-server -m "$HOME/models/glm-z1-9b/GLM-Z1-9B-0414-Q4_K_M.gguf" \
+  -c 8192 -ngl 99 --port 8003
+MODEL=glm-z1-9b BASE_URL=http://127.0.0.1:8003/v1 \
+  NO_DOWNLOAD=1 BUDGET=30 NAME=glm_z1_9b_llamacpp \
+  ./scripts/llamea_search.sh
+```
+
 Notas:
 
 - Ollama reparte el modelo entre GPU y CPU según la VRAM libre. Si otro proceso
   ocupa la GPU (p. ej. un `llama-server` propio) el modelo puede caer a ~86 %
   CPU y bajar a ~7 tokens/s; con la GPU libre va entero a GPU.
 - El contexto por defecto suele ser 4096 tokens: suficiente para el prompt de
-  LLaMEA (~1.5-2k), pero no lo subas sin mirar la VRAM.
+  LLaMEA (~1.5-2k), pero no lo subas sin mirar la VRAM. En `llama-server` el
+  `-c 8192` es un buen compromiso para el Q4_K_M en 12 GB.
 - El campo `usage` de Ollama trae `prompt_tokens`/`completion_tokens`, así que la
   contabilidad de tokens del pipeline funciona igual.
-- Los modelos de razonamiento puro (p. ej. que llenan `reasoning_content`) no
-  sirven para este bucle: se gastan el presupuesto de tokens razonando y dejan
-  el `content` vacío, sin bloque de código que parsear.
+- Los modelos de razonamiento (`GLM-Z1`, `GLM-4.7-Flash`) pueden llenar
+  `reasoning_content` y dejar `content` vacío. El cliente lo registra en
+  `llm_requests.jsonl` y, si `content` viene vacío, intenta extraer el código
+  del razonamiento. Aun así, el CoT consume presupuesto: para 1000
+  generaciones usa `THINKING=auto` (respeta el template) o `THINKING=off` si
+  solo quieres código, y sube `MAX_TOKENS` a 4096-8192 si el modelo piensa
+  mucho. El razonamiento completo queda en el log para auditar la decisión.
 - `qwen2.5-coder:7b-instruct` es el único del inventario que se comporta como
   modelo de búsqueda: 21/30 operadores válidos y 24 códigos distintos en 30
   generaciones, con un mejor HV de train de **0.583228** en el marco GE frente a
@@ -421,6 +531,16 @@ python scripts/mohh_models.py download Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
 
 # H100: 32B sin cuantizar (mayor calidad, ~65 GB)
 python scripts/mohh_models.py download Qwen/Qwen2.5-Coder-32B-Instruct
+
+# H100: 80B/3B AWQ (~42 GB; perfil coder-next-awq)
+python scripts/mohh_models.py download qtum/Qwen3-Coder-Next-AWQ
+
+# A100 40 GB / H100 80 GB: GLM-4.7-Flash AWQ (~20 GB; perfil glm47-flash-awq)
+python scripts/mohh_models.py download QuantTrio/GLM-4.7-Flash-AWQ
+
+# Local 12 GB: GLM-Z1-9B Q4_K_M (~6.2 GB, GGUF para llama.cpp/Ollama)
+hf download unsloth/GLM-Z1-9B-0414-GGUF GLM-Z1-9B-0414-Q4_K_M.gguf \
+  --local-dir "$HOME/models/glm-z1-9b"
 
 # A100 40 GB: 14B fp16
 python scripts/mohh_models.py download Qwen/Qwen2.5-Coder-14B-Instruct

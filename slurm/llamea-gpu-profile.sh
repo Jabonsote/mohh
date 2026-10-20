@@ -17,6 +17,8 @@
 #   - Qwen2.5-Coder-32B-Instruct  HE 92.7  HE+ 87.2  BCB 49.6/27.0  LCB 31.4
 #   - Qwen3-Coder-30B-A3B-Instruct (3.3B activos) ~HE 92.1 HE+ 89.0, 256k ctx
 #   - Qwen2.5-Coder-14B-Instruct  HE 89.6  HE+ 87.2  BCB 48.4/22.2  LCB 23.4
+#   - GLM-4.7-Flash (30B/3B) AIME25 91.6  GPQA 75.2  LCB 64.0  SWE 59.2
+#   - GLM-Z1-9B-0414 (9B) razonamiento/matematicas; GGUF Q4 ~6.2 GB local
 #   - Seed-Coder-8B-Instruct      HE 84.8  MBPP 85.2 BCB 53.3/26.4  LCB 24.7
 #   - DeepSeek-Coder-V2-Lite       HE 81.1  HE+ 75.6  BCB 36.8/16.2  LCB 16.3
 # Fuentes y matices en modelos.md (seccion 1).
@@ -31,6 +33,14 @@
 #   coder30b-fp8     Qwen3-Coder-30B-A3B FP8 oficial (~31 GB). Recomendado en
 #                    H100 (FP8 nativo sm90); deja KV cache para 32k.
 #   coder30b-awq-a10 El mismo 30B AWQ en A10 24 GB, contexto 8k.
+#   glm47-flash-awq  GLM-4.7-Flash (30B/3B activos) AWQ W4A16 (~20 GB),
+#                    A100 40 GB/H100 80 GB: mejor razonamiento/matematicas/
+#                    codigo (AIME25 91.6, LCB v6 64.0). Requiere vLLM main
+#                    (glm4_moe_lite) y usa --reasoning-parser glm45.
+#   coder-next-awq   Qwen3-Coder-Next (80B/3B activos) AWQ W4A16 (~42 GB),
+#                    solo H100 80 GB: modelo grande con LCB 58.9/EvalPlus 86.6;
+#                    deja ~30 GB para KV cache. Cuantizacion de comunidad
+#                    (qtum/llm-compressor), validar con `mohh_models.py verify`.
 #   h100-fp16        32B fp16 (~65 GB), solo H100 80 GB: maxima calidad del
 #                    modelo ya validado, sin cuantizar.
 #   a100-fp16        14B fp16 (~29 GB) en A100 40 GB.
@@ -56,6 +66,8 @@ big-quant         Qwen/Qwen2.5-Coder-32B-Instruct-AWQ         ~20 GB  A100/H100
 coder30b-awq      QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ  ~18 GB  A100/H100
 coder30b-fp8      Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8       ~31 GB  H100
 coder30b-awq-a10  QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ  ~18 GB  A10
+glm47-flash-awq   QuantTrio/GLM-4.7-Flash-AWQ                ~20 GB  A100/H100
+coder-next-awq    qtum/Qwen3-Coder-Next-AWQ                  ~42 GB  H100
 h100-fp16         Qwen/Qwen2.5-Coder-32B-Instruct             ~65 GB  H100
 a100-fp16         Qwen/Qwen2.5-Coder-14B-Instruct             ~29 GB  A100/H100
 a10-quant         Qwen/Qwen2.5-Coder-14B-Instruct-AWQ         ~10 GB  A10
@@ -63,6 +75,8 @@ coder8b           ByteDance-Seed/Seed-Coder-8B-Instruct       ~16 GB  A10
 smoke             Qwen/Qwen2.5-1.5B-Instruct                   ~3 GB  cualquiera
 
 Recomendado: coder30b-awq en A100/H100, coder30b-fp8 en H100,
+glm47-flash-awq en A100/H100 (mejor math/codigo/razonamiento),
+coder-next-awq en H100 cuando se quiera el modelo grande (80B/3B),
 coder8b o a10-quant en A10. big-quant sigue siendo el default probado.
 EOF
     exit 0
@@ -89,6 +103,29 @@ case "$PROFILE" in
         MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
         GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
         VLLM_ARGS="${VLLM_ARGS:---quantization awq_marlin}"
+        ;;
+    coder-next-awq)
+        # 80B/3B activos en W4A16: ~42 GB de pesos. Solo H100 80 GB; el AWQ
+        # usa compressed-tensors y vLLM lo detecta desde config.json.
+        MODEL="${MODEL:-qtum/Qwen3-Coder-Next-AWQ}"
+        CONSTRAINT="${CONSTRAINT:-H100}"
+        MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+        GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.92}"
+        VLLM_ARGS="${VLLM_ARGS:-}"
+        ;;
+    glm47-flash-awq)
+        # GLM-4.7-Flash: 30B totales / 3B activos, AWQ W4A16 (~20 GB).
+        # Cabe en A100 40 GB y H100 80 GB. El card de QuantTrio pide estas
+        # variables para su AWQ en vLLM; `--reasoning-parser glm45` separa el
+        # pensamiento en `reasoning_content` (lo registra llm_requests.jsonl).
+        MODEL="${MODEL:-QuantTrio/GLM-4.7-Flash-AWQ}"
+        CONSTRAINT="${CONSTRAINT:-A100|H100}"
+        MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+        GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.92}"
+        VLLM_ARGS="${VLLM_ARGS:---trust-remote-code --reasoning-parser glm45}"
+        export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
+        export VLLM_USE_FLASHINFER_MOE_FP16="${VLLM_USE_FLASHINFER_MOE_FP16:-1}"
+        export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
         ;;
     coder8b)
         MODEL="${MODEL:-ByteDance-Seed/Seed-Coder-8B-Instruct}"

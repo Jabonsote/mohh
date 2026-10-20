@@ -706,6 +706,17 @@ def test_strip_thinking_removes_reasoning_blocks():
     assert "```python" in cleaned
 
 
+@pytest.mark.parametrize("tag", ["thinking", "reasoning"])
+def test_strip_thinking_supports_qwen_and_reasoning_tags(tag):
+    from mohh.llamea.parsing import strip_thinking
+
+    text = f"<{tag}>interno</{tag}>\n```python\ndef crossover(x, y):\n    return x\n```"
+    cleaned = strip_thinking(text)
+    assert "interno" not in cleaned
+    assert f"<{tag}>" not in cleaned
+    assert "def crossover" in cleaned
+
+
 def test_extract_code_block_handles_unclosed_fence():
     from mohh.llamea.parsing import extract_code_block
 

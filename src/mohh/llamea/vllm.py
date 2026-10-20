@@ -9,8 +9,10 @@ Pensado para el cluster: el servidor corre en un job con GPU y la busqueda en
 otro nodo apuntando a `http://<nodo-del-servidor>:8000/v1`.
 """
 
+import json
 import os
 import re
+import threading
 import time
 
 from llamea.llm import OpenAI_LLM
@@ -30,6 +32,33 @@ _OUTPUT_FORMAT_MARKER = "Answer in exactly this format:"
 #: consuman el contexto ni inflen el costo por generacion.
 _MAX_DESCRIPTION_CHARS = 240
 _MAX_MEMORY_BLOCK_CHARS = 4000
+
+
+def _json_safe(value):
+    """Convierte valores del SDK/OpenAI a algo serializable sin perder texto."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
+def _message_field(message, *names):
+    """Campo extra de un mensaje (vLLM usa `reasoning_content`)."""
+    if message is None:
+        return None
+    for name in names:
+        value = getattr(message, name, None)
+        if value:
+            return value
+    extra = getattr(message, "model_extra", None)
+    if isinstance(extra, dict):
+        for name in names:
+            if extra.get(name):
+                return extra[name]
+    return None
 
 
 def extract_description(text: str) -> str:
@@ -173,7 +202,9 @@ class VLLM_LLM(OpenAI_LLM):
     def __init__(self, model, base_url="http://localhost:8000/v1",
                  api_key="EMPTY", temperature=0.8, timeout=600,
                  max_tokens=None, top_p=None, top_k=None,
-                 sampling_repetition_penalty=None, operator_memory=0, **kwargs):
+                 sampling_repetition_penalty=None, operator_memory=0,
+                 thinking=None, request_log_path=None, request_context=None,
+                 **kwargs):
         super().__init__(api_key=api_key, model=model, temperature=temperature, **kwargs)
         self.base_url = base_url
         self.max_tokens = max_tokens
@@ -181,6 +212,17 @@ class VLLM_LLM(OpenAI_LLM):
         self.top_k = top_k
         self.sampling_repetition_penalty = sampling_repetition_penalty
         self.operator_memory = max(0, int(operator_memory or 0))
+        # None = no tocar el template del servidor; True/False fuerza
+        # `chat_template_kwargs.enable_thinking` (Qwen3 y familia).
+        self.thinking = thinking
+        #: JSONL con la peticion exacta (incluida la memoria), respuesta cruda,
+        #: `reasoning_content`, parametros de muestreo, usage y latencia.
+        self.request_log_path = request_log_path
+        self.request_context = dict(request_context or {})
+        self._request_lock = threading.Lock()
+        self._request_index = 0
+        self._last_response = None
+        self._last_elapsed = 0.0
         self._memory = []
         self._client_kwargs["base_url"] = base_url
         self._client_kwargs.setdefault("timeout", timeout)
@@ -193,9 +235,12 @@ class VLLM_LLM(OpenAI_LLM):
     def reset_usage(self):
         self.usage = {"requests": 0, "prompt_tokens": 0,
                       "completion_tokens": 0, "total_tokens": 0,
+                      "reasoning_tokens": 0, "cached_prompt_tokens": 0,
                       "inference_seconds": 0.0, "failed_requests": 0}
         self.usage_history = []
         self._last_message_chars = 0
+        self._last_response = None
+        self._last_elapsed = 0.0
 
     def _install_usage_capture(self):
         """Envuelve `chat.completions.create` para registrar tokens, `max_tokens`
@@ -218,6 +263,13 @@ class VLLM_LLM(OpenAI_LLM):
                 if owner.sampling_repetition_penalty is not None:
                     extra.setdefault("repetition_penalty",
                                      owner.sampling_repetition_penalty)
+                if owner.thinking is not None:
+                    # vLLM/Qwen3: el template recibe enable_thinking. No se
+                    # manda a servidores que no lo entiendan salvo pedido
+                    # explicito (--thinking on/off).
+                    template = dict(extra.get("chat_template_kwargs") or {})
+                    template.setdefault("enable_thinking", bool(owner.thinking))
+                    extra["chat_template_kwargs"] = template
                 if extra:
                     kwargs["extra_body"] = extra
                 start = time.perf_counter()
@@ -229,7 +281,9 @@ class VLLM_LLM(OpenAI_LLM):
                     owner.usage["failed_requests"] += 1
                     raise
                 elapsed = time.perf_counter() - start
-                owner._record_usage(response, elapsed)
+                owner._last_response = response
+                owner._last_elapsed = elapsed
+                owner._record_usage(response, elapsed, kwargs=kwargs)
                 return response
 
             def __getattr__(self, name):
@@ -237,11 +291,20 @@ class VLLM_LLM(OpenAI_LLM):
 
         self.client.chat.completions = _CapturingCompletions()
 
-    def _record_usage(self, response, elapsed: float = 0.0):
+    def _record_usage(self, response, elapsed: float = 0.0, kwargs=None):
         usage = getattr(response, "usage", None)
         prompt = getattr(usage, "prompt_tokens", None) if usage else None
         completion = getattr(usage, "completion_tokens", None) if usage else None
         total = getattr(usage, "total_tokens", None) if usage else None
+        details = getattr(usage, "completion_tokens_details", None) if usage else None
+        reasoning = (getattr(details, "reasoning_tokens", None) if details else None)
+        if reasoning is None and usage is not None:
+            reasoning = getattr(usage, "reasoning_tokens", None)
+        prompt_details = getattr(usage, "prompt_tokens_details", None) if usage else None
+        cached = (getattr(prompt_details, "cached_tokens", None)
+                  if prompt_details else None)
+        if cached is None and usage is not None:
+            cached = getattr(usage, "cached_tokens", None)
 
         if prompt is None:
             # Estimacion gruesa (~4 caracteres por token) si el servidor no
@@ -261,19 +324,148 @@ class VLLM_LLM(OpenAI_LLM):
         self.usage["prompt_tokens"] += int(prompt)
         self.usage["completion_tokens"] += int(completion)
         self.usage["total_tokens"] += int(total)
+        self.usage["reasoning_tokens"] += int(reasoning or 0)
+        self.usage["cached_prompt_tokens"] += int(cached or 0)
         self.usage["inference_seconds"] += float(elapsed)
+
+        message = None
+        finish_reason = None
+        try:
+            message = response.choices[0].message
+            finish_reason = response.choices[0].finish_reason
+        except Exception:  # noqa: BLE001
+            pass
+        reasoning_content = _message_field(
+            message, "reasoning_content", "reasoning", "thinking"
+        )
         self.usage_history.append({
             "request": self.usage["requests"],
             "prompt_tokens": int(prompt),
             "completion_tokens": int(completion),
             "total_tokens": int(total),
+            "reasoning_tokens": int(reasoning or 0),
+            "cached_prompt_tokens": int(cached or 0),
             "seconds": round(float(elapsed), 4),
             "time": time.time(),
+            # Parametros efectivos y respuesta: sin esto, el usage no permite
+            # reconstruir que se le pidio al modelo ni que devolvio.
+            "model": getattr(response, "model", None) or getattr(self, "model", None),
+            "response_id": getattr(response, "id", None),
+            "system_fingerprint": getattr(response, "system_fingerprint", None),
+            "finish_reason": finish_reason,
+            "response_chars": len(getattr(message, "content", None) or ""),
+            "reasoning_chars": len(reasoning_content or ""),
+            "params": self._effective_params(kwargs or {}),
         })
+
+    def _effective_params(self, kwargs):
+        """Parametros de muestreo efectivos de una peticion (serializables)."""
+        effective = {
+            "model": kwargs.get("model") or getattr(self, "model", None),
+            "temperature": kwargs.get("temperature", getattr(self, "temperature", None)),
+            "max_tokens": kwargs.get("max_tokens", getattr(self, "max_tokens", None)),
+            "top_p": kwargs.get("top_p", getattr(self, "top_p", None)),
+            "top_k": kwargs.get("top_k", getattr(self, "top_k", None)),
+            "repetition_penalty": kwargs.get(
+                "repetition_penalty",
+                getattr(self, "sampling_repetition_penalty", None),
+            ),
+            "thinking": getattr(self, "thinking", None),
+        }
+        extra = kwargs.get("extra_body")
+        if extra:
+            effective["extra_body"] = _json_safe(extra)
+        return _json_safe(effective)
+
+    def _response_reasoning(self):
+        """`reasoning_content` de la ultima respuesta, si el servidor lo expone."""
+        try:
+            message = self._last_response.choices[0].message
+        except Exception:  # noqa: BLE001
+            return ""
+        return _message_field(message, "reasoning_content", "reasoning", "thinking") or ""
+
+    def _response_raw(self):
+        try:
+            message = self._last_response.choices[0].message
+            return getattr(message, "content", None) or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _write_request_log(self, request_index, messages, kwargs,
+                           raw="", cleaned="", error=None):
+        """Escribe una linea JSONL con la peticion y la respuesta completas.
+
+        Se guarda aparte de `conversationlog.jsonl` porque LLaMEA registra la
+        respuesta ya limpia (sin razonamiento) y no conoce los parametros
+        efectivos de muestreo. Si el archivo no esta configurado, no hace nada.
+        """
+        if not self.request_log_path:
+            return
+        response = self._last_response
+        message = None
+        finish_reason = None
+        if response is not None:
+            try:
+                message = response.choices[0].message
+                finish_reason = response.choices[0].finish_reason
+            except Exception:  # noqa: BLE001
+                pass
+        reasoning = _message_field(
+            message, "reasoning_content", "reasoning", "thinking"
+        ) or ""
+        usage = getattr(response, "usage", None) if response is not None else None
+        usage_payload = None
+        if usage is not None:
+            usage_payload = _json_safe(
+                usage.model_dump() if hasattr(usage, "model_dump") else usage
+            )
+        prompt_text = "\n\n".join(
+            str(item.get("content", "")) for item in messages
+            if isinstance(item, dict)
+        )
+        record = {
+            "request": request_index,
+            "time": time.time(),
+            "model": (getattr(response, "model", None)
+                      if response is not None else None) or getattr(self, "model", None),
+            "base_url": self.base_url,
+            "context": _json_safe(self.request_context),
+            "messages": _json_safe(messages),
+            "prompt": prompt_text,
+            "params": self._effective_params(kwargs or {}),
+            "response": {
+                "raw_content": raw or "",
+                "cleaned_content": cleaned or "",
+                "reasoning_content": reasoning,
+                "finish_reason": finish_reason,
+                "id": getattr(response, "id", None) if response is not None else None,
+                "system_fingerprint": (
+                    getattr(response, "system_fingerprint", None)
+                    if response is not None else None
+                ),
+                "usage": usage_payload,
+                "seconds": round(float(self._last_elapsed), 4),
+            },
+            "error": f"{type(error).__name__}: {error}" if error else None,
+        }
+        try:
+            directory = os.path.dirname(os.path.abspath(self.request_log_path))
+            os.makedirs(directory, exist_ok=True)
+            with self._request_lock:
+                with open(self.request_log_path, "a", encoding="utf-8") as file:
+                    file.write(json.dumps(record, ensure_ascii=False,
+                                          default=str) + "\n")
+                    file.flush()
+        except Exception:  # noqa: BLE001 - el log no debe tumbar la busqueda
+            pass
 
     def usage_snapshot(self):
         """Copia del consumo acumulado (segura para loguear/serializar)."""
-        return dict(self.usage)
+        snapshot = dict(self.usage)
+        snapshot["request_log"] = getattr(self, "request_log_path", None)
+        snapshot["thinking"] = getattr(self, "thinking", None)
+        return snapshot
 
     def query(self, session_messages, **kwargs):
         messages = session_messages
@@ -296,9 +488,30 @@ class VLLM_LLM(OpenAI_LLM):
         self._last_message_chars = sum(
             len(str(message.get("content", ""))) for message in messages
         )
-        response = strip_thinking(super().query(messages, **kwargs))
-        self._remember(response)
-        return response
+        with self._request_lock:
+            self._request_index += 1
+            request_index = self._request_index
+        self._last_response = None
+        self._last_elapsed = 0.0
+        try:
+            raw = super().query(messages, **kwargs)
+        except Exception as error:  # noqa: BLE001 - se registra y se relanza
+            self._write_request_log(request_index, messages, kwargs, error=error)
+            raise
+        raw = raw or ""
+        cleaned = strip_thinking(raw)
+        # Algunos servidores devuelven el codigo solo en reasoning_content y
+        # dejan content vacio. Se usa como fallback solo si no hay respuesta.
+        if not cleaned.strip():
+            reasoning = self._response_reasoning()
+            if reasoning:
+                cleaned = strip_thinking(reasoning)
+        self._remember(cleaned)
+        self._write_request_log(
+            request_index, messages, kwargs,
+            raw=self._response_raw() or raw, cleaned=cleaned,
+        )
+        return cleaned
 
     def _remember(self, response):
         """Guarda la descripcion del operador recien generado (memoria acotada)."""
@@ -320,8 +533,32 @@ class VLLM_LLM(OpenAI_LLM):
             "descriptions": list(self._memory),
         }
 
+    def __getstate__(self):
+        # LLaMEA serializa el objeto completo para sus checkpoints. Un
+        # `threading.Lock` y la ultima respuesta del SDK no son serializables;
+        # se recrean/limpian en `__setstate__`.
+        state = super().__getstate__()
+        state.pop("_request_lock", None)
+        state.pop("_last_response", None)
+        return state
+
     def __setstate__(self, state):
         super().__setstate__(state)
+        # Estados antiguos (pickles/checkpoints) no traen los campos nuevos.
+        if not hasattr(self, "thinking"):
+            self.thinking = None
+        if not hasattr(self, "request_log_path"):
+            self.request_log_path = None
+        if not hasattr(self, "request_context"):
+            self.request_context = {}
+        if not hasattr(self, "_request_lock"):
+            self._request_lock = threading.Lock()
+        if not hasattr(self, "_request_index"):
+            self._request_index = 0
+        if not hasattr(self, "_last_response"):
+            self._last_response = None
+        if not hasattr(self, "_last_elapsed"):
+            self._last_elapsed = 0.0
         # El cliente se recreo en __setstate__; volver a enganchar la captura.
         self._install_usage_capture()
 

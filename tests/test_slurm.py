@@ -314,6 +314,8 @@ def test_llamea_gpu_profile_defaults_to_big_model():
     ("a10-quant", "14B"),
     ("coder30b-awq", "Qwen3-Coder-30B"),
     ("coder30b-fp8", "FP8"),
+    ("glm47-flash-awq", "GLM-4.7-Flash"),
+    ("coder-next-awq", "Qwen3-Coder-Next"),
     ("coder8b", "Seed-Coder-8B"),
     ("smoke", "1.5B"),
 ])
@@ -355,6 +357,12 @@ def test_fp8_profile_uses_fp8_kv_cache_on_h100():
     assert "--kv-cache-dtype fp8" in args
 
 
+def test_glm_profile_enables_reasoning_parser():
+    args = _profile_vllm_args("glm47-flash-awq")
+    assert "--reasoning-parser glm45" in args
+    assert "--trust-remote-code" in args
+
+
 def test_llamea_profile_list_prints_catalog():
     result = subprocess.run(
         ["bash", "-c", "source slurm/llamea-gpu-profile.sh"],
@@ -363,6 +371,7 @@ def test_llamea_profile_list_prints_catalog():
     )
     assert result.returncode == 0, result.stderr
     assert "coder30b-fp8" in result.stdout
+    assert "GLM-4.7-Flash" in result.stdout
     assert "Seed-Coder-8B" in result.stdout
 
 

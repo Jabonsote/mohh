@@ -19,8 +19,9 @@
 # Opciones por entorno (se exportan al job con --export=ALL):
 #   PROFILE (big-quant)    perfil GPU/modelo (ver slurm/llamea-gpu-profile.sh):
 #                          big-quant | coder30b-awq | coder30b-fp8 |
-#                          coder30b-awq-a10 | coder8b | h100-fp16 |
-#                          a100-fp16 | a10-quant | smoke
+#                          coder30b-awq-a10 | glm47-flash-awq |
+#                          coder-next-awq | coder8b |
+#                          h100-fp16 | a100-fp16 | a10-quant | smoke
 #                          `PROFILE=list bash slurm/llamea-all.sh` imprime la tabla.
 #   MODEL                  override del modelo (id de HuggingFace)
 #   GENERATIONS (1000)     iteraciones reales de LLaMEA (presupuesto =
@@ -37,11 +38,19 @@
 #                          objetivo (1.0 = solo feedback; 0.0 = no puede ganar)
 #   REQUIRE_TARGET_FAMILY (0) 1 = rechazar el hijo antes de gastar el MOEA
 #   EVAL_TEST=1            evaluar el mejor operador en el conjunto de test
-#   EVAL_REPEATS (1)       repeticiones de esa evaluacion final
+#   EVAL_REPEATS (11)      repeticiones de esa evaluacion final (11 = comparacion
+#                          pareada contra los clasicos; 1 = solo una muestra)
 #   COMPARE=1              al terminar, comparacion pareada contra los clasicos
-#                          en el mismo job (COMPARE_SPLIT=test, COMPARE_REPEATS=11)
+#                          en el mismo job (COMPARE_SPLIT=test, COMPARE_REPEATS=11,
+#                          COMPARE_FAIL_POLICY=zero; incluye clasicos de 1 y 2 hijos)
+#   COMPARE_GE_PROTOCOL=1  comparacion con el protocolo GE completo (3 solvers x
+#                          2 mutaciones x 300/105); es caro, para tabla final
+#   COMPARE_SOLVERS        solvers de la comparacion (default SOLVER)
+#   COMPARE_MUTATION=1 / COMPARE_MUTATION_BOTH=1
+#   COMPARE_MO_GENERATIONS / COMPARE_MO_POPULATION_SIZE
 #   SOLVER, TRAIN_INSTANCES, TEST_INSTANCES, MO_GENERATIONS, MO_POPULATION_SIZE,
-#   TEMPERATURE, MAX_TOKENS, SEED, MUTATION=1, COMMA=1, REFINE_ONLY=1,
+#   TEMPERATURE, MAX_TOKENS, THINKING (auto|on|off), SEED, MUTATION=1, COMMA=1,
+#   REFINE_ONLY=1,
 #   REPEAT_PENALTY, DIVERSITY_FEEDBACK=0, PATIENCE, STALL_TIMEOUT,
 #   PARENT_SELECTION, NICHING, EXPERIMENT_NAME, CATEGORY, CONSTRAINT,
 #   MAX_MODEL_LEN, GPU_MEM_UTIL, CPUS (16), MEM (64G), TIME (limite SLURM),

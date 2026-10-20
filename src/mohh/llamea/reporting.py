@@ -437,17 +437,43 @@ def _pair_turns(conversation):
     return turns
 
 
-def write_prompt_log(log_dir, usage_history=None, path=None):
+def _request_records(log_dir, request_log=None):
+    """Lee `llm_requests.jsonl` y descarta peticiones fallidas.
+
+    Las peticiones fallidas no generan turno en `conversationlog.jsonl`; si se
+    incluyeran, desplazarian el emparejamiento. El archivo crudo completo queda
+    igualmente en disco para auditoria.
+    """
+    candidates = []
+    if request_log:
+        candidates.append(request_log)
+    candidates += [
+        os.path.join(log_dir, "llm_requests.jsonl"),
+        os.path.join(os.path.dirname(log_dir), "llm_requests.jsonl"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return [record for record in _read_jsonl(candidate)
+                    if not record.get("error")]
+    return []
+
+
+def write_prompt_log(log_dir, usage_history=None, path=None, request_log=None):
     """Guarda los prompts y las respuestas **ordenados por generacion**.
 
     De `conversationlog.jsonl` (peticion/respuesta en orden) y `log.jsonl`
     (generacion de cada intento) salen:
 
     - ``prompts/gen-NNNN.md``: un archivo legible por generacion con el prompt
-      completo y la respuesta cruda;
+      completo, la respuesta limpia y, si existe, la respuesta cruda y el
+      razonamiento del modelo;
     - ``prompts/index.jsonl``: una linea por turno con generacion, candidato,
-      tamano del prompt/respuesta, tokens (entrada/salida/total) y **latencia de
-      inferencia** (de `usage_history`, en el mismo orden).
+      tamano del prompt/respuesta, tokens (entrada/salida/total), latencia,
+      parametros de muestreo y conteo de razonamiento.
+
+    Si `llm_requests.jsonl` existe (lo escribe `VLLM_LLM`), se usa su prompt
+    exacto y su respuesta cruda; `conversationlog.jsonl` solo guarda la
+    respuesta ya limpia y no conoce los parametros efectivos.
 
     @return la lista de registros del indice.
     """
@@ -456,7 +482,10 @@ def write_prompt_log(log_dir, usage_history=None, path=None):
     turns = _pair_turns(_read_jsonl(os.path.join(log_dir, "conversationlog.jsonl")))
     rows = load_evolution(log_dir)
     usage_history = list(usage_history or [])
+    requests = _request_records(log_dir, request_log=request_log)
+    requests_by_number = {record.get("request"): record for record in requests}
     usage_pointer = 0
+    request_pointer = 0
 
     records = []
     by_generation = {}
@@ -468,16 +497,33 @@ def write_prompt_log(log_dir, usage_history=None, path=None):
             if usage_pointer < len(usage_history):
                 usage = usage_history[usage_pointer] or {}
             usage_pointer += 1
+        request = requests[request_pointer] if request_pointer < len(requests) else {}
+        if request:
+            request_pointer += 1
+        prompt = request.get("prompt") or turn["prompt"]
+        response = turn["response"]
+        response_payload = request.get("response") or {}
+        raw_response = response_payload.get("raw_content") or ""
+        reasoning = response_payload.get("reasoning_content") or ""
+        params = request.get("params") or {}
         record = {
             "turn": index + 1,
             "generation": generation,
             "name": row.get("name", ""),
-            "prompt_chars": len(turn["prompt"]),
-            "response_chars": len(turn["response"]),
+            "request": request.get("request"),
+            "model": request.get("model") or usage.get("model"),
+            "prompt_chars": len(prompt),
+            "response_chars": len(response),
+            "raw_response_chars": len(raw_response),
+            "reasoning_chars": len(reasoning),
             "prompt_tokens": usage.get("prompt_tokens"),
             "completion_tokens": usage.get("completion_tokens"),
+            "reasoning_tokens": usage.get("reasoning_tokens"),
+            "cached_prompt_tokens": usage.get("cached_prompt_tokens"),
             "total_tokens": usage.get("total_tokens"),
             "seconds": usage.get("seconds"),
+            "finish_reason": response_payload.get("finish_reason") or usage.get("finish_reason"),
+            "params": params,
             "prompt_time": turn["prompt_time"],
             "response_time": turn["response_time"],
         }
@@ -487,6 +533,12 @@ def write_prompt_log(log_dir, usage_history=None, path=None):
     for generation, entries in sorted(by_generation.items()):
         lines = [f"# Generacion {generation}", ""]
         for record, turn in entries:
+            request = requests_by_number.get(record.get("request")) or {}
+            response_payload = request.get("response") or {}
+            prompt = request.get("prompt") or turn["prompt"]
+            raw_response = response_payload.get("raw_content") or ""
+            reasoning = response_payload.get("reasoning_content") or ""
+            params = request.get("params") or record.get("params") or {}
             lines += [
                 f"## Turno {record['turn']} - `{record['name'] or 'candidato'}`",
                 "",
@@ -496,38 +548,70 @@ def write_prompt_log(log_dir, usage_history=None, path=None):
                 f"{record['completion_tokens'] if record['completion_tokens'] is not None else '-'} tokens",
                 f"- Inferencia: "
                 f"{record['seconds'] if record['seconds'] is not None else '-'} s",
+            ]
+            if record.get("model"):
+                lines.append(f"- Modelo: `{record['model']}`")
+            if record.get("finish_reason"):
+                lines.append(f"- `finish_reason`: `{record['finish_reason']}`")
+            if params:
+                lines.append(f"- Parametros de muestreo: `{json.dumps(params, ensure_ascii=False)}`")
+            if reasoning:
+                lines.append(f"- Razonamiento: {record['reasoning_chars']} caracteres, "
+                             f"{record['reasoning_tokens'] if record['reasoning_tokens'] is not None else '-'} tokens")
+            lines += [
                 "",
-                "### Prompt",
+                "### Prompt enviado",
                 "",
                 "````text",
-                turn["prompt"],
+                prompt,
                 "````",
                 "",
-                "### Respuesta",
+                "### Respuesta (limpia, la que evaluo LLaMEA)",
                 "",
                 "````text",
                 turn["response"],
                 "````",
                 "",
             ]
+            if reasoning:
+                lines += [
+                    "### Razonamiento (`reasoning_content`)",
+                    "",
+                    "````text",
+                    reasoning,
+                    "````",
+                    "",
+                ]
+            if raw_response and raw_response != turn["response"]:
+                lines += [
+                    "### Respuesta cruda del servidor",
+                    "",
+                    "````text",
+                    raw_response,
+                    "````",
+                    "",
+                ]
         with open(os.path.join(directory, f"gen-{generation:04d}.md"), "w") as file:
             file.write("\n".join(lines))
 
     with open(os.path.join(directory, "index.jsonl"), "w") as file:
         for record in records:
-            file.write(json.dumps(record) + "\n")
+            file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
     with open(os.path.join(directory, "README.md"), "w") as file:
         file.write(
             "# Prompts y respuestas, ordenados por generacion\n\n"
             "Generado por `mohh.llamea.reporting.write_prompt_log` a partir de\n"
-            "`conversationlog.jsonl` (peticiones y respuestas completas) y\n"
-            "`log.jsonl` (generacion de cada intento).\n\n"
-            "- `gen-NNNN.md`: un archivo por generacion con el prompt completo\n"
-            "  (rol + tarea + ejemplo + feedback) y la respuesta cruda del modelo.\n"
+            "`conversationlog.jsonl`, `log.jsonl` y `llm_requests.jsonl`.\n\n"
+            "- `gen-NNNN.md`: un archivo por generacion con el prompt exacto\n"
+            "  enviado, la respuesta limpia que evaluo LLaMEA, y cuando existen\n"
+            "  la respuesta cruda y el razonamiento (`reasoning_content`).\n"
             "- `index.jsonl`: una linea por turno, con generacion, candidato,\n"
-            "  tamano de prompt/respuesta, tokens de entrada/salida/total y\n"
+            "  modelo, parametros de muestreo, tamano de prompt/respuesta,\n"
+            "  tokens (entrada/salida/razonamiento/total), `finish_reason` y\n"
             "  latencia de inferencia.\n"
+            "- `../llm_requests.jsonl`: registro crudo por peticion (incluye\n"
+            "  peticiones fallidas, mensajes completos, usage y errores).\n"
         )
     return records
 
@@ -604,6 +688,12 @@ def write_markdown(rows, path, top_k=10, title="Busqueda LLaMEA", tokens=None,
             )
         if frame_info.get("test_fitness") is not None:
             lines.append(f"- HV de test (mismo criterio): {_fmt(frame_info['test_fitness'])}")
+            test_failures = frame_info.get("test_failures") or []
+            if test_failures:
+                lines.append(
+                    f"- Evaluaciones de test fallidas (contadas como HV 0): "
+                    f"{len(test_failures)}"
+                )
             test_reference = frame_info.get("test_reference_hv") or {}
             if test_reference:
                 baseline = ", ".join(
@@ -611,6 +701,35 @@ def write_markdown(rows, path, top_k=10, title="Busqueda LLaMEA", tokens=None,
                     sorted(test_reference.items(), key=lambda kv: -kv[1])
                 )
                 lines.append(f"- Linea base en test, mismo marco: {baseline}")
+            test_comparison = frame_info.get("test_comparison") or []
+            if test_comparison:
+                lines += ["", "  Comparacion pareada en test (candidato vs clasico):",
+                          "",
+                          "  | vs | Pares | Gana | Pierde | Dif. media [IC95] | "
+                          "dz | p | p Holm |",
+                          "  |---|---:|---:|---:|---:|---:|---:|---:|"]
+                for row in test_comparison:
+                    low, high = row.get("ci95_low"), row.get("ci95_high")
+                    ci = ("-" if low is None or high is None
+                          else f"[{low:+.6f}, {high:+.6f}]")
+                    dz = "-" if row.get("cohens_dz") is None else f"{row['cohens_dz']:.2f}"
+                    p = "-" if row.get("wilcoxon_p") is None else f"{row['wilcoxon_p']:.4f}"
+                    p_holm = ("-" if row.get("wilcoxon_p_holm") is None
+                              else f"{row['wilcoxon_p_holm']:.4f}")
+                    difference = row.get("mean_difference")
+                    diff_text = ("-" if difference is None
+                                 else f"{difference:+.6f}")
+                    lines.append(
+                        f"  | {row['baseline']} | {row['pairs']} | {row['wins']} | "
+                        f"{row['losses']} | {diff_text} {ci} | "
+                        f"{dz} | {p} | {p_holm} |"
+                    )
+                lines.append("")
+                lines.append(
+                    "  La diferencia y el IC95 se calculan sobre pares con ambos "
+                    "valores; un fallo del candidato se cuenta como HV 0. `p Holm` "
+                    "controla la familia de comparaciones contra todos los clasicos."
+                )
         lines.append("")
 
         # Trazabilidad del proceso: semillas, diversidad y parada.
@@ -812,7 +931,7 @@ def write_seeds(path, seeds):
 
 
 def write_report(log_dir, title="Busqueda LLaMEA", top_k=10, frame_info=None,
-                 cost=None, usage_history=None):
+                 cost=None, usage_history=None, request_log=None):
     """Genera los artefactos legibles de la corrida en `log_dir`.
 
     ``evolution.csv``, ``report.md``, ``evolution.png``, ``generations.csv`` y
@@ -824,6 +943,8 @@ def write_report(log_dir, title="Busqueda LLaMEA", top_k=10, frame_info=None,
         para la seccion de tokens, tiempo de GPU y energia.
     @param usage_history: historial por peticion (`VLLM_LLM.usage_history`) para
         anotar tokens y latencia en `prompts/index.jsonl`.
+    @param request_log: ruta de `llm_requests.jsonl` con prompts/respuestas
+        crudas y parametros efectivos. Si falta, se busca junto al log.
     @return diccionario de rutas escritas (vacio si no hay log).
     """
     rows = load_evolution(log_dir)
@@ -843,7 +964,8 @@ def write_report(log_dir, title="Busqueda LLaMEA", top_k=10, frame_info=None,
     if generations:
         paths["generations_csv"] = generations
 
-    prompts = write_prompt_log(log_dir, usage_history=usage_history)
+    prompts = write_prompt_log(log_dir, usage_history=usage_history,
+                               request_log=request_log)
     if prompts:
         paths["prompts"] = os.path.join(log_dir, "prompts")
 

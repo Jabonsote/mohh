@@ -37,6 +37,14 @@ HV ≈ 0, lo que exagera las diferencias relativas.
 Los clásicos pueden correrse también en su versión de **dos hijos**
 (`classic2:ox` → `(ox(x, y), ox(y, x))`) para cerrar el fallo 5.
 
+La estadística reporta IC95 de la diferencia media y ajusta con Holm la familia
+de comparaciones de cada tabla. Un fallo del operador en una instancia cuenta
+como HV 0 (`--fail-policy zero`, default) en vez de eliminar el par; `exclude` y
+`abort` están disponibles. Para la tabla final, `--ge-protocol` activa el
+protocolo completo de `experiment.py` (MOEA/D + NSGA-II + SMS-EMOA, con y sin
+`Swap_Mutation`, 300/105 y 11 repeticiones), todo bajo el mismo marco
+consolidado.
+
 Salida en `results/evaluations/<nombre>/` (`report.md`, `evaluation.json`,
 `fronts.npz`). Reproducir:
 
@@ -50,6 +58,9 @@ python3 scripts/compare_operators.py \
   --operator cx2=classic2:cx --operator erx2=classic2:erx \
   --split test --instances 8 --repeats 11 --save-fronts \
   --name b100_ge_vs_clasicos_11x
+
+# Tabla final con el protocolo GE completo (caro):
+python3 scripts/compare_operators.py ... --ge-protocol
 ```
 
 ## 3. Resultados (11 repeticiones, 8 instancias de test, MOEA/D 30/30)
@@ -158,9 +169,10 @@ más a los clásicos (el margen de `feedback_b30` sobre PBX baja de +142% a +91%
 
 ## 5. Limitaciones que quedan
 
-1. **El fitness durante la búsqueda sigue con una semilla por instancia.** Esta
-   comparación mide 11 repeticiones, pero el bucle sigue rankeando candidatos con
-   una (`--eval-repeats` pendiente): promediar R repeticiones reduciría el ruido
+1. **El fitness durante la búsqueda sigue con una semilla por instancia.** La
+   evaluación final (`--eval-repeats`, 11 por defecto) y `compare_operators.py`
+   ya usan repeticiones pareadas, pero el bucle sigue rankeando candidatos con una
+   semilla: promediar R repeticiones *dentro de la búsqueda* reduciría el ruido
    del ranking a costa de R× el MOEA interno.
 2. **Selección post-hoc.** En esta corrida el argmax del marco final y el mejor
    en línea son el mismo operador *en comportamiento* (los dos archivos solo

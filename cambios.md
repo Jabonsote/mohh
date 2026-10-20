@@ -27,6 +27,7 @@ Puntos clave del diseño:
 |---|---|
 | `operator.py` | `LLMOperator`: un `Crossover` de pymoo que evalúa el código del LLM. Espeja la semántica de `HH_Operator` (mismo shape de entrada/salida y segundo descendiente `child[::-1]`), pero recibe un namespace explícito. **Es el único puente con el MOEA.** |
 | `fitness.py` | `OperatorEvaluator` (fitness picklable) + `build_evaluator()` + `compile_operator()` + `init_params()`. Reutiliza `MOSolver`, `Instance` y `compute_hypervolume` de MOHH-R. Robusto ante código del LLM: namespace de ejecución con `np`/`numpy` y nombres de `typing`; captura cualquier excepción por instancia (score 0 + feedback); `_call_with_timeout` (SIGALRM) acota validación (10 s) e instancia (120 s) contra `while True`; `__getstate__` lo hace picklable para `--max-workers > 1`. |
+| `statistics.py` | Estadística pareada compartida por la evaluación final y `compare_operators.py`: diferencias pareadas, Wilcoxon de dos colas, IC95, `dz`, diferencia mínima detectable y ajuste de Holm. |
 | `vllm.py` | `VLLM_LLM` (conector OpenAI-compatible → servidor vLLM local), `ensure_model()` (verifica en cache HF y descarga si falta), `model_is_available()`, `wait_for_server()` (espera a que el servidor arranque en SLURM). `extract_algorithm_code` exige `def crossover` y lanza `NoCodeException` si falta (evita un `IndexError` interno de LLaMEA). |
 | `prompts.py` | `ROLE_PROMPT`, `make_task_prompt(solver)` (contrato `crossover(x, y)` para mQAP + conocimiento de dominio de familias de operadores, adaptado al MOEA interno: MOEA/D, NSGA-II o SMS-EMOA), `EXAMPLE_PROMPT` (OX), `OUTPUT_FORMAT_PROMPT` y `make_operators()` (`refine`/`redesign`). Diseño basado en evidencia: ver `docs/llamea-prompts/`. |
 | `export_prompts.py` | Exporta los prompts finales a Markdown (`python -m mohh.llamea.export_prompts docs/llamea-prompts/prompt-final.md`). |
@@ -489,8 +490,16 @@ candidatos. `scripts/compare_operators.py` implementa la comparación válida:
   dos hijos contra clásicos de un solo hijo (que reciben `child[::-1]` como
   segundo descendiente) no es justo.
 - **Estadística**: N repeticiones (11 por defecto), victorias/derrotas,
-  diferencia media, `dz` y Wilcoxon pareado (con 11 pares el p mínimo alcanzable
-  es 0.0010; con 5 clásicos, leerlo con Bonferroni).
+  diferencia media, `dz`, IC95 de la diferencia y Wilcoxon pareado. Las
+  comparaciones de cada tabla se ajustan con Holm (control de FWER), no con
+  Bonferroni manual; con 11 pares el p mínimo alcanzable es 0.0010.
+- **Fallos**: un operador que lanza una excepción en una instancia se cuenta
+  como HV 0 (`--fail-policy zero`, default) y se reporta. Descartar el par haría
+  que un operador roto pareciera mejor; `exclude` y `abort` quedan disponibles.
+- **Protocolo GE**: `--solver` acepta una lista y `--mutation-both` evalúa con y
+  sin `Swap_Mutation`; `--ge-protocol` activa el protocolo completo (3 solvers ×
+  2 mutaciones × 300/105), compartiendo un solo marco consolidado. El default
+  corto (MOEAD, 30/30, sin mutación) replica el bucle de búsqueda.
 - **Reutilización**: `--save-fronts` / `--load-fronts` guardan y recargan los
   frentes, así se agregan operadores a una comparación ya corrida sin repetir el
   MOEA.
@@ -633,9 +642,15 @@ y el archivo siguen activos. Ver `tests/test_llamea_diversity.py`.
 ### 9.4 Evaluación final repetida
 
 `--eval-repeats R` repite la evaluación en test con semillas distintas y
-reporta media, desviación, mínimo y máximo. Con `R > 1` el marco se fija al
-panel de referencia (`stationary`) para que las repeticiones sean comparables;
-con `R = 1` se conserva el marco GE de siempre.
+reporta media, desviación, mínimo y máximo. El default es `R = 11`, como
+`N_EXPERIMENTS` de la evaluación GE. El marco se fija **siempre** al panel de
+referencia (`stationary`): un marco que incluye al propio candidato lo favorece
+y no es un metro fijo. En cada repetición se evalúan también los clásicos del
+panel con la misma población inicial; `llamea_best_info.json` guarda
+`test_reference_hv_repeats` y `test_comparison` (Wilcoxon pareado, IC95, `dz` y
+Holm), y `report.md` los muestra. La comparación con el marco GE consolidado de
+todas las configuraciones sigue siendo `scripts/compare_operators.py`
+(`COMPARE=1` en el job único).
 
 ### 9.5 Documentación del cluster
 
@@ -743,3 +758,110 @@ La implementación no toca `src/mohh/{generation,evaluation,core}` ni el paquete
 `BUDGET = 1000*2 + 5 = 2005` para que `GENERATIONS=1000` sean 1000 iteraciones.
 `COMBINE=0` deja la ablación refine/redesign original; `BEHAVIORAL_PARENTS=0`
 aísla la validación de la familia objetivo.
+
+---
+
+## 12. Trazabilidad de prompt/respuesta y modo pensamiento (2026-10)
+
+### 12.1 Registro por petición
+
+`VLLM_LLM` escribe `results/<categoria>/<nombre>/llm_requests.jsonl`, una línea
+por petición con:
+
+- el prompt **exacto enviado** (incluida la memoria de mecanismos), no solo el
+  que LLaMEA conserva en `conversationlog.jsonl`;
+- los parámetros efectivos de muestreo (`temperature`, `max_tokens`, `top_p`,
+  `top_k`, `repetition_penalty`, `thinking` y `extra_body`);
+- la respuesta cruda, la respuesta limpia que evalúa LLaMEA y
+  `reasoning_content` cuando el servidor lo devuelve;
+- `usage` (prompt/completion/total, razonamiento, tokens cacheados),
+  `finish_reason`, id de respuesta, modelo, latencia y error si falló.
+
+`tokens.json` y `metrics.json` guardan la ruta y el historial por petición.
+`prompts/gen-NNNN.md` ahora muestra el prompt enviado, la respuesta limpia, el
+razonamiento y la respuesta cruda; `prompts/index.jsonl` añade modelo,
+parámetros, `finish_reason`, conteos de razonamiento y tokens cacheados.
+
+### 12.2 Modo pensamiento
+
+`--thinking auto|on|off` (o `THINKING=...`) controla
+`chat_template_kwargs.enable_thinking` en servidores que lo soportan (Qwen3 y
+similares). `auto` no toca el template para no romper Ollama/llama.cpp. Con
+`on`, subir `MAX_TOKENS`: el razonamiento consume presupuesto y, si el modelo
+deja `content` vacío, se usa `reasoning_content` solo como fallback de parseo.
+El parser reconoce `<think>`, `<thinking>` y `<reasoning>`.
+
+### 12.3 Cota del HV en el marco fijo
+
+En el marco `stationary` (panel fijo) un candidato puede superar el mejor punto
+del panel. Sin recorte, sus coordenadas normalizadas negativas inflaban el HV
+por encima del máximo teórico `1.1**K` (se observaron valores ~5.9 y ~103 en
+instancias de 5 objetivos). `clip_to_reference_box` recorta a `[0, 1.1]` antes
+de la integral; la mejora se cuenta como el volumen completo hasta el nadir y
+los puntos peores que el nadir aportan 0. En el marco GE el candidato ya está
+incluido, así que el cambio no altera los valores normales.
+
+### 12.4 Modelo grande para H100
+
+Se agrega `PROFILE=coder-next-awq`:
+`qtum/Qwen3-Coder-Next-AWQ` (80B/3B activos, W4A16 compressed-tensors, ~42 GB).
+Reporta LiveCodeBench v6 58.9 y EvalPlus 86.6, y deja ~30 GB de KV en una H100
+80 GB. No cabe en A100 40 GB. La cuantización sube la perplejidad de wikitext-2
+de 7.74 a 12.53: es un candidato a validar en la tarea, no el nuevo default.
+
+---
+
+## 13. GLM cuantizado: local y cluster (2026-10)
+
+### 13.1 GPUs disponibles
+
+El cluster (`cluster_ixachi/docs/README.md`) tiene:
+
+| Partición | GPU | VRAM | Uso |
+|---|---|---:|---|
+| `gpu` | 1× H100 | 80 GB | modelo grande, fp16/FP8/AWQ |
+| `gpu` | 1× A100 | 40 GB | 30B AWQ o 14B fp16 |
+| `gpu` | 2× A10 | 24 GB | modelos ≤14B AWQ u 8B fp16 |
+
+La máquina local de pruebas es una **RTX 3060 de 12 GB**. Por eso se eligen dos
+modelos distintos, no el mismo quant en dos máquinas.
+
+### 13.2 Pequeño local: `GLM-Z1-9B-0414` Q4_K_M
+
+- Repo GGUF: `unsloth/GLM-Z1-9B-0414-GGUF`, archivo
+  `GLM-Z1-9B-0414-Q4_K_M.gguf`, **6.17 GB**, licencia MIT, 32k de contexto.
+- Es un 9B denso de razonamiento entrenado con RL en matemáticas, código y
+  lógica. La card oficial lo describe como líder entre los open-source de su
+  tamaño, pero no publica una tabla numérica en texto; se usa para *smoke tests*
+  y para validar el pipeline de razonamiento, no como evidencia del cluster.
+- Compatible con llama.cpp (`llama-server -m ... -c 8192 -ngl 99`) y con Ollama
+  (`ollama pull sllm/glm-z1-9b`, ~8.6 GB). El Q4_K_M deja más VRAM para KV.
+- Con 12 GB entra completo en GPU; el contexto recomendado es 8192, no 32k.
+
+### 13.3 Grande cluster: `GLM-4.7-Flash-AWQ`
+
+- Modelo base: `zai-org/GLM-4.7-Flash` (30B totales / 3B activos, MIT,
+  `glm4_moe_lite`). AWQ: `QuantTrio/GLM-4.7-Flash-AWQ`, **~19.8 GB**, W4A16.
+- Benchmarks oficiales: AIME25 91.6, GPQA 75.2, LiveCodeBench v6 64.0,
+  SWE-bench Verified 59.2, τ²-Bench 79.5. Es la mejor combinación de
+  razonamiento/matemáticas/código que cabe en **una A100 40 GB** o **una H100
+  80 GB**.
+- Perfil nuevo `glm47-flash-awq` (`CONSTRAINT=A100|H100`, 16k, 0.92 de VRAM).
+  Añade `--trust-remote-code --reasoning-parser glm45` y exporta las variables
+  que pide la card de QuantTrio (`VLLM_USE_DEEP_GEMM=0`,
+  `VLLM_USE_FLASHINFER_MOE_FP16=1`, `VLLM_USE_FLASHINFER_SAMPLER=0`).
+- Requiere vLLM main/nightly: la card del AWQ se probó con
+  `vllm==0.14.0rc2`. Si el `.conda-env` del cluster es viejo, actualizarlo en el
+  login antes de lanzar; el job GPU no tiene internet.
+- Para llama.cpp existe el mismo modelo en GGUF
+  (`unsloth/GLM-4.7-Flash-GGUF`, Q4_K_M ~18.3 GB), pero en el cluster se usa
+  vLLM+AWQ. En A10 24 GB no se recomienda: los ~20 GB de pesos dejan poco KV.
+- Alternativas descartadas para una sola GPU: `GLM-4.7` completo
+  (358B/32B, ~717 GB bf16) y `GLM-5.3-Flash` (~328 GB bf16).
+
+### 13.4 Pruebas
+
+`tests/test_slurm.py` verifica que el perfil GLM existe, que el catálogo lo
+imprime y que `VLLM_ARGS` incluye `--reasoning-parser glm45`. La descarga local
+del Q4_K_M se valida con `llama-server` y una petición corta antes de usarlo en
+una búsqueda.

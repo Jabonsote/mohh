@@ -260,6 +260,22 @@ python -m mohh.llamea.run \
     --experiment-name qwen25coder7b_moead_b1000
 ```
 
+For a local model with explicit reasoning, the 12 GB GPU option is
+`GLM-Z1-9B-0414` Q4_K_M (~6.2 GB). With llama.cpp:
+
+```bash
+hf download unsloth/GLM-Z1-9B-0414-GGUF GLM-Z1-9B-0414-Q4_K_M.gguf \
+  --local-dir "$HOME/models/glm-z1-9b"
+llama-server -m "$HOME/models/glm-z1-9b/GLM-Z1-9B-0414-Q4_K_M.gguf" \
+  -c 8192 -ngl 99 --port 8003
+MODEL=glm-z1-9b BASE_URL=http://127.0.0.1:8003/v1 \
+  NO_DOWNLOAD=1 BUDGET=30 NAME=glm_z1_9b_local ./scripts/llamea_search.sh
+```
+
+The request log (`llm_requests.jsonl`) keeps the prompt, raw response,
+`reasoning_content`, sampling parameters, token usage and latency, so the
+thinking is auditable even when the final code is extracted from the response.
+
 Defaults and the flags that matter:
 
 | Flag | Meaning | Default |
@@ -273,6 +289,7 @@ Defaults and the flags that matter:
 | `--mo-generations` / `--mo-population-size` | inner MOEA budget | `30` / `30` |
 | `--repeat-penalty F` | diversity pressure: ranking score is multiplied by `F` when the code was already evaluated (`1.0` disables) | `0.5` |
 | `--operator-memory N` | inject the last `N` mechanism descriptions into the prompt | `0` (CLI), `12` (cluster job) |
+| `--thinking` | `auto` leaves the server template untouched; `on`/`off` sets `chat_template_kwargs.enable_thinking` (Qwen3 and similar) and logs `reasoning_content` | `auto` |
 | `--no-diversity-feedback` | stop adding the behavioral diagnosis to the prompt (measurement/logging continue) | feedback on |
 | `--patience N` | early stop after `N` evaluations without improving the best HV (`0` = off) | `0` |
 | `--parent-selection` | LLaMEA parent selection: `random`, `roulette`, `tournament` | `tournament` |
@@ -281,7 +298,7 @@ Defaults and the flags that matter:
 | `--niching` | LLaMEA diversity archive: `none`, `sharing`, `clearing`, `novelty`, `map_elites` | `none` |
 | `--stall-timeout S` | watchdog: abort and log if no new generation in `S` seconds | `0` (off) |
 | `--eval-test` | evaluate the best operator on the held-out test set | off |
-| `--eval-repeats R` | repeat the final test evaluation `R` times (reports mean/sd) | `1` |
+| `--eval-repeats R` | repeat the final test evaluation `R` times (reports mean/sd and a paired comparison against every reference classic; frame fixed to the reference panel) | `11` |
 | `--mutation` | add `Swap_Mutation` to the inner MOEA | off |
 | `--dry-run` | validate server + config, write them, exit without spending GPU | off |
 | `--stationary-frame` | normalize with the reference panel only (HV fixed); default is the GE frame | off |
@@ -360,7 +377,7 @@ search.
 | `COMBINE` | `1` | Own behavioral two-parent recombination (see below) |
 | `BEHAVIORAL_PARENTS` / `NOVELTY_WEIGHT` | `1` / `0.5` | Focal parent chosen by HV + behavioral novelty |
 | `TARGET_PENALTY` / `REQUIRE_TARGET_FAMILY` | `1.0` / `0` | Validate child against target family; `1.0` is feedback-only |
-| `PROFILE` | `big-quant` (Qwen2.5-Coder-32B-AWQ) | Proven fallback; on A100/H100 prefer `coder30b-awq` / `coder30b-fp8` |
+| `PROFILE` | `big-quant` (Qwen2.5-Coder-32B-AWQ) | Proven fallback; on A100/H100 prefer `glm47-flash-awq` for reasoning/math/code or `coder30b-awq` / `coder30b-fp8`; `coder-next-awq` for the 80B/3B on H100 |
 | `CPUS` / `MEM` | `16` / `64G` | GPU-bound job; enough for vLLM and the sequential MOEA |
 | `TEMPERATURE` / `TOP_P` / `TOP_K` | `0.7` / `0.8` / `20` | Exploration without chaotic sampling |
 | `SAMPLING_REPETITION_PENALTY` | `1.05` | Mild anti-anchoring |
@@ -401,6 +418,12 @@ For a 1000-generation run with the final evidence, use one of:
 # A100 40 GB
 PROFILE=coder30b-awq GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
 
+# A100 40 GB / H100 80 GB: GLM-4.7-Flash, reasoning + math + code
+PROFILE=glm47-flash-awq GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
+
+# H100 80 GB: the larger 80B/3B coder
+PROFILE=coder-next-awq GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
+
 # H100 80 GB
 PROFILE=coder30b-fp8 GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
 
@@ -416,7 +439,8 @@ available as overrides, but are not needed.
 
 `slurm/llamea-gpu-profile.sh` picks the model and, for some profiles, its vLLM
 arguments (`coder30b-awq` forces `awq_marlin`; `coder30b-fp8` uses
-`--kv-cache-dtype fp8`). Override with
+`--kv-cache-dtype fp8`; `glm47-flash-awq` adds
+`--reasoning-parser glm45`). Override with
 `MODEL=...`, `CONSTRAINT=...`, `MAX_MODEL_LEN=...`, `GPU_MEM_UTIL=...`,
 `VLLM_ARGS=...`; `PROFILE=list` prints the catalog.
 
@@ -425,6 +449,8 @@ arguments (`coder30b-awq` forces `awq_marlin`; `coder30b-fp8` uses
 | `big-quant` (default) | `Qwen/Qwen2.5-Coder-32B-Instruct-AWQ` | ~19–21 GB | A100 40 GB, H100 80 GB |
 | `coder30b-awq` | `QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ` | ~18 GB | A100 40 GB, H100 80 GB |
 | `coder30b-fp8` | `Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8` | ~31 GB | H100 80 GB |
+| `glm47-flash-awq` | `QuantTrio/GLM-4.7-Flash-AWQ` | ~20 GB | A100 40 GB, H100 80 GB (30B/3B; vLLM main) |
+| `coder-next-awq` | `qtum/Qwen3-Coder-Next-AWQ` | ~42 GB | H100 80 GB (80B/3B; ~30 GB KV) |
 | `coder30b-awq-a10` | `QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ` | ~18 GB | A10 24 GB, 8k context |
 | `h100-fp16` | `Qwen/Qwen2.5-Coder-32B-Instruct` | ~65 GB | H100 80 GB |
 | `a100-fp16` | `Qwen/Qwen2.5-Coder-14B-Instruct` | ~29 GB | A100 40 GB |
@@ -436,14 +462,28 @@ Evidence for the choice (HumanEval+/BigCodeBench and quantization studies) and
 the per-GPU recommendation are in [`modelos.md`](modelos.md) §1. In short:
 Qwen3-Coder-30B-A3B has 32B-class HumanEval+ (89.0) with only 3.3B active
 parameters, so it is much faster for 1000-generation runs; `big-quant` remains
-the proven fallback. `coder30b-awq` is a community AWQ — verify it before a long
-run and fall back to `big-quant` if vLLM fails to load it.
+the proven fallback. `glm47-flash-awq` is the reasoning/math/code option:
+GLM-4.7-Flash reports AIME25 91.6, GPQA 75.2, LiveCodeBench v6 64.0 and
+SWE-bench Verified 59.2 with only 3B active parameters. It needs a recent vLLM
+(`glm4_moe_lite` support; the AWQ card was tested with `vllm==0.14.0rc2`) and
+the profile passes `--reasoning-parser glm45`, so the thinking is stored in
+`llm_requests.jsonl`. For the local RTX 3060 12 GB, use
+`unsloth/GLM-Z1-9B-0414-GGUF` Q4_K_M (~6.2 GB) with llama.cpp/Ollama; it is a
+9B reasoning model, not a replacement for the cluster model.
+`coder30b-awq` is a community AWQ — verify it before a long run and fall back to
+`big-quant` if vLLM fails to load it. `coder-next-awq` is
+the larger 80B/3B option (LiveCodeBench v6 58.9, EvalPlus 86.6): its W4A16 AWQ
+is ~42 GB and only fits an H100 80 GB; it is a candidate to test, not the
+default, because quantization raises its wikitext-2 perplexity from 7.74 to
+12.53.
 
 Examples:
 
 ```bash
 PROFILE=coder30b-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+PROFILE=glm47-flash-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh # A100/H100, reasoning
 PROFILE=coder30b-fp8 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh  # H100
+PROFILE=coder-next-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh # H100, 80B/3B
 PROFILE=coder8b GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh       # A10
 PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh                # sanity
 PROFILE=list bash slurm/llamea-all.sh                                       # catalog
@@ -474,9 +514,13 @@ Extra environment knobs for the search jobs: `SOLVER`, `MO_GENERATIONS`,
 `TOP_K` (20), `SAMPLING_REPETITION_PENALTY` (1.05), `MAX_TOKENS` (4096),
 `OPERATOR_MEMORY` (12), `MUTATION=1`, `COMMA=1`, `REFINE_ONLY=1`,
 `NO_SAVE_FRONTS=1`, `REPEAT_PENALTY`, `PATIENCE`, `PARENT_SELECTION`,
-`NICHING`, `EVAL_REPEATS`, `CATEGORY`, `EXPERIMENT_NAME`, `SEED`. Add
+`NICHING`, `EVAL_REPEATS` (11), `CATEGORY`, `EXPERIMENT_NAME`, `SEED`. Add
 `COMPARE=1` to run the paired comparison against the classics in the same job
-(`COMPARE_REPEATS=11`, `COMPARE_SPLIT=test`).
+(`COMPARE_REPEATS=11`, `COMPARE_SPLIT=test`). The comparison includes
+one-child and two-child classic variants and treats a failed operator/instance
+as HV 0; use `COMPARE_FAIL_POLICY=exclude|abort` to change that. For the full GE
+protocol (3 solvers × 2 mutation modes × 300/105), set
+`COMPARE_GE_PROTOCOL=1`; this is expensive and intended for the final table.
 
 `--operator-memory N` appends the last `N` generated mechanisms to the prompt
 and asks the model not to repeat them; `--repeat-penalty` still penalizes
@@ -495,12 +539,34 @@ python scripts/compare_operators.py \
     --operator discovered=results/examples/llamea_found_operators/qwen25coder7b_moead_b100_ge.py \
     --operator ox=classic:ox --operator pbx=classic:pbx --operator pmx=classic:pmx \
     --operator cx=classic:cx --operator erx=classic:erx \
+    --operator ox2=classic2:ox --operator pbx2=classic2:pbx \
+    --operator pmx2=classic2:pmx --operator cx2=classic2:cx \
+    --operator erx2=classic2:erx \
     --split test --repeats 11 --name b100_vs_clasicos --save-fronts
 ```
 
+Use `--ge-protocol` to evaluate the same comparison with the GE evaluation
+protocol (MOEA/D, NSGA-II and SMS-EMOA; with and without `Swap_Mutation`;
+300 generations and population 105). The short default (one solver, 30/30, no
+mutation) is cheaper and mirrors the search loop; the conclusion should be
+confirmed with `--ge-protocol` for the final table.
+
 Writes `results/evaluations/<name>/report.md` and `evaluation.json` with the
-paired Wilcoxon test, effect size (`dz`), **rank stability** across repetitions
+paired Wilcoxon test, effect size (`dz`), 95% CI of the mean difference, Holm
+adjustment for the family of comparisons, **rank stability** across repetitions
 and the **minimum detectable difference** (how much of the ranking is noise).
+A failed operator/instance is counted as HV 0 by default (`--fail-policy
+zero`) instead of dropping the pair; `exclude` and `abort` are also available.
+`--save-fronts` / `--load-fronts` reuse the inner-MOEA fronts when adding
+operators or reanalyzing.
+
+> The shared frame fixes `vmin`/`vmax`. If an operator is better than the best
+> point of the reference panel, its normalized coordinates are clipped to `0`
+> before the HV integral; otherwise a fixed reference box would let an
+> arbitrarily good point produce an HV above the theoretical maximum
+> `1.1**K`. Clipping only affects points outside the reference box and keeps
+> the comparison bounded. In the GE frame the candidate already belongs to the
+> frame, so normal values are unchanged.
 
 ### D. Replicate the search (not just the operator)
 
@@ -549,7 +615,8 @@ Everything lands under `results/<category>/<name>/`:
 | `llamea_best_operator.py`, `llamea_best_info.json` | best operator and its scores |
 | `generation_summary.jsonl` | per generation: seed, tokens, time, validity, best-so-far |
 | `individuals.jsonl` | one record per candidate (name, fitness, code sha1, seed) |
-| `prompts/` | the exact prompt of each generation + per-turn token counts |
+| `prompts/` | exact prompt sent + clean response + raw response/reasoning + per-turn tokens, sampling params and `finish_reason` |
+| `llm_requests.jsonl` | one raw JSONL record per request: full messages, effective sampling params, raw response, `reasoning_content`, usage and errors |
 | `fronts/` | raw Pareto fronts per candidate (evidence; `--no-save-fronts` to skip) |
 | `diversity.json`, `diversity.jsonl` | behavioral fingerprint, family, novelty, MAP-Elites cell and coverage per operator |
 | `checkpoint.json`, `best_so_far.py` | durable state — a crash never loses the best operator |
