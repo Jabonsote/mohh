@@ -33,6 +33,8 @@ El prompt del problema se parametriza con el MOEA interno
 operador se evaluara (los mismos MOEAD/NSGAII/SMSEMOA de MOHH-R).
 """
 
+from llamea import Operator
+
 # --------------------------------------------------------------------------- #
 # Rol (LLaMEA: role prompt; ReEvo: system prompt)
 # --------------------------------------------------------------------------- #
@@ -251,20 +253,87 @@ OPERATOR_REDESIGN = (
     "that already ranked poorly."
 )
 
+#: Familias que puede pedir el operador de combinacion conductual. `mixed` y
+#: `copy` no son objetivos utiles: `copy` es un fallo y `mixed` no describe una
+#: direccion concreta.
+COMBINE_TARGET_FAMILIES = ("order", "position", "cycle", "adjacency",
+                           "exploratory")
 
-def make_operators():
+OPERATOR_COMBINE_TEMPLATE = """Combine the TWO selected crossover operators into \
+ONE new crossover operator. This is a semantic recombination, not a syntactic \
+merge of the code: take the useful mechanism from each parent and design a child \
+that behaves better than either one on mQAP.
+
+The two parents were selected because their measured behaviors are different; \
+their descriptions and code are above. Do not merely refine or copy one parent: \
+the child must use the mechanism of BOTH parents.
+
+TARGET BEHAVIOR FAMILY: {target_family}.
+After the child is generated, its behavior is measured on fixed parent pairs and \
+classified into a behavioral family (order, position, cycle, adjacency, \
+exploratory, mixed, or copy). The recombination is considered successful only if \
+the observed family matches the target. Use the target as a design constraint:
+- order: preserve relative order (OX/OBX-style);
+- position: preserve absolute positions or mapped segments (PBX/PMX-style);
+- cycle: exchange complete permutation cycles (CX-style);
+- adjacency: preserve parent neighbours/edges (ERX-style);
+- exploratory: produce a child unlike both parents (high recombination, not a \
+small perturbation).
+If the feedback says the target family was missed, change the mechanism, not just \
+the syntax."""
+
+
+class TargetedCombineOperator(Operator):
+    """Operador LLaMEA de dos padres con una familia conductual objetivo.
+
+    Es una subclase de `llamea.Operator`, no una modificacion del paquete: LLaMEA
+    lo acepta igual (`prompt`, `name`, `weight`, `number_of_parents`, `id`,
+    `rewards`). `target_family` puede ser None: `BehavioralLLaMEA` elige en cada
+    generacion la familia menos representada del archivo conductual y la fija
+    antes de construir el prompt. El `__repr__` es lo que LLaMEA concatena.
+    """
+
+    def __init__(self, target_family=None, weight=0.30):
+        super().__init__(
+            prompt=OPERATOR_COMBINE_TEMPLATE,
+            name="combine",
+            weight=weight,
+            number_of_parents=2,
+        )
+        self.target_family = target_family
+        # Si no se fijo una familia concreta, BehavioralLLaMEA la recalcula en
+        # cada generacion (la menos representada). Si se fijo, es estatica.
+        self.dynamic_target = target_family is None
+
+    def __repr__(self):
+        target = self.target_family or "the least represented behavioral family"
+        return self.prompt.format(target_family=target)
+
+
+def make_operators(include_combine=False):
     """Lista de operadores LLaMEA (exploracion/explotacion) para la busqueda.
 
-    Devuelve dos operadores de un solo padre (compatibles con n_parents=1):
-    refinamiento (explotacion) y rediseno (exploracion). Se usan argumentos por
-    nombre porque `Operator` de LLaMEA 1.4.0 tiene firma
-    `(prompt, name, weight, number_of_parents)` y su `__repr__` devuelve `prompt`.
-    """
-    from llamea import Operator
+    Sin `include_combine` devuelve los dos operadores historicos de un solo
+    padre (compatibles con n_parents=1): refinamiento (explotacion) y rediseno
+    (exploracion).
 
-    return [
+    Con `include_combine=True` agrega un tercer operador de dos padres que pide
+    recombinar dos operadores conductualmente distintos y apunta a la familia
+    menos representada. Los pesos suman 1: 0.35 refine, 0.35 redesign y 0.30
+    combine; asi la extension no desplaza por completo la busqueda local.
+    """
+    operators = [
         Operator(prompt=OPERATOR_REFINE, name="refine", weight=0.5,
                  number_of_parents=1),
         Operator(prompt=OPERATOR_REDESIGN, name="redesign", weight=0.5,
                  number_of_parents=1),
+    ]
+    if not include_combine:
+        return operators
+    return [
+        Operator(prompt=OPERATOR_REFINE, name="refine", weight=0.35,
+                 number_of_parents=1),
+        Operator(prompt=OPERATOR_REDESIGN, name="redesign", weight=0.35,
+                 number_of_parents=1),
+        TargetedCombineOperator(weight=0.30),
     ]

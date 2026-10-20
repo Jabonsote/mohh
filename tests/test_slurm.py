@@ -394,6 +394,18 @@ def test_llamea_single_job_serves_and_searches_in_one_job():
     for flag in ("--max-num-seqs 4", "--enable-prefix-caching",
                  "--disable-log-requests"):
         assert flag in content
+    # Poblacion recomendada: 5 padres / 2 hijos y presupuesto derivado para
+    # que GENERATIONS=1000 sean 1000 iteraciones (no 1000 evaluaciones).
+    assert '--n-parents "$NPARENTS"' in content
+    assert '--n-offspring "$NOFFSPRING"' in content
+    assert 'NPARENTS="${NPARENTS:-5}"' in content
+    assert 'NOFFSPRING="${NOFFSPRING:-2}"' in content
+    assert 'BUDGET="${BUDGET:-$((GENERATIONS * NOFFSPRING + NPARENTS))}"' in content
+    # Combine conductual propio, con familia objetivo y validacion.
+    assert 'COMBINE="${COMBINE:-1}"' in content
+    assert "--combine" in content
+    assert "--target-penalty" in content
+    assert "--require-target-family" in content
     # Todo el pipeline en el mismo job: comparacion pareada opcional.
     assert "compare_operators.py" in content
     assert "classic:ox" in content

@@ -14,6 +14,11 @@ import pytest
 from llamea.solution import Solution
 
 from mohh.llamea import diversity
+from mohh.llamea.behavioral import (
+    least_represented_family,
+    select_behavioral_focal,
+    select_behavioral_partner,
+)
 from mohh.llamea.diversity import (
     BehaviorTracker,
     behavior_descriptor,
@@ -24,6 +29,7 @@ from mohh.llamea.diversity import (
     solution_distance,
 )
 from mohh.llamea.fitness import OperatorEvaluator, validate_operator
+from mohh.llamea.prompts import make_operators
 from mohh.llamea.reference import REFERENCE_OPERATORS
 
 
@@ -249,3 +255,104 @@ def test_repeated_code_does_not_retroactively_lower_the_archive_best(tmp_path):
     assert rows[0]["family"] == "order"
     assert rows[0]["fingerprint"]
     assert rows[1]["novelty"] == pytest.approx(0.0)
+
+
+# --------------------------------------------------------------------------- #
+# Extension propia: combine con seleccion conductual y familia objetivo
+# --------------------------------------------------------------------------- #
+
+def _solution(code, fingerprint, family, fitness, novelty=0.5):
+    solution = Solution(code=code, name=code, description=code, generation=1)
+    solution.fitness = fitness
+    solution.add_metadata("behavior_fingerprint", fingerprint.tolist())
+    solution.add_metadata("behavior_family", family)
+    solution.add_metadata("behavioral_novelty", novelty)
+    return solution
+
+
+def test_least_represented_family_is_deterministic_and_ignores_copy():
+    tracker = BehaviorTracker()
+    tracker.add("ox", _fingerprint("ox"), 0.8, generation=1)
+    tracker.add("pbx", _fingerprint("pbx"), 0.7, generation=2)
+
+    # order y position ya tienen representante; cycle es la primera familia
+    # sin cubrir en el orden canonico.
+    assert least_represented_family(tracker) == "cycle"
+
+
+def test_behavioral_partner_prefers_the_target_family_when_available():
+    focal = _solution("focal", _fingerprint("ox"), "order", 0.8)
+    near = _solution("near", _fingerprint("pbx"), "position", 0.7)
+    target = _solution("target", _fingerprint("cx"), "cycle", 0.6)
+
+    assert select_behavioral_partner(
+        focal, [near, target], target_family="cycle"
+    ) is target
+
+
+def test_behavioral_partner_maximizes_distance_without_a_target():
+    focal = _solution("focal", _fingerprint("ox"), "order", 0.8)
+    near = _solution("near", _fingerprint("pbx"), "position", 0.7)
+    far = _solution("far", _fingerprint("cx"), "cycle", 0.1)
+
+    # La distancia conductual manda: no gana el de mejor fitness.
+    assert select_behavioral_partner(focal, [near, far]) is far
+
+
+def test_behavioral_focal_tournament_rewards_novelty_at_equal_fitness():
+    old = _solution("old", _fingerprint("ox"), "order", 0.7, novelty=0.0)
+    novel = _solution("novel", _fingerprint("cx"), "cycle", 0.7, novelty=0.9)
+
+    assert select_behavioral_focal(
+        [old, novel], tournament_size=2, rng=__import__("random").Random(0)
+    ) is novel
+
+
+def test_make_operators_can_include_the_two_parent_combine():
+    operators = make_operators(include_combine=True)
+    assert len(operators) == 3
+    assert {op.name for op in operators} == {"refine", "redesign", "combine"}
+    combine = next(op for op in operators if op.name == "combine")
+    assert combine.number_of_parents == 2
+    assert "TARGET BEHAVIOR FAMILY" in repr(combine)
+
+
+def test_evaluator_records_a_target_family_hit():
+    fingerprint = _fingerprint("ox")
+    evaluator = OperatorEvaluator([], 1, 1, normalize=False)
+    evaluator._evaluate_code = lambda solution, compute_hv: {
+        "fronts": None, "per_instance": [1.0], "score": 1.0,
+        "error": None, "exception": None, "novelty": 0.5,
+        "fingerprint": fingerprint,
+    }
+    solution = Solution(code="target-hit", generation=1)
+    solution.add_metadata("target_family", "order")
+
+    evaluator(solution)
+
+    assert "Target family check: PASS" in solution.feedback
+    assert solution.get_metadata("target_family_hit") is True
+    assert evaluator.duplicate_stats()["target_family_hits"] == 1
+    assert evaluator.duplicate_stats()["target_family_attempts"] == 1
+
+
+def test_evaluator_flags_a_target_family_miss_and_can_penalize_ranking():
+    fingerprint = _fingerprint("ox")
+    evaluator = OperatorEvaluator([], 1, 1, normalize=False,
+                                  target_penalty=0.5)
+    evaluator._evaluate_code = lambda solution, compute_hv: {
+        "fronts": None, "per_instance": [1.0], "score": 1.0,
+        "error": None, "exception": None, "novelty": 0.5,
+        "fingerprint": fingerprint,
+    }
+    solution = Solution(code="target-miss", generation=1)
+    solution.add_metadata("target_family", "cycle")
+
+    evaluator(solution)
+
+    assert "Target family check: MISS" in solution.feedback
+    assert solution.get_metadata("target_family_hit") is False
+    # El HV crudo sigue en 1.0; solo el ranking que ve LLaMEA se penaliza.
+    assert evaluator._cache["target-miss"]["score"] == pytest.approx(1.0)
+    assert solution.fitness == pytest.approx(0.5)
+    assert evaluator.duplicate_stats()["target_family_hit_rate"] == 0.0

@@ -264,7 +264,11 @@ Defaults and the flags that matter:
 
 | Flag | Meaning | Default |
 |------|---------|---------|
-| `--budget N` | LLM generations (one prompt per generation) | `1000` |
+| `--budget N` | LLM candidate evaluations, not generations: `G ~= (B - parents) / offspring` | `1000` |
+| `--n-parents` / `--n-offspring` | population size / children per generation | `1` / `1` |
+| `--combine` | own behavioral two-parent recombination (requires `--n-parents >= 2`) | off |
+| `--target-penalty F` | ranking multiplier when the combine child misses its target family (`1.0` = feedback only) | `1.0` |
+| `--require-target-family` | reject a combine child before the inner MOEA if its family does not match | off |
 | `--solver MOEAD` | inner MOEA (`MOEAD`, `NSGAII`, `SMSEMOA`) | `MOEAD` |
 | `--mo-generations` / `--mo-population-size` | inner MOEA budget | `30` / `30` |
 | `--repeat-penalty F` | diversity pressure: ranking score is multiplied by `F` when the code was already evaluated (`1.0` disables) | `0.5` |
@@ -309,14 +313,17 @@ git pull origin cluster
 #    does not exist, downloads/verifies the model in the persistent root, and
 #    submits ONE GPU job that serves vLLM + runs the search. There is no
 #    separate model job and no second queue wait.
-PROFILE=big-quant BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+PROFILE=big-quant GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
 
 # Shorter alias with exactly the same behavior.
-BUDGET=1000 EVAL_TEST=1 bash slurm/llamea.sh
+GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea.sh
 
 # Full pipeline in the SAME job: search + test evaluation + paired comparison
 # of the best operator against OX/PBX/PMX/CX/ERX (11 repetitions, same frame).
-PROFILE=coder30b-awq BUDGET=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
+PROFILE=coder30b-awq GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
+
+# Ablation: original refine/redesign without the behavioral combine.
+COMBINE=0 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
 
 # Optional: wait on the login until the job ends and print the tail.
 WAIT=1 PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh
@@ -337,15 +344,22 @@ no internet. `DRY_RUN=1` prints the `sbatch` command without submitting.
 
 #### Defaults and sizing for a 1000-generation run
 
-`BUDGET` is already **1000**; you do not need to change the search loop. The
-single job requests one GPU and **16 CPUs** (not 24): inference is GPU-bound and
-the internal MOEA is sequential, so extra CPUs only make the queue wait longer.
+`GENERATIONS` is **1000**; the wrapper derives
+`BUDGET = GENERATIONS * NOFFSPRING + NPARENTS` (2005 with the defaults), so the
+job really runs 1000 LLaMEA iterations rather than 1000 candidate evaluations.
+The single job requests one GPU and **16 CPUs** (not 24): inference is GPU-bound
+and the internal MOEA is sequential, so extra CPUs only make the queue wait longer.
 It keeps 4 OpenMP threads for vLLM/tokenization and one BLAS thread for the
 search.
 
 | Parameter | Cluster default | Why |
 |---|---|---|
-| `BUDGET` | `1000` | Number of LLM generations/evaluations |
+| `GENERATIONS` | `1000` | Real LLaMEA iterations |
+| `NPARENTS` / `NOFFSPRING` | `5` / `2` | Population large enough for behavioral combine; two children per generation |
+| `BUDGET` | `2005` (derived) | Evaluation budget; `BUDGET` overrides the derivation |
+| `COMBINE` | `1` | Own behavioral two-parent recombination (see below) |
+| `BEHAVIORAL_PARENTS` / `NOVELTY_WEIGHT` | `1` / `0.5` | Focal parent chosen by HV + behavioral novelty |
+| `TARGET_PENALTY` / `REQUIRE_TARGET_FAMILY` | `1.0` / `0` | Validate child against target family; `1.0` is feedback-only |
 | `PROFILE` | `big-quant` (Qwen2.5-Coder-32B-AWQ) | Proven fallback; on A100/H100 prefer `coder30b-awq` / `coder30b-fp8` |
 | `CPUS` / `MEM` | `16` / `64G` | GPU-bound job; enough for vLLM and the sequential MOEA |
 | `TEMPERATURE` / `TOP_P` / `TOP_K` | `0.7` / `0.8` / `20` | Exploration without chaotic sampling |
@@ -357,6 +371,26 @@ search.
 | `PATIENCE` | `0` | Keep running all 1000 generations |
 | `EVAL_TEST` / `COMPARE` | off / off | Add them for the final held-out evaluation and paired baselines |
 
+#### Behavioral combine (own extension, not original LLaMEA)
+
+LLaMEA 1.4 lets an `Operator` declare two parents, but it selects both by
+fitness. That tends to combine similar individuals. When `COMBINE=1`, this
+repository adds three things without modifying LLaMEA or the GE core:
+
+1. the focal parent is chosen by a tournament on HV **plus behavioral
+   novelty**, not fitness alone;
+2. the second parent is the most behaviorally distant one (and, if available,
+   from the target family), so the pair actually carries different mechanisms;
+3. the child is measured on fixed parent pairs and checked against the target
+   family (the least-represented family). The result is logged as
+   `target_family_hit`; `TARGET_PENALTY=0.9` applies a ranking-only penalty and
+   `REQUIRE_TARGET_FAMILY=1` rejects a miss before spending the internal MOEA.
+
+The raw HV is never modified by this check. The target-family evidence is in
+`diversity.jsonl` and `diversity.json`; the aggregate hit rate is in
+`llamea_best_info.json`. Use `COMBINE=0` for the original refine/redesign
+baseline, or `BEHAVIORAL_PARENTS=0` to isolate the target-family check.
+
 The server adds `--max-num-seqs 4`, `--enable-prefix-caching` and
 `--disable-log-requests`: LLaMEA sends one request at a time, prompts share a
 long preamble, and the full prompts are already saved under `prompts/`.
@@ -365,13 +399,13 @@ For a 1000-generation run with the final evidence, use one of:
 
 ```bash
 # A100 40 GB
-PROFILE=coder30b-awq BUDGET=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
+PROFILE=coder30b-awq GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
 
 # H100 80 GB
-PROFILE=coder30b-fp8 BUDGET=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
+PROFILE=coder30b-fp8 GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
 
 # Fallback known-good on A100/H100
-PROFILE=big-quant BUDGET=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
+PROFILE=big-quant GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
 ```
 
 `COMPARE=1` runs 11 paired repetitions against OX/PBX/PMX/CX/ERX in the same
@@ -408,11 +442,11 @@ run and fall back to `big-quant` if vLLM fails to load it.
 Examples:
 
 ```bash
-PROFILE=coder30b-awq BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-PROFILE=coder30b-fp8 BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh  # H100
-PROFILE=coder8b BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh       # A10
-PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh           # sanity
-PROFILE=list bash slurm/llamea-all.sh                                  # catalog
+PROFILE=coder30b-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+PROFILE=coder30b-fp8 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh  # H100
+PROFILE=coder8b GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh       # A10
+PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh                # sanity
+PROFILE=list bash slurm/llamea-all.sh                                       # catalog
 ```
 
 #### Alternative (advanced): a persistent server + separate searches

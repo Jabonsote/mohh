@@ -42,8 +42,8 @@
 # Overrides: MODEL=..., CONSTRAINT=..., MAX_MODEL_LEN=..., GPU_MEM_UTIL=...,
 #            VLLM_ARGS=..., EXTRA_VLLM_ARGS=...
 # Ejemplos:
-#   PROFILE=coder30b-awq BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-#   PROFILE=coder30b-fp8 BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+#   PROFILE=coder30b-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+#   PROFILE=coder30b-fp8 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
 #   PROFILE=h100-fp16 bash slurm/llamea-all.sh
 #   MODEL=Qwen/Qwen2.5-Coder-14B-Instruct PROFILE=a100-fp16 bash slurm/llamea-all.sh
 

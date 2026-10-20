@@ -23,7 +23,19 @@
 #                          a100-fp16 | a10-quant | smoke
 #                          `PROFILE=list bash slurm/llamea-all.sh` imprime la tabla.
 #   MODEL                  override del modelo (id de HuggingFace)
-#   BUDGET (1000)          generaciones de la busqueda
+#   GENERATIONS (1000)     iteraciones reales de LLaMEA (presupuesto =
+#                          GENERATIONS*NOFFSPRING + NPARENTS)
+#   NPARENTS (5)           tamano de la poblacion de padres
+#   NOFFSPRING (2)         hijos/evaluaciones por generacion
+#   BUDGET                 override explicito del presupuesto en evaluaciones
+#                          (si se define, ignora GENERATIONS)
+#   COMBINE (1)            1 = incluir el combine conductual propio; 0 = solo
+#                          refine/redesign (comportamiento LLaMEA original)
+#   BEHAVIORAL_PARENTS (1) 0 = elegir el padre focal solo por fitness
+#   NOVELTY_WEIGHT (0.5)   peso de novedad en el torneo conductual
+#   TARGET_PENALTY (1.0)   castigo de ranking si el hijo no alcanza la familia
+#                          objetivo (1.0 = solo feedback; 0.0 = no puede ganar)
+#   REQUIRE_TARGET_FAMILY (0) 1 = rechazar el hijo antes de gastar el MOEA
 #   EVAL_TEST=1            evaluar el mejor operador en el conjunto de test
 #   EVAL_REPEATS (1)       repeticiones de esa evaluacion final
 #   COMPARE=1              al terminar, comparacion pareada contra los clasicos
@@ -37,10 +49,11 @@
 #
 # Ejemplos:
 #   bash slurm/llamea-all.sh
-#   PROFILE=h100-fp16 BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-#   BUDGET=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh   # pipeline completo
-#   PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh   # prueba
-#   WAIT=1 BUDGET=50 PROFILE=smoke bash slurm/llamea-all.sh        # esperar al final
+#   PROFILE=h100-fp16 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+#   GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh  # pipeline
+#   PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh      # prueba
+#   WAIT=1 BUDGET=50 PROFILE=smoke bash slurm/llamea-all.sh           # esperar
+#   COMBINE=0 GENERATIONS=1000 bash slurm/llamea-all.sh  # ablacion 1+1 original
 #
 set -euo pipefail
 

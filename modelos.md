@@ -288,11 +288,17 @@ En SLURM: `slurm/llamea-generate.slrm` hace esto mismo; se le pasa
   generados y pide no repetirlos. Ataca el anclaje observado (108 copias del
   mismo operador en `b200`) antes de gastar una evaluación; el job del cluster
   usa `N=12`. `0` lo desactiva.
-- `budget` = número de llamadas al LLM / generaciones (default 1000 en el CLI y
-  en el job; corridas serias 100-1000; con caché se pueden lanzar 1000 sin pagar
-  reevaluaciones).
-- `n_parents`/`n_offspring`: `1/1` = un algoritmo por generación (por defecto);
-  subir para búsqueda poblacional.
+- `budget` = número de **evaluaciones/llamadas al LLM**, no de generaciones:
+  `generaciones ~= (budget - n_parents) / n_offspring`. El job del cluster deriva
+  `BUDGET = GENERATIONS*NOFFSPRING + NPARENTS` (5 padres/2 hijos y
+  `GENERATIONS=1000` dan 2005 evaluaciones y 1000 iteraciones reales).
+- `n_parents`/`n_offspring`: `1/1` = un algoritmo por generación (default local);
+  el job del cluster usa `5/2` para que el combine tenga una población diversa.
+- `--combine`: extensión propia (no está en LLaMEA 1.4). El padre focal se elige
+  por HV + novedad conductual; el segundo padre es el más distante (o de la
+  familia objetivo); el hijo se valida contra la familia menos representada y se
+  registra `target_family_hit`. `--target-penalty` castiga solo el ranking;
+  `--require-target-family` rechaza el hijo antes del MOEA.
 - Modelos muy chicos (≤1.5B) generan código inválido con frecuencia: el fitness
   lo rechaza con feedback, pero la búsqueda aprovecha poco. En el cluster usar
   7B+.
@@ -314,7 +320,8 @@ En SLURM: `slurm/llamea-generate.slrm` hace esto mismo; se le pasa
   dominio (familias de operadores OX/PMX/PBX/ERX/CX y qué preservan), en vez de
   listar los primitivos de la gramática; ver `docs/llamea-prompts/`.
 - La búsqueda alterna dos operadores, `refine` (explotar) y `redesign`
-  (explorar); `--refine-only` usa solo el refinamiento.
+  (explorar); con `--combine` agrega un tercero de dos padres. `--refine-only`
+  usa solo el refinamiento.
 
 ### Comando listo: 100 generaciones
 
@@ -344,9 +351,9 @@ ambiente, descarga el modelo en el login y envía **un solo job** que sirve el
 32B AWQ y corre la búsqueda):
 
 ```bash
-PROFILE=big-quant BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+PROFILE=big-quant GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
 # alias equivalente
-BUDGET=1000 EVAL_TEST=1 bash slurm/llamea.sh
+GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea.sh
 ```
 
 No se envía un job separado para descargar el modelo. El job GPU nunca descarga:

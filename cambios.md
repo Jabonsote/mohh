@@ -646,10 +646,11 @@ con `R = 1` se conserva el marco GE de siempre.
 
 `tests/test_slurm.py` valida los perfiles (default 32B), la sintaxis y el
 contrato del job único (vLLM + búsqueda + `127.0.0.1`), el comando único y el
-paso de las nuevas banderas. `tests/test_llamea.py` cubre `EarlyStop` y
-`_llamea_kwargs`; `tests/test_llamea_diversity.py` cubre fingerprint, familias,
-archivo, pickling y la regresión de repeticiones. Suite completa:
-`203 passed, 1 skipped`.
+paso de las nuevas banderas. `tests/test_llamea.py` cubre `EarlyStop`,
+`_llamea_kwargs` y el combine conductual de punta a punta;
+`tests/test_llamea_diversity.py` cubre fingerprint, familias, archivo, pickling,
+selección conductual y validación de la familia objetivo. Suite completa:
+`211 passed, 1 skipped`.
 
 ---
 
@@ -713,3 +714,32 @@ Evita llenar LUSTRE a mitad de un 30B/80B y deja un mensaje accionable
 Se agregan pruebas de los perfiles nuevos, de `VLLM_ARGS` por perfil, del
 catálogo `PROFILE=list`, de la inyección/acotado de la memoria, del preflight
 de disco y de las nuevas banderas del job único.
+
+---
+
+## 11. Combine conductual propio (extensión, no LLaMEA original)
+
+LLaMEA 1.4 ya permite `Operator(number_of_parents=2)`, pero elige los padres
+por fitness. Activarlo sin más produce una recombinación semántica de dos
+individuos parecidos, no una exploración conductual. Por eso se agrega una
+extensión en `src/mohh/llamea/behavioral.py` y `TargetedCombineOperator` en
+`prompts.py`:
+
+1. **Padre focal conductual.** `BehavioralLLaMEA._select_parents` usa un torneo
+   sobre `HV * (1 + novelty_weight * novelty)`, no solo HV.
+2. **Compañero por distancia.** El segundo padre maximiza la distancia entre
+   fingerprints; si existe un operador de la familia objetivo, se prefiere ese
+   para aportar su mecanismo. El fitness solo rompe empates.
+3. **Validación del hijo.** Antes de evaluar se adjunta `target_family` a la
+   `Solution`; el evaluador mide el fingerprint y registra `target_family_hit`,
+   `target_family_observed` y el feedback PASS/MISS. La familia objetivo es la
+   menos representada en `BehaviorTracker`.
+4. **Presión opcional.** `--target-penalty` multiplica solo el ranking (el HV
+   crudo no cambia); `--require-target-family` rechaza el hijo antes del MOEA
+   interno. Por defecto la validación es feedback-only (`target_penalty=1.0`).
+
+La implementación no toca `src/mohh/{generation,evaluation,core}` ni el paquete
+`llamea` instalado. El job único usa `--n-parents 5 --n-offspring 2` y deriva
+`BUDGET = 1000*2 + 5 = 2005` para que `GENERATIONS=1000` sean 1000 iteraciones.
+`COMBINE=0` deja la ablación refine/redesign original; `BEHAVIORAL_PARENTS=0`
+aísla la validación de la familia objetivo.

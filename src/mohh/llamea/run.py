@@ -184,6 +184,8 @@ def _make_evaluator(paths, args, bounds=None, archive=None, fronts_dir=None,
         patience=getattr(args, "patience", 0),
         diversity_feedback=getattr(args, "diversity_feedback", True),
         diversity_log=diversity_log,
+        target_penalty=getattr(args, "target_penalty", 1.0),
+        require_target_family=getattr(args, "require_target_family", False),
     )
 
 
@@ -354,6 +356,11 @@ def run_llamea(args):
         "budget": args.budget,
         "n_parents": args.n_parents,
         "n_offspring": args.n_offspring,
+        "combine": args.combine,
+        "behavioral_parent_selection": args.behavioral_parent_selection,
+        "novelty_weight": args.novelty_weight,
+        "target_penalty": args.target_penalty,
+        "require_target_family": args.require_target_family,
         "solver": args.solver,
         "mo_generations": args.mo_generations,
         "mo_population_size": args.mo_population_size,
@@ -478,7 +485,20 @@ def run_llamea(args):
     else:
         example_prompt = EXAMPLE_PROMPT
 
-    llamea = LLaMEA(
+    search_class = LLaMEA
+    search_kwargs = {}
+    if args.combine:
+        # Extension propia: seleccion conductual de los dos padres y
+        # validacion de la familia objetivo. No se toca el LLaMEA instalado.
+        from mohh.llamea.behavioral import BehavioralLLaMEA
+
+        search_class = BehavioralLLaMEA
+        search_kwargs = {
+            "behavioral_parent_selection": args.behavioral_parent_selection,
+            "novelty_weight": args.novelty_weight,
+        }
+
+    llamea = search_class(
         f=fitness,
         llm=llm,
         n_parents=args.n_parents,
@@ -487,13 +507,15 @@ def run_llamea(args):
         task_prompt=make_task_prompt(args.solver),
         example_prompt=example_prompt,
         output_format_prompt=OUTPUT_FORMAT_PROMPT,
-        operators=[] if args.refine_only else make_operators(),
+        operators=([] if args.refine_only
+                   else make_operators(include_combine=args.combine)),
         budget=args.budget,
         elitism=not args.comma,
         minimization=False,
         max_workers=args.max_workers,
         experiment_name=args.experiment_name,
         **_llamea_kwargs(args),
+        **search_kwargs,
     )
 
     # 3b. Costo del modelo: foto de `/metrics` (vLLM) antes de la corrida; los
@@ -792,12 +814,36 @@ def main(argv=None):
                         help="Maximo de tokens generados por peticion "
                              "(None = default del servidor).")
     parser.add_argument("--budget", type=int, default=1000,
-                        help="Numero de generaciones (llamadas al LLM). Default 1000; "
-                             "para pruebas de humo usar un valor bajo (p. ej. 20).")
+                        help="Numero de EVALUACIONES/llamadas al LLM, no de "
+                             "generaciones: generaciones ~= (budget - n_parents) / "
+                             "n_offspring. Default 1000; para humo usar 20.")
     parser.add_argument("--n-parents", type=int, default=1,
-                        help="Padres por generacion (1 = un algoritmo por generacion).")
+                        help="Tamano de la poblacion de padres (default 1). Un "
+                             "combine de dos padres requiere >= 2.")
     parser.add_argument("--n-offspring", type=int, default=1,
-                        help="Descendientes por generacion (1 = un algoritmo por generacion).")
+                        help="Descendientes/evaluaciones por generacion (default 1).")
+    parser.add_argument("--combine", action="store_true",
+                        help="Agregar el operador propio de recombinacion conductual "
+                             "de dos padres (requiere --n-parents >= 2 y "
+                             "--max-workers 1). Los dos padres se eligen por "
+                             "diversidad conductual y el hijo se valida contra la "
+                             "familia objetivo.")
+    parser.add_argument("--no-behavioral-parent-selection",
+                        dest="behavioral_parent_selection", action="store_false",
+                        default=True,
+                        help="Con --combine, elegir el padre focal solo por fitness "
+                             "(comportamiento de LLaMEA original).")
+    parser.add_argument("--novelty-weight", type=float, default=0.5,
+                        help="Peso del bono de novedad en el torneo conductual "
+                             "(default 0.5).")
+    parser.add_argument("--target-penalty", type=float, default=1.0,
+                        help="Multiplicador del ranking cuando el hijo no alcanza la "
+                             "familia objetivo (default 1.0 = solo feedback; 0.0 "
+                             "hace que un fallo no pueda ganar). El HV crudo no "
+                             "cambia.")
+    parser.add_argument("--require-target-family", action="store_true",
+                        help="Rechazar un hijo de combine que no pertenezca a la "
+                             "familia objetivo antes de gastar el MOEA interno.")
     parser.add_argument("--comma", action="store_true",
                         help="Estrategia (1,1) comma en lugar de (1+1) con elitismo.")
     parser.add_argument("--refine-only", action="store_true",
@@ -913,6 +959,16 @@ def main(argv=None):
                         help="Segundos sin una generacion nueva antes de abortar la "
                              "corrida (watchdog del cluster). 0 = desactivado.")
     args = parser.parse_args(argv)
+
+    if args.combine and args.n_parents < 2:
+        parser.error("--combine requiere --n-parents >= 2")
+    if args.combine and args.refine_only:
+        parser.error("--combine y --refine-only son incompatibles")
+    if args.combine and args.max_workers != 1:
+        parser.error("--combine usa estado de seleccion por generacion; "
+                     "requiere --max-workers 1")
+    if not 0.0 <= args.target_penalty <= 1.0:
+        parser.error("--target-penalty debe estar en [0, 1]")
 
     if args.train_instances != "all":
         args.train_instances = int(args.train_instances)

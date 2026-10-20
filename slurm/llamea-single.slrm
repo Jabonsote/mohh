@@ -9,23 +9,28 @@
 #
 # Uso recomendado (login, un solo comando; descarga y envia):
 #     bash slurm/llamea-all.sh
-#     PROFILE=h100-fp16 BUDGET=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+#     PROFILE=h100-fp16 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
 #
 # Uso directo (el modelo ya debe estar en la raiz persistente):
 #     MODEL=Qwen/Qwen2.5-Coder-32B-Instruct-AWQ sbatch slurm/llamea-single.slrm
 #     PROFILE=h100-fp16 sbatch --constraint=H100 slurm/llamea-single.slrm
 #
-# Opciones por entorno: BUDGET (1000), SOLVER, TRAIN_INSTANCES, TEST_INSTANCES,
-# MO_GENERATIONS, MO_POPULATION_SIZE, TEMPERATURE (0.7), TOP_P (0.8), TOP_K (20),
-# SAMPLING_REPETITION_PENALTY (1.05), MAX_TOKENS (4096), OPERATOR_MEMORY (12),
-# SEED, EVAL_TEST=1, EVAL_REPEATS, MUTATION=1, COMMA=1, REFINE_ONLY=1,
-# NO_SAVE_FRONTS=1, REPEAT_PENALTY (0.5), DIVERSITY_FEEDBACK (1),
-# PATIENCE (0), STALL_TIMEOUT (3600), PARENT_SELECTION (tournament),
-# NICHING (none), EXPERIMENT_NAME, CATEGORY,
+# Opciones por entorno: GENERATIONS (1000), NPARENTS (5), NOFFSPRING (2),
+# BUDGET (derivado: generaciones x hijos + padres = 2005), SOLVER,
+# TRAIN_INSTANCES, TEST_INSTANCES, MO_GENERATIONS, MO_POPULATION_SIZE,
+# TEMPERATURE (0.7), TOP_P (0.8), TOP_K (20), SAMPLING_REPETITION_PENALTY (1.05),
+# MAX_TOKENS (4096), OPERATOR_MEMORY (12), SEED, EVAL_TEST=1, EVAL_REPEATS,
+# MUTATION=1, COMMA=1, REFINE_ONLY=1, NO_SAVE_FRONTS=1, REPEAT_PENALTY (0.5),
+# DIVERSITY_FEEDBACK (1), PATIENCE (0), STALL_TIMEOUT (3600),
+# PARENT_SELECTION (tournament), NICHING (none), COMBINE (1; 0 = solo
+# refine/redesign), BEHAVIORAL_PARENTS (1), NOVELTY_WEIGHT (0.5),
+# TARGET_PENALTY (1.0), REQUIRE_TARGET_FAMILY (0), EXPERIMENT_NAME, CATEGORY,
 # PORT, PROFILE, MODEL, GPU_MEM_UTIL, MAX_MODEL_LEN, TENSOR_PARALLEL,
 # VLLM_ARGS (del perfil), EXTRA_VLLM_ARGS (override), EXTRA.
 # El job pide 16 CPUs (no 24): el cuello es la GPU y el MOEA interno es
 # secuencial; 4 hilos OpenMP bastan para vLLM/tokenizacion.
+# 5 padres / 2 hijos: poblacion suficientemente diversa (una familia
+# conductual por padre) sin disparar el numero de llamadas al LLM.
 # COMPARE=1 agrega, en el mismo job, la comparacion pareada del mejor operador
 # contra los clasicos (COMPARE_SPLIT=test, COMPARE_REPEATS=11, COMPARE_NAME).
 #
@@ -148,13 +153,28 @@ cleanup() {
 trap cleanup EXIT TERM INT
 
 # 3. Busqueda LLaMEA contra el servidor local (espera a que cargue el modelo).
+# 5 padres / 2 hijos: el presupuesto se deriva para que GENERATIONS=1000 sea
+# realmente 1000 iteraciones, no 1000 evaluaciones (cada iteracion evalua 2).
+GENERATIONS="${GENERATIONS:-1000}"
+NPARENTS="${NPARENTS:-5}"
+NOFFSPRING="${NOFFSPRING:-2}"
+BUDGET="${BUDGET:-$((GENERATIONS * NOFFSPRING + NPARENTS))}"
+COMBINE="${COMBINE:-1}"
+# `REFINE_ONLY` busca solo refinamiento; el combine de dos padres no aplica.
+if [ "${REFINE_ONLY:-0}" = "1" ]; then
+    COMBINE=0
+fi
+
 ARGS=(
     --model "$MODEL"
     --base-url "http://127.0.0.1:${PORT}/v1"
     --no-download
     --wait-server
     --server-timeout "${SERVER_TIMEOUT:-1800}"
-    --budget "${BUDGET:-1000}"
+    --budget "$BUDGET"
+    --n-parents "$NPARENTS"
+    --n-offspring "$NOFFSPRING"
+    --max-workers "${MAX_WORKERS:-1}"
     --temperature "${TEMPERATURE:-0.7}"
     --top-p "${TOP_P:-0.8}"
     --top-k "${TOP_K:-20}"
@@ -194,6 +214,17 @@ if [ "${NO_SAVE_FRONTS:-0}" = "1" ]; then
 fi
 if [ "${DIVERSITY_FEEDBACK:-1}" = "0" ]; then
     ARGS+=(--no-diversity-feedback)
+fi
+if [ "$COMBINE" = "1" ]; then
+    ARGS+=(--combine)
+    if [ "${BEHAVIORAL_PARENTS:-1}" = "0" ]; then
+        ARGS+=(--no-behavioral-parent-selection)
+    fi
+    ARGS+=(--novelty-weight "${NOVELTY_WEIGHT:-0.5}")
+    ARGS+=(--target-penalty "${TARGET_PENALTY:-1.0}")
+    if [ "${REQUIRE_TARGET_FAMILY:-0}" = "1" ]; then
+        ARGS+=(--require-target-family)
+    fi
 fi
 if [ -n "${EXTRA:-}" ]; then
     # shellcheck disable=SC2206

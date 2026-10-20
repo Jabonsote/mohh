@@ -753,11 +753,18 @@ def test_parse_llm_response_rejects_junk():
 # --------------------------------------------------------------------------- #
 
 class _ScriptedLLM:
-    """LLM simulado que devuelve una respuesta de crossover valida."""
+    """LLM simulado que devuelve una respuesta de crossover valida.
+
+    `response` puede ser una lista: se consume una respuesta por llamada. Asi se
+    puede simular una poblacion inicial OX y luego un hijo PBX/CX para probar la
+    familia objetivo dinamica.
+    """
 
     def __init__(self, response):
         self.model = "scripted"
         self.response = response
+        self.responses = list(response) if isinstance(response, (list, tuple)) else None
+        self.calls = 0
 
     def set_logger(self, logger):
         self.logger = logger
@@ -767,9 +774,26 @@ class _ScriptedLLM:
         from llamea.solution import Solution
         import re
 
-        code = re.search(r"```python\n(.*?)\n```", self.response, re.DOTALL).group(1)
+        if self.responses is None:
+            payload = self.response
+        else:
+            payload = self.responses[min(self.calls, len(self.responses) - 1)]
+        self.calls += 1
+        code = re.search(r"```python\n(.*?)\n```", payload, re.DOTALL).group(1)
         name = re.findall(r"(?:def|class)\s*(\w*).*\:", code)[0]
         return Solution(name=name, description="scripted", code=code)
+
+
+def _reference_response(func, description):
+    """Respuesta LLaMEA a partir de un operador de `mohh.llamea.reference`."""
+    from mohh.llamea import reference
+
+    source = inspect.getsource(getattr(reference, func))
+    source = source.replace(f"def {func}(", "def crossover(", 1)
+    return (
+        f"# Description: {description}\n# Code:\n```python\n"
+        f"import numpy as np\n{source}\n```\n"
+    )
 
 
 def test_llamea_end_to_end_with_scripted_llm(tmp_path, monkeypatch):
@@ -809,6 +833,52 @@ def test_llamea_end_to_end_with_scripted_llm(tmp_path, monkeypatch):
     assert best.code.strip()
     assert np.isfinite(best.fitness)
     assert best.fitness > 0
+
+
+def test_behavioral_combine_runs_end_to_end_with_two_parents(tmp_path, monkeypatch):
+    """El combine propio elige dos padres y valida la familia objetivo."""
+    from mohh.llamea.behavioral import BehavioralLLaMEA
+    from mohh.llamea.prompts import TargetedCombineOperator
+
+    monkeypatch.chdir(tmp_path)
+    ox_response = "# Description: OX crossover\n# Code:\n```python\n" + EXAMPLE_CODE + "\n```\n"
+    # Poblacion inicial OX (order). La primera generacion apunta a position y
+    # devuelve PBX; la segunda apunta a cycle y devuelve CX.
+    llm = _ScriptedLLM(
+        [ox_response] * 5
+        + [_reference_response("pbx", "PBX position"),
+           _reference_response("cx", "CX cycle")]
+    )
+    fitness = build_evaluator([INSTANCE], mo_generations=2,
+                              mo_population_size=6, seed=1)
+    combine = TargetedCombineOperator()
+
+    llamea = BehavioralLLaMEA(
+        f=fitness,
+        llm=llm,
+        n_parents=5,
+        n_offspring=2,
+        role_prompt="role",
+        task_prompt="task",
+        budget=7,
+        elitism=True,
+        minimization=False,
+        max_workers=1,
+        experiment_name="e2e-combine",
+        operators=[combine],
+        parent_selection="tournament",
+        tournament_size=2,
+        adaptive_mutation=False,
+    )
+    best = llamea.run()
+
+    stats = fitness.duplicate_stats()
+    assert best.code.strip()
+    assert np.isfinite(best.fitness)
+    assert stats["target_family_attempts"] >= 2
+    # La familia objetivo se recalcula en cada generación: position para PBX y
+    # cycle para CX. Ambos hijos cumplen y la corrida sigue.
+    assert stats["target_family_hits"] >= 2
 
 
 # --------------------------------------------------------------------------- #

@@ -104,6 +104,19 @@ def print_report(experiment, summary, entries):
         print("Familias: " + ", ".join(
             f"{name}={count}" for name, count in sorted(families.items())
         ))
+    # Validacion del combine conductual: el resumen la trae cuando existe
+    # diversity.json; si solo hay JSONL se reconstruye desde las entradas.
+    attempts = summary.get("target_family_attempts")
+    hits = summary.get("target_family_hits")
+    if attempts is None:
+        measured = [entry for entry in entries
+                    if entry.get("target_family_hit") is not None]
+        attempts = len(measured)
+        hits = sum(bool(entry.get("target_family_hit")) for entry in measured)
+    if attempts:
+        rate = 100.0 * float(hits or 0) / float(attempts)
+        print(f"Familia objetivo (combine): {int(hits or 0)}/{int(attempts)} "
+              f"aciertos ({rate:.1f}%)")
     if entries:
         top = sorted(entries, key=lambda item: -float(item.get("novelty") or 0))[:5]
         print("\nOperadores mas novedosos:")
@@ -117,7 +130,8 @@ def print_report(experiment, summary, entries):
 
 
 def write_csv(entries, path):
-    columns = ["generation", "family", "closest_reference", "closest_distance",
+    columns = ["generation", "family", "target_family", "observed_family",
+               "target_family_hit", "closest_reference", "closest_distance",
                "novelty", "cell", "coverage", "fitness", "description"]
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", newline="") as handle:
