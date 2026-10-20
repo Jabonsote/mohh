@@ -862,6 +862,6 @@ modelos distintos, no el mismo quant en dos máquinas.
 ### 13.4 Pruebas
 
 `tests/test_slurm.py` verifica que el perfil GLM existe, que el catálogo lo
-imprime y que `VLLM_ARGS` incluye `--reasoning-parser glm45`. La descarga local
-del Q4_K_M se valida con `llama-server` y una petición corta antes de usarlo en
-una búsqueda.
+imprime y que `VLLM_ARGS` incluye `--reasoning-parser glm45`. El Q4_K_M local se
+puede validar antes de una búsqueda con `llama-server` y una petición corta
+(la descarga son ~6.2 GB); en esta sesión no se ejecutó esa descarga.
