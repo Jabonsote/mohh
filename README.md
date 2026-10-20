@@ -335,6 +335,49 @@ The GPU job never downloads: it fails fast with the exact command to run on the
 login. This avoids spending a GPU allocation (and queue time) on a node that has
 no internet. `DRY_RUN=1` prints the `sbatch` command without submitting.
 
+#### Defaults and sizing for a 1000-generation run
+
+`BUDGET` is already **1000**; you do not need to change the search loop. The
+single job requests one GPU and **16 CPUs** (not 24): inference is GPU-bound and
+the internal MOEA is sequential, so extra CPUs only make the queue wait longer.
+It keeps 4 OpenMP threads for vLLM/tokenization and one BLAS thread for the
+search.
+
+| Parameter | Cluster default | Why |
+|---|---|---|
+| `BUDGET` | `1000` | Number of LLM generations/evaluations |
+| `PROFILE` | `big-quant` (Qwen2.5-Coder-32B-AWQ) | Proven fallback; on A100/H100 prefer `coder30b-awq` / `coder30b-fp8` |
+| `CPUS` / `MEM` | `16` / `64G` | GPU-bound job; enough for vLLM and the sequential MOEA |
+| `TEMPERATURE` / `TOP_P` / `TOP_K` | `0.7` / `0.8` / `20` | Exploration without chaotic sampling |
+| `SAMPLING_REPETITION_PENALTY` | `1.05` | Mild anti-anchoring |
+| `MAX_TOKENS` / `OPERATOR_MEMORY` | `4096` / `12` | Full operator code; bounded recent-mechanism memory |
+| `MAX_MODEL_LEN` / `GPU_MEM_UTIL` | `16384` / `0.90–0.92` | Prompt + 4k response with KV headroom |
+| `MO_GENERATIONS` / `MO_POPULATION_SIZE` | `30` / `30` | Internal MOEA effort per candidate |
+| `TRAIN_INSTANCES` | `8` | Training set used by every candidate |
+| `PATIENCE` | `0` | Keep running all 1000 generations |
+| `EVAL_TEST` / `COMPARE` | off / off | Add them for the final held-out evaluation and paired baselines |
+
+The server adds `--max-num-seqs 4`, `--enable-prefix-caching` and
+`--disable-log-requests`: LLaMEA sends one request at a time, prompts share a
+long preamble, and the full prompts are already saved under `prompts/`.
+
+For a 1000-generation run with the final evidence, use one of:
+
+```bash
+# A100 40 GB
+PROFILE=coder30b-awq BUDGET=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
+
+# H100 80 GB
+PROFILE=coder30b-fp8 BUDGET=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
+
+# Fallback known-good on A100/H100
+PROFILE=big-quant BUDGET=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
+```
+
+`COMPARE=1` runs 11 paired repetitions against OX/PBX/PMX/CX/ERX in the same
+job. If you only want the search, omit it. `CPUS=24` and `MEM=...` remain
+available as overrides, but are not needed.
+
 #### GPU/model profiles (big models)
 
 `slurm/llamea-gpu-profile.sh` picks the model and, for some profiles, its vLLM

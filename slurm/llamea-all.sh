@@ -32,8 +32,8 @@
 #   TEMPERATURE, MAX_TOKENS, SEED, MUTATION=1, COMMA=1, REFINE_ONLY=1,
 #   REPEAT_PENALTY, DIVERSITY_FEEDBACK=0, PATIENCE, STALL_TIMEOUT,
 #   PARENT_SELECTION, NICHING, EXPERIMENT_NAME, CATEGORY, CONSTRAINT,
-#   MAX_MODEL_LEN, GPU_MEM_UTIL, TIME (limite SLURM), WAIT=1 (esperar y
-#   mostrar el final del log antes de salir).
+#   MAX_MODEL_LEN, GPU_MEM_UTIL, CPUS (16), MEM (64G), TIME (limite SLURM),
+#   WAIT=1 (esperar y mostrar el final del log antes de salir).
 #
 # Ejemplos:
 #   bash slurm/llamea-all.sh
@@ -61,9 +61,14 @@ if [ "${PROFILE:-}" = "list" ]; then
 fi
 echo "Perfil ${PROFILE}: modelo=$MODEL  constraint=$CONSTRAINT"
 
+# 16 CPUs es el default recomendado: el job es GPU-bound y el MOEA interno
+# corre secuencial; pedir 24 solo alarga la cola sin acelerar la busqueda.
+CPUS="${CPUS:-16}"
+MEM="${MEM:-64G}"
+
 if [ "${DRY_RUN:-0}" = "1" ]; then
     echo "DRY RUN: no se prepara el ambiente, no se descarga el modelo y no se envia nada."
-    echo "  sbatch --parsable --export=ALL --constraint=\"$CONSTRAINT\" slurm/llamea-single.slrm"
+    echo "  sbatch --parsable --export=ALL --constraint=\"$CONSTRAINT\" --cpus-per-task=$CPUS --mem=$MEM slurm/llamea-single.slrm"
     exit 0
 fi
 
@@ -136,7 +141,8 @@ else
 fi
 
 # 3. Un unico job GPU. --export=ALL propaga PROFILE, BUDGET, EVAL_TEST, etc.
-SBATCH_ARGS=(--parsable --export=ALL --constraint="$CONSTRAINT")
+SBATCH_ARGS=(--parsable --export=ALL --constraint="$CONSTRAINT"
+             --cpus-per-task="$CPUS" --mem="$MEM")
 if [ -n "${TIME:-}" ]; then
     SBATCH_ARGS+=(--time="$TIME")
 fi

@@ -185,7 +185,15 @@ Variables de entorno del `.slrm` (todas opcionales):
 `PROFILE` (`big-quant`; `PROFILE=list` imprime el catálogo), `MODEL`,
 `CONSTRAINT`, `PORT` (8000), `GPU_MEM_UTIL` (0.9), `MAX_MODEL_LEN`,
 `TENSOR_PARALLEL`, `VLLM_ARGS` (del perfil, p. ej. `--quantization awq_marlin`
-o `--kv-cache-dtype fp8`) y `EXTRA_VLLM_ARGS` (override del usuario). El script elige
+o `--kv-cache-dtype fp8`) y `EXTRA_VLLM_ARGS` (override del usuario). El script
+usa además `--max-num-seqs 4`, `--enable-prefix-caching` y
+`--disable-log-requests`: LLaMEA hace una petición cada vez, los prompts
+comparten preámbulo y los prompts completos ya quedan en `prompts/`.
+
+El job único de búsqueda pide **16 CPUs, 64 GB y una GPU**. Es suficiente
+porque el cuello es la inferencia y el MOEA interno corre secuencial; 4 hilos
+OpenMP quedan para vLLM/tokenización y BLAS se fija a un hilo. Se puede
+sobreescribir con `CPUS=... MEM=...` al llamar a `llamea-all.sh`. El script elige
 el modelo con `slurm/llamea-gpu-profile.sh`, verifica los pesos en la raíz
 persistente (`python scripts/mohh_models.py root`) y deja el modelo cargado
 hasta el time limit (30 días).

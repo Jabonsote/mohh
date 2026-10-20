@@ -24,6 +24,8 @@
 # NICHING (none), EXPERIMENT_NAME, CATEGORY,
 # PORT, PROFILE, MODEL, GPU_MEM_UTIL, MAX_MODEL_LEN, TENSOR_PARALLEL,
 # VLLM_ARGS (del perfil), EXTRA_VLLM_ARGS (override), EXTRA.
+# El job pide 16 CPUs (no 24): el cuello es la GPU y el MOEA interno es
+# secuencial; 4 hilos OpenMP bastan para vLLM/tokenizacion.
 # COMPARE=1 agrega, en el mismo job, la comparacion pareada del mejor operador
 # contra los clasicos (COMPARE_SPLIT=test, COMPARE_REPEATS=11, COMPARE_NAME).
 #
@@ -33,7 +35,7 @@
 #SBATCH -J llamea-single
 #SBATCH -p gpu
 #SBATCH -N 1
-#SBATCH -c 24
+#SBATCH -c 16
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="A100|H100"
@@ -56,11 +58,14 @@ echo "Constraint:     $CONSTRAINT"
 echo "max-model-len:  $MAX_MODEL_LEN   gpu-mem-util: $GPU_MEM_UTIL"
 echo "vLLM args:      ${VLLM_ARGS:-} ${EXTRA_VLLM_ARGS:-}"
 
-# vLLM usa varios hilos para tokenizacion/planificacion; el MOEA interno es
-# pymoo/numpy y no escala con 24 nucleos, asi que se deja un hilo BLAS.
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+# vLLM usa unos pocos hilos para tokenizacion/planificacion; el MOEA interno es
+# pymoo/numpy secuencial, asi que no escala con 16 nucleos. Se deja un hilo
+# BLAS para no sobre-suscribir y 4 hilos OpenMP para vLLM.
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 
 module load python/miniforge
@@ -112,6 +117,18 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     echo "Sampler GPU: $GPU_CSV (pid $SAMPLER_PID)"
 fi
 
+# Parametros de servidor para el patron real de LLaMEA: una peticion cada vez,
+# prompts que comparten el mismo preambulo (prefix caching) y logs de peticion
+# innecesarios porque los prompts completos ya se guardan en prompts/.
+# `VLLM_ARGS` sigue aportando cuantizacion/KV cache por perfil y `EXTRA_VLLM_ARGS`
+# permite sobrescribir. `max-num-seqs=4` deja margen para reintentos sin reservar
+# recursos para una concurrencia que la busqueda no usa.
+VLLM_COMMON_ARGS=(
+    --max-num-seqs 4
+    --enable-prefix-caching
+    --disable-log-requests
+)
+
 python -m vllm.entrypoints.openai.api_server \
     --model "$MODEL_PATH" \
     --served-model-name "$MODEL" \
@@ -120,6 +137,7 @@ python -m vllm.entrypoints.openai.api_server \
     --gpu-memory-utilization "$GPU_MEM_UTIL" \
     --max-model-len "$MAX_MODEL_LEN" \
     --tensor-parallel-size "${TENSOR_PARALLEL:-1}" \
+    "${VLLM_COMMON_ARGS[@]}" \
     ${VLLM_ARGS:-} ${EXTRA_VLLM_ARGS:-} &
 VLLM_PID=$!
 

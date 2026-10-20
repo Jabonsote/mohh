@@ -559,6 +559,18 @@ nodo sin internet. La cadena de dos jobs (`llamea-full-chain.sh`) queda solo
 para reutilizar un servidor ya cargado; por defecto redirige al job único salvo
 `ALLOW_TWO_JOBS=1`.
 
+Dimensionamiento del job único: **16 CPUs, 64 GB y una GPU**. El cuello es la
+inferencia; el MOEA interno corre secuencial y no escala con 24 núcleos, así
+que pedir más solo alarga la cola. Se dejan 4 hilos OpenMP para
+vLLM/tokenización y un hilo BLAS (`OPENBLAS`/`MKL`) para la búsqueda. `CPUS` y
+`MEM` son overrides del wrapper.
+
+vLLM recibe `--max-num-seqs 4`, `--enable-prefix-caching` y
+`--disable-log-requests`. LLaMEA envía una petición cada vez; el prefijo largo
+del prompt se reutiliza entre generaciones y los prompts completos ya se
+guardan en `prompts/index.jsonl`, así que desactivar el log de peticiones no
+pierde evidencia.
+
 ### 9.2 Perfiles de GPU con modelos grandes
 
 `slurm/llamea-gpu-profile.sh` elige el modelo según la GPU del cluster

@@ -387,6 +387,13 @@ def test_llamea_single_job_serves_and_searches_in_one_job():
     for pattern in (r"#SBATCH\s+-p\s+gpu", r"#SBATCH\s+--gres=gpu:1",
                     r"#SBATCH\s+--constraint=", r"#SBATCH\s+--time=\S+"):
         assert re.search(pattern, content), f"llamea-single.slrm: missing {pattern}"
+    # Dimensionamiento: el job es GPU-bound; 16 CPUs bastan y no se piden 24.
+    assert re.search(r"#SBATCH\s+-c\s+16", content)
+    assert "OMP_NUM_THREADS:-4" in content
+    # Parametros de servidor para una peticion secuencial con prefijo comun.
+    for flag in ("--max-num-seqs 4", "--enable-prefix-caching",
+                 "--disable-log-requests"):
+        assert flag in content
     # Todo el pipeline en el mismo job: comparacion pareada opcional.
     assert "compare_operators.py" in content
     assert "classic:ox" in content
