@@ -18,12 +18,15 @@ idempotente, de modo que funciona tambien en procesos hijos.
 import hashlib
 import json
 import linecache
+import multiprocessing
 import os
 import signal
 import tempfile
 import threading
 import traceback
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
+from functools import lru_cache
 
 import numpy as np
 
@@ -417,6 +420,96 @@ def compile_operator(code: str, timeout=COMPILE_TIMEOUT) -> dict:
     return namespace
 
 
+@lru_cache(maxsize=8)
+def _cached_operator(code: str):
+    """Compila una vez por proceso el codigo que se evalua en varias instancias.
+
+    Los workers de ``ProcessPoolExecutor`` reciben el codigo (texto), no el
+    namespace: las funciones creadas con ``exec`` no se pueden picklear por
+    referencia. Este cache evita repetir la compilacion y la validacion en cada
+    instancia del mismo candidato.
+    """
+    return compile_operator(code)
+
+
+def _load_mutation(solver, model_name, mutation):
+    """Carga la mutacion del MOEA interno, igual para el modo secuencial y el pool."""
+    if mutation:
+        # `Swap_Mutation` (la mutacion de permutacion que usa la evaluacion GE)
+        # vive en `mohh.evaluation.operators.mutation`; se inyecta por atributo
+        # igual que el cruce, sin tocar el nucleo.
+        from mohh.evaluation.operators.mutation import Swap_Mutation
+
+        key = {
+            "MOEAD": "MOEAD_MUTATION_PROBABILITY",
+            "NSGAII": "NSGA_MUTATION_PROBABILITY",
+            "SMSEMOA": "SMS_MUTATION_PROBABILITY",
+        }.get(model_name, "MOEAD_MUTATION_PROBABILITY")
+        from mohh.evaluation.params import mo_params
+
+        prob = mo_params.get(key, 0.05)
+        solver.mutation = Swap_Mutation(prob)
+    else:
+        solver.load_operator("mutation", "NullMutation")
+
+
+def _solve_front_namespace(instance, namespace, seed, model_name, mutation,
+                           instance_timeout):
+    """Corre el MOEA interno sobre una instancia y devuelve su frente.
+
+    Es la unidad de trabajo comun de la busqueda secuencial y del pool de
+    instancias. No modifica la instancia recibida: ``MOSolver.load_instance``
+    copia el problema y la poblacion inicial.
+    """
+    from mohh.generation.algorithm.multiobjective import MOSolver
+    from mohh.llamea.operator import LLMOperator
+
+    # Semilla determinista por corrida (igual que el worker GE).
+    np.random.seed(seed)
+    solver = MOSolver(seed=seed)
+    # El operador del LLM se inyecta directamente en el solver; la ruta GE
+    # (load_operator -> HH_Operator) no se toca.
+    solver.crossover = LLMOperator(namespace, prob=1.0)
+    _load_mutation(solver, model_name, mutation)
+    solver.load_instance(instance)
+    solver.start_model(model_name=model_name)
+    _, pareto_front, *_ = _call_with_timeout(
+        solver.solve_instance, instance_timeout
+    )
+    return np.asarray(pareto_front, dtype=float)
+
+
+def _solve_front_task(task):
+    """Worker picklable: una instancia de un candidato o de una referencia.
+
+    Devuelve un diccionario en vez de lanzar la excepcion para que un fallo en
+    una instancia no aborte el resto del lote (el comportamiento secuencial
+    tambien sigue con las demas referencias).
+    """
+    try:
+        init_params(**task["params"])
+        if task.get("reference") is not None:
+            from mohh.llamea.reference import namespace_for
+
+            namespace = namespace_for(task["reference"])
+        else:
+            namespace = _cached_operator(task["code"])
+        front = _solve_front_namespace(
+            task["instance"],
+            namespace,
+            seed=task["seed"],
+            model_name=task["model_name"],
+            mutation=task["mutation"],
+            instance_timeout=task["instance_timeout"],
+        )
+        return {"front": front, "error": None}
+    except Exception as error:  # noqa: BLE001 - se reporta como feedback
+        return {
+            "front": None,
+            "error": f"{type(error).__name__}: {error}",
+        }
+
+
 #: Punto de nadir fijo sobre frentes normalizados, igual que el proyecto
 #: original (`mohh/evaluation/experiment.py` usa `[1.1] * n_obj`).
 NADIR_FACTOR = 1.1
@@ -606,7 +699,8 @@ class OperatorEvaluator:
                  bounds=None, reference_operators=None, archive=None,
                  frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0,
                  diversity_feedback=True, diversity_log=None,
-                 target_penalty=1.0, require_target_family=False):
+                 target_penalty=1.0, require_target_family=False,
+                 fitness_workers=1):
         self.instance_paths = [str(p) for p in instance_paths]
         self.mo_generations = mo_generations
         self.mo_population_size = mo_population_size
@@ -614,6 +708,10 @@ class OperatorEvaluator:
         self.model_name = model_name
         self.mutation = mutation
         self.instance_timeout = instance_timeout
+        # Paralelismo dentro de un candidato: una tarea por instancia. Con
+        # `1` se conserva el bucle secuencial historico. El cluster lo activa
+        # con `FITNESS_WORKERS` (ver slurm/llamea-single.slrm).
+        self.fitness_workers = max(1, int(fitness_workers or 1))
         self.normalize = normalize
         self.bounds = bounds
         self.reference_operators = reference_operators
@@ -728,43 +826,59 @@ class OperatorEvaluator:
     # -- evaluacion de un operador sobre una instancia -------------------- #
     def _solve_front(self, instance, namespace):
         """Corre el MOEA interno con `namespace['crossover']` y devuelve el frente."""
-        from mohh.generation.algorithm.multiobjective import MOSolver
-        from mohh.llamea.operator import LLMOperator
-
-        # Semilla determinista por corrida (igual que el worker GE).
-        np.random.seed(self.seed)
-        solver = MOSolver(seed=self.seed)
-        # El operador del LLM se inyecta directamente en el solver; la ruta GE
-        # (load_operator -> HH_Operator) no se toca.
-        solver.crossover = LLMOperator(namespace, prob=1.0)
-        # Mutacion: el nucleo GE tiene `with_mutation` comentado y el arnes
-        # siempre cargaba `NullMutation`, asi que `--mutation` era un no-op.
-        # Ahora `--mutation` carga la mutacion de permutacion que si usa la
-        # evaluacion GE (`Swap_Mutation`) con la probabilidad de cada solver,
-        # sin tocar el nucleo (se inyecta por el mismo `load_operator`).
-        if self.mutation:
-            # `Swap_Mutation` (la mutacion de permutacion que usa la evaluacion
-            # GE) vive en `mohh.evaluation.operators.mutation`; se inyecta por
-            # atributo igual que el cruce, sin tocar el nucleo.
-            from mohh.evaluation.operators.mutation import Swap_Mutation
-
-            key = {
-                "MOEAD": "MOEAD_MUTATION_PROBABILITY",
-                "NSGAII": "NSGA_MUTATION_PROBABILITY",
-                "SMSEMOA": "SMS_MUTATION_PROBABILITY",
-            }.get(self.model_name, "MOEAD_MUTATION_PROBABILITY")
-            from mohh.evaluation.params import mo_params
-
-            prob = mo_params.get(key, 0.05)
-            solver.mutation = Swap_Mutation(prob)
-        else:
-            solver.load_operator("mutation", "NullMutation")
-        solver.load_instance(instance)
-        solver.start_model(model_name=self.model_name)
-        _, pareto_front, *_ = _call_with_timeout(
-            solver.solve_instance, self.instance_timeout
+        return _solve_front_namespace(
+            instance,
+            namespace,
+            seed=self.seed,
+            model_name=self.model_name,
+            mutation=self.mutation,
+            instance_timeout=self.instance_timeout,
         )
-        return np.asarray(pareto_front, dtype=float)
+
+    def _instance_task(self, instance, code=None, reference=None):
+        """Tarea serializable para evaluar una instancia en otro proceso."""
+        return {
+            "instance": instance,
+            "code": code,
+            "reference": reference,
+            "params": self._params_overrides(),
+            "seed": self.seed,
+            "model_name": self.model_name,
+            "mutation": self.mutation,
+            "instance_timeout": self.instance_timeout,
+        }
+
+    def _run_tasks(self, tasks):
+        """Ejecuta tareas de instancia en paralelo, preservando el orden.
+
+        `fitness_workers` es el paralelismo **dentro de un candidato** (una
+        instancia por tarea). No se debe confundir con `--max-workers`, que
+        paraleliza candidatos en LLaMEA; usar ambos a la vez anida pools de
+        procesos y por eso `run.py` los declara incompatibles.
+        """
+        workers = max(1, int(self.fitness_workers or 1))
+        if workers <= 1 or len(tasks) <= 1:
+            return [_solve_front_task(task) for task in tasks]
+
+        workers = min(workers, len(tasks))
+        try:
+            # `forkserver` (no `fork`): la corrida tiene el hilo del watchdog
+            # de parada y el cliente de vLLM con hilos; forkear un proceso
+            # multihilo puede bloquear al hijo. El servidor de forkserver es
+            # limpio y ademas evita reimportar todo en cada lote como `spawn`.
+            try:
+                context = multiprocessing.get_context("forkserver")
+            except ValueError:  # pragma: no cover - plataformas sin forkserver
+                context = multiprocessing.get_context("spawn")
+            with ProcessPoolExecutor(
+                max_workers=workers, mp_context=context
+            ) as pool:
+                return list(pool.map(_solve_front_task, tasks))
+        except Exception:
+            # Compatibilidad: si una tarea no se puede picklear (p. ej. un
+            # operador de referencia definido como closure), se degrada a
+            # secuencial en vez de tumbar la corrida.
+            return [_solve_front_task(task) for task in tasks]
 
     def _bounds_for(self, index):
         """Limites de normalizacion de la instancia `index` (o None)."""
@@ -790,31 +904,42 @@ class OperatorEvaluator:
             self._seed_frame_from_bounds()
             return self.bounds
 
-        from mohh.llamea.reference import REFERENCE_OPERATORS, namespace_for
+        from mohh.llamea.reference import REFERENCE_OPERATORS
 
         operators = self.reference_operators or REFERENCE_OPERATORS
         instances = self._ensure_instances()
         init_params(**self._params_overrides())
 
-        bounds = []
-        reference_fronts = []
-        frame_points = []
-        for inst in instances:
-            fronts = {}
+        # El panel de referencia tambien se paraleliza por instancia: con 5
+        # operadores y 80 instancias son 400 MOEAs antes del primer candidato.
+        # GE ya hacia esto en su `evaluation_step`; LLaMEA lo hacia secuencial.
+        contexts = []
+        tasks = []
+        for index, inst in enumerate(instances):
             for name, func in operators.items():
-                try:
-                    front = self._solve_front(inst, namespace_for(func))
-                except Exception:  # noqa: BLE001 - una referencia que falle no corta
-                    continue
-                if front is not None and len(front):
-                    fronts[name] = front
+                contexts.append((index, name, inst))
+                tasks.append(self._instance_task(inst, reference=func))
+        results = self._run_tasks(tasks)
+
+        reference_fronts = [{} for _ in instances]
+        for (index, name, _inst), result in zip(contexts, results):
+            if result["error"] is not None:
+                # Una referencia que falle no corta el marco: se omite, igual
+                # que el bucle secuencial anterior.
+                continue
+            front = result["front"]
+            if front is not None and len(front):
+                reference_fronts[index][name] = front
+
+        bounds = []
+        frame_points = []
+        for inst, fronts in zip(instances, reference_fronts):
             consolidated = _consolidated_frame(*fronts.values())
             if consolidated is not None:
                 bounds.append((consolidated.min(axis=0), consolidated.max(axis=0)))
             else:
                 k = inst.k_objectives
                 bounds.append((np.zeros(k), np.ones(k)))
-            reference_fronts.append(fronts)
             frame_points.append(consolidated)
         self.bounds = bounds
         self._reference_fronts = reference_fronts
@@ -1470,38 +1595,62 @@ class OperatorEvaluator:
         if self.normalize:
             self.ensure_reference_bounds()
 
-        fronts = []
-        for index, inst in enumerate(instances):
-            try:
-                front = self._solve_front(inst, namespace)
-            except Exception as e:  # noqa: BLE001 - se reporta como feedback
-                # Un operador puede pasar la validacion en tamanos chicos y
-                # fallar en una instancia real (p.ej. mutar los padres in-place
-                # o indexar fuera de rango). No debe tumbar la busqueda.
-                return {
-                    "fronts": None,
-                    "per_instance": [],
-                    "score": None,
-                    "error": f"Crossover failed on an instance: {type(e).__name__}: {e}",
-                    "exception": e,
-                    "novelty": novelty,
-                    "fingerprint": fingerprint,
-                }
-            if self.normalize:
+        # Cada instancia es una tarea independiente. Con `fitness_workers > 1`
+        # se evaluan en paralelo; con 1 se usa el namespace ya compilado y se
+        # conserva exactamente el camino secuencial historico.
+        if self.fitness_workers > 1 and len(instances) > 1:
+            tasks = [self._instance_task(inst, code=solution.code)
+                     for inst in instances]
+            results = self._run_tasks(tasks)
+            fronts = []
+            for result in results:
+                if result["error"] is not None:
+                    # Un operador puede pasar la validacion en tamanos chicos y
+                    # fallar en una instancia real (p.ej. mutar los padres
+                    # in-place o indexar fuera de rango). No debe tumbar la
+                    # busqueda.
+                    detail = result["error"]
+                    return {
+                        "fronts": None,
+                        "per_instance": [],
+                        "score": None,
+                        "error": f"Crossover failed on an instance: {detail}",
+                        "exception": ValueError(detail),
+                        "novelty": novelty,
+                        "fingerprint": fingerprint,
+                    }
+                fronts.append(result["front"])
+        else:
+            fronts = []
+            for inst in instances:
+                try:
+                    front = self._solve_front(inst, namespace)
+                except Exception as e:  # noqa: BLE001 - se reporta como feedback
+                    return {
+                        "fronts": None,
+                        "per_instance": [],
+                        "score": None,
+                        "error": (f"Crossover failed on an instance: "
+                                  f"{type(e).__name__}: {e}"),
+                        "exception": e,
+                        "novelty": novelty,
+                        "fingerprint": fingerprint,
+                    }
                 fronts.append(front)
-                continue
-            # Sin normalizacion (`--no-normalize`): HV crudo por instancia.
-            ref_point = np.asarray(front, dtype=float).max(axis=0) * NADIR_FACTOR
-            ref_point[ref_point == 0] = 1.0
-            fronts.append(float(compute_hypervolume(ref_point, front)))
 
         if self.normalize:
             return {"fronts": fronts, "per_instance": [], "score": None,
                     "error": None, "exception": None, "novelty": novelty,
                     "fingerprint": fingerprint}
 
-        return {"fronts": None, "per_instance": list(fronts),
-                "score": float(np.mean(fronts)), "error": None,
+        # Sin normalizacion (`--no-normalize`): HV crudo por instancia.
+        raw = []
+        for front in fronts:
+            ref_point = np.asarray(front, dtype=float).max(axis=0) * NADIR_FACTOR
+            ref_point[ref_point == 0] = 1.0
+            raw.append(float(compute_hypervolume(ref_point, front)))
+        return {"fronts": None, "per_instance": raw,
+                "score": float(np.mean(raw)), "error": None,
                 "exception": None, "novelty": novelty,
                 "fingerprint": fingerprint}
 
@@ -1588,7 +1737,8 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
                     bounds=None, reference_operators=None, archive=None,
                     frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0,
                     diversity_feedback=True, diversity_log=None,
-                    target_penalty=1.0, require_target_family=False):
+                    target_penalty=1.0, require_target_family=False,
+                    fitness_workers=1):
     """Construye la funcion de fitness que consume LLaMEA.
 
     @param train_instances: lista de rutas de instancias (train o test).
@@ -1613,6 +1763,9 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
         referencia (HV fijos, escala abierta).
     @param fronts_dir: si se indica, guarda los frentes crudos de cada candidato
         (`candidate-*.npz` + `manifest.jsonl`) en ese directorio.
+    @param fitness_workers: procesos para evaluar las instancias de un mismo
+        candidato (default 1 = secuencial). No combinar con `--max-workers > 1`
+        de LLaMEA: seria un pool dentro de otro pool.
     """
     return OperatorEvaluator(
         train_instances,
@@ -1634,4 +1787,5 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
         diversity_log=diversity_log,
         target_penalty=target_penalty,
         require_target_family=require_target_family,
+        fitness_workers=fitness_workers,
     )

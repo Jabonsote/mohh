@@ -43,6 +43,8 @@
 #   COMPARE=1              al terminar, comparacion pareada contra los clasicos
 #                          en el mismo job (COMPARE_SPLIT=test, COMPARE_REPEATS=11,
 #                          COMPARE_FAIL_POLICY=zero; incluye clasicos de 1 y 2 hijos)
+#   COMPARE_INSTANCES      instancias de la comparacion; default TEST_INSTANCES
+#                          (usar 'all' para las 20 y que sea pareada con EVAL_TEST)
 #   COMPARE_GE_PROTOCOL=1  comparacion con el protocolo GE completo (3 solvers x
 #                          2 mutaciones x 300/105); es caro, para tabla final
 #   COMPARE_SOLVERS        solvers de la comparacion (default SOLVER)
@@ -52,8 +54,10 @@
 #   TEMPERATURE, MAX_TOKENS, THINKING (auto|on|off), SEED, MUTATION=1, COMMA=1,
 #   REFINE_ONLY=1,
 #   REPEAT_PENALTY, DIVERSITY_FEEDBACK=0, PATIENCE, STALL_TIMEOUT,
-#   PARENT_SELECTION, NICHING, EXPERIMENT_NAME, CATEGORY, CONSTRAINT,
-#   MAX_MODEL_LEN, GPU_MEM_UTIL, CPUS (16), MEM (64G), TIME (limite SLURM),
+#   PARENT_SELECTION, NICHING, EXPERIMENT_NAME (unico por defecto:
+#   LLaMEA_single_<fecha>_<pid>), CATEGORY, CONSTRAINT, MAX_MODEL_LEN,
+#   GPU_MEM_UTIL, CPUS (16), FITNESS_WORKERS (CPUS-4; 1 = secuencial),
+#   MEM (64G), TIME (limite SLURM),
 #   WAIT=1 (esperar y mostrar el final del log antes de salir).
 #
 # Ejemplos:
@@ -83,13 +87,30 @@ if [ "${PROFILE:-}" = "list" ]; then
 fi
 echo "Perfil ${PROFILE}: modelo=$MODEL  constraint=$CONSTRAINT"
 
-# 16 CPUs es el default recomendado: el job es GPU-bound y el MOEA interno
-# corre secuencial; pedir 24 solo alarga la cola sin acelerar la busqueda.
+# Un nombre por corrida. Antes el default era siempre LLaMEA_single y dos
+# corridas escribian en la misma carpeta: run.json se sobrescribia y
+# llm_requests.jsonl se appendaba (21 peticiones viejas + 1 nueva = 22).
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-LLaMEA_single_$(date +%Y%m%d_%H%M%S)_$$}"
+export EXPERIMENT_NAME
+echo "Experimento: ${EXPERIMENT_NAME}"
+
+# 16 CPUs es el default recomendado. El MOEA interno ya no corre secuencial:
+# FITNESS_WORKERS evalua en paralelo las instancias de cada candidato (como el
+# pool de GE). Se dejan 4 nucleos para vLLM/tokenizacion.
 CPUS="${CPUS:-16}"
 MEM="${MEM:-64G}"
+if [ "${FITNESS_WORKERS:-}" = "" ]; then
+    if [ "$CPUS" -gt 4 ] 2>/dev/null; then
+        FITNESS_WORKERS=$((CPUS - 4))
+    else
+        FITNESS_WORKERS=1
+    fi
+fi
+export FITNESS_WORKERS
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
     echo "DRY RUN: no se prepara el ambiente, no se descarga el modelo y no se envia nada."
+    echo "  EXPERIMENT_NAME=$EXPERIMENT_NAME FITNESS_WORKERS=$FITNESS_WORKERS"
     echo "  sbatch --parsable --export=ALL --constraint=\"$CONSTRAINT\" --cpus-per-task=$CPUS --mem=$MEM slurm/llamea-single.slrm"
     exit 0
 fi
@@ -197,5 +218,6 @@ echo "Monitoreo:"
 echo "  squeue --user=\$USER"
 echo "  tail -f llamea-single-${JOB}.out"
 echo "  cat llamea-single-${JOB}.err"
-echo "  tail -f results/${CATEGORY:-searches}/${EXPERIMENT_NAME:-LLaMEA_single}/progress.txt"
-echo "Resultados en: results/${CATEGORY:-searches}/${EXPERIMENT_NAME:-LLaMEA_single}/"
+echo "  tail -f results/${CATEGORY:-searches}/${EXPERIMENT_NAME}/progress.txt"
+echo "  tail -f results/${CATEGORY:-searches}/latest/progress.txt"
+echo "Resultados en: results/${CATEGORY:-searches}/${EXPERIMENT_NAME}/"

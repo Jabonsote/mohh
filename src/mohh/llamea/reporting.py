@@ -52,6 +52,11 @@ class ResultsExperimentLogger(ExperimentLogger):
     """
 
     results_dir = None
+    #: Raiz del run (carpeta del experimento). Ahi se copian `progress.txt` y
+    #: `checkpoint.json` para que el monitoreo del cluster no dependa de buscar
+    #: la subcarpeta `exp-*`, y para que el watchdog de parada vea el checkpoint.
+    progress_root = None
+    state_root = None
     verbose = True
     #: Objeto con `usage_snapshot()` (normalmente `VLLM_LLM`) para registrar
     #: tokens por generacion. Se fija desde `run.py` antes de construir LLaMEA.
@@ -104,7 +109,6 @@ class ResultsExperimentLogger(ExperimentLogger):
         escritura, el archivo anterior queda intacto. Asi una corrida de 1000
         generaciones nunca pierde el mejor operador encontrado.
         """
-        checkpoint = os.path.join(self.dirname, "checkpoint.json")
         payload = {
             "time": record["time"],
             "generation": record["generation"],
@@ -117,19 +121,28 @@ class ResultsExperimentLogger(ExperimentLogger):
         diversity_source = type(self).diversity_source
         if diversity_source is not None and hasattr(diversity_source, "diversity_snapshot"):
             payload["diversity"] = diversity_source.diversity_snapshot()
-        _atomic_write_json(checkpoint, payload)
-
         fitness = best.fitness if best is not None else None
-        if best is not None and best.code and fitness is not None and np.isfinite(fitness):
-            _atomic_write_text(os.path.join(self.dirname, "best_so_far.py"),
-                               best.code.rstrip() + "\n")
-            _atomic_write_json(os.path.join(self.dirname, "best_so_far.json"), {
-                "generation": record["generation"],
-                "fitness": float(fitness),
-                "name": getattr(best, "name", None),
-                "description": getattr(best, "description", None),
-                "seed": type(self).seed,
-            })
+        state = {
+            "generation": record["generation"],
+            "fitness": (float(fitness) if fitness is not None else None),
+            "name": getattr(best, "name", None) if best is not None else None,
+            "description": (getattr(best, "description", None)
+                            if best is not None else None),
+            "seed": type(self).seed,
+        }
+
+        roots = [self.dirname]
+        state_root = type(self).state_root
+        if state_root and os.path.abspath(state_root) != os.path.abspath(self.dirname):
+            roots.append(state_root)
+        for root in roots:
+            os.makedirs(root, exist_ok=True)
+            _atomic_write_json(os.path.join(root, "checkpoint.json"), payload)
+            if (best is not None and best.code and fitness is not None
+                    and np.isfinite(fitness)):
+                _atomic_write_text(os.path.join(root, "best_so_far.py"),
+                                   best.code.rstrip() + "\n")
+                _atomic_write_json(os.path.join(root, "best_so_far.json"), state)
 
     def _log_individuals(self, population):
         """Una linea por individuo en `individuals.jsonl`.
@@ -297,8 +310,15 @@ class ResultsExperimentLogger(ExperimentLogger):
             f"inference_s_gen={record.get('inference_seconds_gen')}  "
             f"wall_s={record['wall_seconds']}  {record['time']}"
         )
-        with open(os.path.join(self.dirname, "progress.txt"), "w") as file:
-            file.write(progress + "\n")
+        progress_roots = [self.dirname]
+        progress_root = type(self).progress_root
+        if (progress_root
+                and os.path.abspath(progress_root) != os.path.abspath(self.dirname)):
+            progress_roots.append(progress_root)
+        for root in progress_roots:
+            os.makedirs(root, exist_ok=True)
+            with open(os.path.join(root, "progress.txt"), "w") as file:
+                file.write(progress + "\n")
 
         # Checkpoint durable para el cluster (ver `_write_checkpoint`).
         try:

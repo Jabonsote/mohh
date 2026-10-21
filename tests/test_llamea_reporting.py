@@ -289,6 +289,31 @@ def test_logger_writes_under_results_dir(tmp_path):
     assert not list(tmp_path.glob("exp-*"))
 
 
+def test_logger_mirrors_progress_and_checkpoint_to_run_root(tmp_path):
+    """El monitoreo y el watchdog leen la raiz del run, no solo `exp-*`."""
+    from mohh.llamea.reporting import ResultsExperimentLogger
+
+    run_root = tmp_path / "run"
+    ResultsExperimentLogger.results_dir = str(tmp_path / "llamea_logs")
+    ResultsExperimentLogger.progress_root = str(run_root)
+    ResultsExperimentLogger.state_root = str(run_root)
+    ResultsExperimentLogger.verbose = False
+    ResultsExperimentLogger.seed = 11
+    ResultsExperimentLogger.solver = "MOEAD"
+    ResultsExperimentLogger.mo_generations = 2
+    ResultsExperimentLogger.mo_population_size = 6
+    ResultsExperimentLogger.mutation = False
+    try:
+        logger = ResultsExperimentLogger("root")
+        logger.log_population([_FakeIndividual(1, 0.25, name="a")])
+        assert "gen 1" in (run_root / "progress.txt").read_text()
+        assert (run_root / "checkpoint.json").is_file()
+        assert (run_root / "best_so_far.py").is_file()
+    finally:
+        ResultsExperimentLogger.progress_root = None
+        ResultsExperimentLogger.state_root = None
+
+
 def test_write_report_builds_csv_markdown_and_plot(tmp_path):
     from mohh.llamea.reporting import write_report
 

@@ -378,6 +378,39 @@ def test_evaluator_rejects_invalid_operator():
     assert sol.error is not None
 
 
+def test_evaluator_parallel_instances_matches_sequential():
+    """El pool por instancia debe dar exactamente el mismo HV que el bucle."""
+    second = os.path.join(os.path.dirname(INSTANCE), "KC13-3fl-1un.txt")
+    paths = [INSTANCE, second]
+    scores = {}
+    for workers in (1, 2):
+        fitness = build_evaluator(
+            paths, mo_generations=2, mo_population_size=6, seed=42,
+            normalize=False, fitness_workers=workers,
+        )
+        solution = fitness(_FakeSolution(EXAMPLE_CODE))
+        assert solution.error is None
+        scores[workers] = solution.fitness
+    assert scores[1] == pytest.approx(scores[2])
+
+
+def test_evaluator_parallel_reference_frame_matches_sequential():
+    """El panel de referencia tambien se paraleliza sin cambiar el marco."""
+    second = os.path.join(os.path.dirname(INSTANCE), "KC13-3fl-1un.txt")
+    paths = [INSTANCE, second]
+    results = {}
+    for workers in (1, 2):
+        fitness = build_evaluator(
+            paths, mo_generations=2, mo_population_size=6, seed=42,
+            normalize=True, fitness_workers=workers,
+        )
+        solution = fitness(_FakeSolution(EXAMPLE_CODE))
+        assert solution.error is None
+        results[workers] = (solution.fitness, fitness.reference_scores())
+    assert results[1][0] == pytest.approx(results[2][0])
+    assert results[1][1] == pytest.approx(results[2][1])
+
+
 def test_evaluator_is_picklable_for_parallel_workers():
     """El fitness debe sobrevivir un pickle (LLaMEA con max_workers > 1)."""
     import pickle
@@ -389,6 +422,24 @@ def test_evaluator_is_picklable_for_parallel_workers():
     assert restored._instances is None
     sol = restored(_FakeSolution(EXAMPLE_CODE))
     assert sol.fitness > 0
+
+
+def test_update_latest_points_to_current_run(tmp_path):
+    from mohh.llamea.run import _update_latest
+
+    results = tmp_path / "searches"
+    first = results / "run_first"
+    second = results / "run_second"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+
+    latest = _update_latest(str(results), str(first))
+    assert latest == str(results / "latest")
+    assert os.path.islink(latest)
+    assert os.path.realpath(latest) == str(first)
+
+    _update_latest(str(results), str(second))
+    assert os.path.realpath(latest) == str(second)
 
 
 def test_evaluator_caches_repeated_code():

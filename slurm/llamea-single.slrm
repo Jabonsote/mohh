@@ -25,11 +25,12 @@
 # DIVERSITY_FEEDBACK (1), PATIENCE (0), STALL_TIMEOUT (3600),
 # PARENT_SELECTION (tournament), NICHING (none), COMBINE (1; 0 = solo
 # refine/redesign), BEHAVIORAL_PARENTS (1), NOVELTY_WEIGHT (0.5),
-# TARGET_PENALTY (1.0), REQUIRE_TARGET_FAMILY (0), EXPERIMENT_NAME, CATEGORY,
-# PORT, PROFILE, MODEL, GPU_MEM_UTIL, MAX_MODEL_LEN, TENSOR_PARALLEL,
-# VLLM_ARGS (del perfil), EXTRA_VLLM_ARGS (override), EXTRA.
-# El job pide 16 CPUs (no 24): el cuello es la GPU y el MOEA interno es
-# secuencial; 4 hilos OpenMP bastan para vLLM/tokenizacion.
+# TARGET_PENALTY (1.0), REQUIRE_TARGET_FAMILY (0), EXPERIMENT_NAME (unico por
+# defecto), CATEGORY, COMPARE_INSTANCES (default TEST_INSTANCES), PORT, PROFILE,
+# MODEL, GPU_MEM_UTIL, MAX_MODEL_LEN, TENSOR_PARALLEL, FITNESS_WORKERS (CPUS-4;
+# 1 = secuencial), VLLM_ARGS (del perfil), EXTRA_VLLM_ARGS (override), EXTRA.
+# El job pide 16 CPUs: FITNESS_WORKERS evalua las instancias de cada candidato
+# en paralelo (como GE), y se dejan 4 hilos para vLLM/tokenizacion.
 # 5 padres / 2 hijos: poblacion suficientemente diversa (una familia
 # conductual por padre) sin disparar el numero de llamadas al LLM.
 # COMPARE=1 agrega, en el mismo job, la comparacion pareada del mejor operador
@@ -57,11 +58,19 @@ set -euo pipefail
 
 cd "$SLURM_SUBMIT_DIR"
 
+# Nombre de experimento unico. El wrapper lo define antes de enviar; si se
+# invoca este .slrm directamente, el JobID evita reutilizar la carpeta.
+CATEGORY="${CATEGORY:-searches}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-LLaMEA_single_${SLURM_JOB_ID}}"
+export CATEGORY EXPERIMENT_NAME
+EXP_DIR="results/${CATEGORY}/${EXPERIMENT_NAME}"
+
 # Modelo y limites segun el perfil de GPU (override con MODEL/GPU_MEM_UTIL/...).
 source slurm/llamea-gpu-profile.sh
 PORT="${PORT:-8000}"
 
 echo "Nodo:           $SLURM_JOB_NODELIST"
+echo "Experimento:    $EXPERIMENT_NAME"
 echo "Perfil:         $PROFILE"
 echo "Modelo:         $MODEL"
 echo "Constraint:     $CONSTRAINT"
@@ -78,11 +87,29 @@ export NUMEXPR_NUM_THREADS=1
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 
+# Paralelismo del MOEA interno dentro de cada candidato. GE resuelve todas las
+# (individuo, instancia) en un ProcessPoolExecutor; LLaMEA hacia el bucle de
+# instancias secuencial. Se dejan 4 nucleos para vLLM/tokenizacion.
+CPUS_TASK="${SLURM_CPUS_PER_TASK:-1}"
+CPUS_TASK="${CPUS_TASK%%(*}"
+if ! [[ "$CPUS_TASK" =~ ^[0-9]+$ ]]; then
+    CPUS_TASK=1
+fi
+if [ "${FITNESS_WORKERS:-}" = "" ]; then
+    if [ "$CPUS_TASK" -gt 4 ]; then
+        FITNESS_WORKERS=$((CPUS_TASK - 4))
+    else
+        FITNESS_WORKERS=1
+    fi
+fi
+export FITNESS_WORKERS
+echo "Fitness workers: $FITNESS_WORKERS (CPUs del job: $CPUS_TASK)"
+
 module load python/miniforge
 eval "$(conda shell.bash hook)"
 conda activate "$SLURM_SUBMIT_DIR/.conda-env"
 
-mkdir -p results
+mkdir -p results "$EXP_DIR"
 MODEL_ROOT="$(python scripts/mohh_models.py root | head -1)"
 # vLLM y huggingface no deben escribir nada en $HOME (se borra y no lo ven los
 # nodos de computo): todo el cache va a la raiz persistente.
@@ -193,6 +220,7 @@ ARGS=(
     --n-parents "$NPARENTS"
     --n-offspring "$NOFFSPRING"
     --max-workers "${MAX_WORKERS:-1}"
+    --fitness-workers "${FITNESS_WORKERS}"
     --temperature "${TEMPERATURE:-0.7}"
     --top-p "${TOP_P:-0.8}"
     --top-k "${TOP_K:-20}"
@@ -214,7 +242,7 @@ ARGS=(
     --seed "${SEED:-42}"
     --reference-operators "${REFERENCE_OPERATORS:-ox,pbx,pmx,cx,erx}"
     --results-dir "results/${CATEGORY:-searches}"
-    --experiment-name "${EXPERIMENT_NAME:-LLaMEA_single}"
+    --experiment-name "${EXPERIMENT_NAME}"
 )
 if [ "${EVAL_TEST:-0}" = "1" ]; then
     ARGS+=(--eval-test --test-instances "${TEST_INSTANCES:-8}")
@@ -255,7 +283,6 @@ python -m mohh.llamea.run "${ARGS[@]}"
 # 4. (Opcional) Comparacion pareada contra los clasicos, en el MISMO job.
 #    COMPARE=1 la activa; usa el mejor operador que acaba de escribir la busqueda.
 if [ "${COMPARE:-0}" = "1" ]; then
-    EXP_DIR="results/${CATEGORY:-searches}/${EXPERIMENT_NAME:-LLaMEA_single}"
     BEST_OPERATOR="$EXP_DIR/llamea_best_operator.py"
     if [ -f "$BEST_OPERATOR" ]; then
         echo "Comparando el mejor operador contra los clasicos ..."
@@ -273,8 +300,9 @@ if [ "${COMPARE:-0}" = "1" ]; then
             --operator erx2=classic2:erx
             --fail-policy "${COMPARE_FAIL_POLICY:-zero}"
             --split "${COMPARE_SPLIT:-test}"
+            --instances "${COMPARE_INSTANCES:-${TEST_INSTANCES:-8}}"
             --repeats "${COMPARE_REPEATS:-11}"
-            --name "${COMPARE_NAME:-${EXPERIMENT_NAME:-LLaMEA_single}_vs_clasicos}"
+            --name "${COMPARE_NAME:-${EXPERIMENT_NAME}_vs_clasicos}"
             --save-fronts
         )
         if [ "${COMPARE_GE_PROTOCOL:-0}" = "1" ]; then

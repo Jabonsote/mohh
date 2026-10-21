@@ -574,7 +574,10 @@ def main():
     parser.add_argument("--operator", action="append", required=True,
                         help="nombre=ruta.py o nombre=classic:ox (repetible)")
     parser.add_argument("--split", choices=["train", "test"], default="test")
-    parser.add_argument("--instances", type=int, default=8)
+    parser.add_argument("--instances", default="8",
+                        help="Numero de instancias del split, o 'all'. Usar el "
+                             "mismo valor que TEST_INSTANCES para que la "
+                             "evaluacion final y la comparacion sean pareadas.")
     parser.add_argument("--repeats", type=int, default=None,
                         help="repeticiones independientes (default 11)")
     parser.add_argument("--mo-generations", type=int, default=None,

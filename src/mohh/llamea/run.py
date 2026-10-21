@@ -208,6 +208,7 @@ def _make_evaluator(paths, args, bounds=None, archive=None, fronts_dir=None,
         diversity_log=diversity_log,
         target_penalty=getattr(args, "target_penalty", 1.0),
         require_target_family=getattr(args, "require_target_family", False),
+        fitness_workers=getattr(args, "fitness_workers", 1),
     )
 
 
@@ -272,6 +273,55 @@ def _setup_logging(exp_dir):
     return logger
 
 
+def _update_latest(results_dir, exp_dir):
+    """Actualiza `results/<categoria>/latest` apuntando al run actual.
+
+    El enlace es relativo para que la carpeta de resultados se pueda mover o
+    copiar sin romperlo. Si `latest` ya existe y no es un enlace (p. ej. el
+    usuario creo una carpeta con ese nombre), no se toca.
+    """
+    results_dir = os.path.abspath(results_dir)
+    exp_dir = os.path.abspath(exp_dir)
+    os.makedirs(results_dir, exist_ok=True)
+    latest = os.path.join(results_dir, "latest")
+    target = os.path.relpath(exp_dir, results_dir)
+    try:
+        if os.path.lexists(latest):
+            if not os.path.islink(latest):
+                return None
+            if os.readlink(latest) == target:
+                return latest
+            os.unlink(latest)
+        os.symlink(target, latest)
+    except OSError:
+        return None
+    return latest
+
+
+def _rotate_request_log(path):
+    """Preserva un `llm_requests.jsonl` previo antes de empezar una corrida.
+
+    Con el nombre de experimento unico esto casi nunca ocurre, pero si alguien
+    reutiliza `EXPERIMENT_NAME` no queremos mezclar peticiones de dos corridas
+    (era la causa de "22 peticiones" cuando en realidad solo habia una nueva).
+    """
+    if not os.path.exists(path):
+        return None
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(os.path.getmtime(path)))
+    rotated = os.path.join(
+        os.path.dirname(path), f"llm_requests.{stamp}.jsonl"
+    )
+    # Si ya existe (dos corridas en el mismo segundo), agregar un sufijo.
+    suffix = 1
+    while os.path.exists(rotated):
+        rotated = os.path.join(
+            os.path.dirname(path), f"llm_requests.{stamp}.{suffix}.jsonl"
+        )
+        suffix += 1
+    os.replace(path, rotated)
+    return rotated
+
+
 def _start_stall_watchdog(exp_dir, logger, timeout):
     """Aborta la corrida si pasan `timeout` s sin una generacion nueva.
 
@@ -313,6 +363,7 @@ def run_llamea(args):
     run_start = time.time()
     exp_dir = os.path.join(args.results_dir, args.experiment_name)
     log_base = os.path.join(exp_dir, "llamea_logs")
+    request_log = os.path.join(exp_dir, "llm_requests.jsonl")
     logger = _setup_logging(exp_dir)
     os.makedirs(log_base, exist_ok=True)
     _start_stall_watchdog(exp_dir, logger, getattr(args, "stall_timeout", 0.0))
@@ -394,7 +445,8 @@ def run_llamea(args):
         "thinking": args.thinking,
         "operator_memory": args.operator_memory,
         "max_tokens": args.max_tokens,
-        "request_log": os.path.join(exp_dir, "llm_requests.jsonl"),
+        "experiment_name": args.experiment_name,
+        "request_log": request_log,
         "prompt_log_root": log_base,
         "prompt_log": None,
         "train_instances": len(train_paths),
@@ -418,6 +470,7 @@ def run_llamea(args):
         "novelty_archive_size": args.novelty_archive_size,
         "eval_repeats": args.eval_repeats,
         "max_workers": args.max_workers,
+        "fitness_workers": args.fitness_workers,
         "results_dir": args.results_dir,
         "log_dir": log_base,
         # Procedencia (reproducibilidad entre local y cluster).
@@ -470,10 +523,26 @@ def run_llamea(args):
         logger.info("dry-run: fin")
         return
 
-    # 4. Redirigir el logger de LLaMEA a results/<exp>/llamea_logs/.
+    # 4. Cada run tiene su propia carpeta (`--experiment-name` unico) y un
+    #    enlace `latest` en la carpeta de resultados. Si el nombre se reutiliza,
+    #    el log de peticiones anterior se conserva aparte en vez de mezclarse.
+    latest = _update_latest(args.results_dir, exp_dir)
+    rotated = _rotate_request_log(request_log)
+    if rotated:
+        message = f"llm_requests.jsonl previo conservado en {rotated}"
+        print(f"AVISO: {message}")
+        logger.warning(message)
+    if latest:
+        logger.info("Enlace latest: %s -> %s", latest, args.experiment_name)
+
+    # 4b. Redirigir el logger de LLaMEA a results/<exp>/llamea_logs/.
     import llamea.llamea as llamea_module
 
     ResultsExperimentLogger.results_dir = log_base
+    # `progress.txt` y `checkpoint.json` tambien en la raiz del run: el
+    # monitoreo del cluster y el watchdog no tienen que buscar `exp-*`.
+    ResultsExperimentLogger.progress_root = exp_dir
+    ResultsExperimentLogger.state_root = exp_dir
     ResultsExperimentLogger.verbose = not args.quiet
     # Semilla y configuracion del proceso: cada linea de individuals.jsonl y
     # generation_summary.jsonl la lleva, para que el log sea autosuficiente.
@@ -495,7 +564,7 @@ def run_llamea(args):
         sampling_repetition_penalty=args.sampling_repetition_penalty,
         operator_memory=args.operator_memory,
         thinking=(None if args.thinking == "auto" else args.thinking == "on"),
-        request_log_path=os.path.join(exp_dir, "llm_requests.jsonl"),
+        request_log_path=request_log,
         request_context={
             "experiment": args.experiment_name,
             "solver": args.solver,
@@ -619,7 +688,7 @@ def run_llamea(args):
         ),
         "description": best.description,
         "log_dir": log_dir,
-        "request_log": os.path.join(exp_dir, "llm_requests.jsonl"),
+        "request_log": request_log,
         "prompt_log": os.path.join(log_dir, "prompts"),
         "evaluations": len(fitness.archive),
         "evaluated_total": diversity_stats.get("evaluations"),
@@ -836,7 +905,7 @@ def run_llamea(args):
         usage["top_k"] = args.top_k
         usage["sampling_repetition_penalty"] = args.sampling_repetition_penalty
         usage["thinking"] = args.thinking
-        usage["request_log"] = os.path.join(exp_dir, "llm_requests.jsonl")
+        usage["request_log"] = request_log
         usage["operator_memory"] = (
             llm.operator_memory_snapshot()
             if hasattr(llm, "operator_memory_snapshot") else {}
@@ -855,7 +924,7 @@ def run_llamea(args):
             after=metrics_after,
             history=getattr(llm, "usage_history", []),
             extra={"seeds": seeds, "gpu_snapshot": gpu_snapshot,
-                   "request_log": os.path.join(exp_dir, "llm_requests.jsonl"),
+                   "request_log": request_log,
                    "thinking": args.thinking},
         )
         info["metrics_file"] = os.path.join(exp_dir, "metrics.json")
@@ -889,7 +958,7 @@ def run_llamea(args):
                          frame_info=frame_info,
                          cost=cost,
                          usage_history=getattr(llm, "usage_history", []),
-                         request_log=os.path.join(exp_dir, "llm_requests.jsonl"))
+                         request_log=request_log)
     for kind, path in paths.items():
         print(f"{kind}: {path}")
 
@@ -974,7 +1043,14 @@ def main(argv=None):
                               help="Ablacion: usar un esqueleto de interfaz en vez "
                                    "del ejemplo OX completo.")
     parser.add_argument("--max-workers", type=int, default=1,
-                        help="Paralelismo interno de LLaMEA para evaluar individuos.")
+                        help="Paralelismo de LLaMEA para evaluar candidatos "
+                             "(individuos) a la vez. No combinar con "
+                             "--fitness-workers.")
+    parser.add_argument("--fitness-workers", type=int, default=1,
+                        help="Procesos para evaluar en paralelo las instancias de "
+                             "UN candidato (una tarea por instancia), como hace "
+                             "GE en evaluation_step. 1 = secuencial. En el cluster "
+                             "se ajusta con FITNESS_WORKERS.")
     parser.add_argument("--solver", default="MOEAD",
                         help="MOEA interno: MOEAD, NSGAII o SMSEMOA.")
     parser.add_argument("--mutation", action="store_true",
@@ -1086,6 +1162,12 @@ def main(argv=None):
     if args.combine and args.max_workers != 1:
         parser.error("--combine usa estado de seleccion por generacion; "
                      "requiere --max-workers 1")
+    if args.max_workers > 1 and args.fitness_workers > 1:
+        parser.error("--max-workers y --fitness-workers no se combinan: "
+                     "seria un pool de procesos dentro de otro. Usa "
+                     "--max-workers 1 (y sube --fitness-workers) o al reves.")
+    if args.fitness_workers < 1:
+        parser.error("--fitness-workers debe ser >= 1")
     if not 0.0 <= args.target_penalty <= 1.0:
         parser.error("--target-penalty debe estar en [0, 1]")
 
