@@ -187,3 +187,50 @@ más a los clásicos (el margen de `feedback_b30` sobre PBX baja de +142% a +91%
    pero lo limpio es reservar un test virgen para la conclusión final.
 5. **Un solo solver.** Todo esto es MOEA/D; la conclusión podría no transferir a
    NSGA-II o SMS-EMOA.
+
+## 6. Marco GE original y reproducción (`scripts/compare_ge_frame.py`)
+
+Para comparar LLaMEA contra los operadores de GE hace falta re-ejecutar **todos**
+los operadores con el arnés de la evaluación original (`experiment.py`), no con
+el arnés de LLaMEA (`LLMOperator` + marco estacionario). `compare_ge_frame.py`
+hace exactamente eso:
+
+- mismo MOEA interno (`MOEAD`, `NSGAII`, `SMSEMOA`) con y sin `Swap_Mutation`;
+- `PMX_Cross`/`CX_Cross` de GE (clases exactas) si se piden como
+  `classic:pmx`/`classic:cx`;
+- un solo marco por instancia: unión de los frentes de **todas** las
+  configuraciones y repeticiones, `comprobate` (peeling cuando el frente tiene
+  ≤2 puntos), normalización `(f - vmin)/(vmax - vmin)` y nadir fijo `[1.1] * K`,
+  sin clipping (idéntico a `experiment.py`);
+- comparación pareada por repetición (Wilcoxon + Holm).
+
+**Artefactos** (en `results/evaluations_ge_frame/<nombre>/`), con el mismo
+formato que la evaluación original:
+
+| Ruta | Contenido |
+|---|---|
+| `initial_solutions/{real,permutation}/<instancia>/experiment_NNN.txt` | poblaciones iniciales (los individuos) |
+| `initial_solutions/{real,permutation}/<instancia>/seeds.txt` | semillas del MOEA por experimento |
+| `operators/*.py`, `operators/*.phenotype.txt`, `operators.json` | los operadores evaluados (LLaMEA y GE) |
+| `fronts/<instancia>/best_front_consolidated{,_norm}.pof` | marco GE de la instancia |
+| `fronts.npz` | frentes crudos por (protocolo, operador, repetición, instancia) |
+| `evaluation.json`, `report.md` | HV por operador/instancia, comparaciones y procedencia |
+
+**Reproducir una evaluación GE ya guardada** (mismos individuos y mismas
+semillas), p. ej. `Experiment_001`:
+
+```bash
+python3 scripts/compare_ge_frame.py \
+  --operator ge1=ge:/ruta/Experiment_001/MOEAD_operators.txt \
+  --operator pmx=classic:pmx --operator cx=classic:cx \
+  --dataset mqap_original --split test --instances all --repeats 11 \
+  --init-from /ruta/Experiment_001/evaluation_results/initial_solutions \
+  --reuse-seeds --solver MOEAD,NSGAII,SMSEMOA --mutation both \
+  --mo-generations 500 --mo-population-size 105 --budget 50k \
+  --name reproduce_ge_experiment_001
+```
+
+`--init-from` carga los individuos y `--reuse-seeds` sus semillas
+(`seeds.txt` por instancia); el marco y el HV se recalculan con el mismo
+procedimiento que `experiment.py`. Con `--instance-names` se puede reproducir
+una sola instancia para comprobar contra su CSV original.

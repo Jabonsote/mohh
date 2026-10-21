@@ -31,7 +31,35 @@ Ejemplos:
         --solver MOEAD,NSGAII,SMSEMOA --mutation both --budget 50k \
         --instances all --name final_ge_frame
 
-Salida: ``results/evaluations_ge_frame/<name>/evaluation.json`` y ``report.md``.
+    # Reproducir la evaluacion GE original reutilizando sus individuos y semillas
+    python scripts/compare_ge_frame.py \
+        --operator ge1=ge:/ruta/Experiment_001/MOEAD_operators.txt \
+        --operator pmx=classic:pmx --operator cx=classic:cx \
+        --dataset mqap_original --split test --instances all --repeats 11 \
+        --init-from /ruta/Experiment_001/evaluation_results/initial_solutions \
+        --reuse-seeds --solver MOEAD,NSGAII,SMSEMOA --mutation both \
+        --mo-generations 500 --mo-population-size 105 --budget 50k \
+        --name reproduce_ge_experiment_001
+
+Salida en ``results/evaluations_ge_frame/<name>/``:
+
+  * ``evaluation.json``: config (con procedencia), HV por operador, HV por
+    instancia/protocolo/repeticion, comparaciones pareadas y fallos;
+  * ``report.md``: diseno, procedencia, tabla de HV y comparaciones;
+  * ``operators/``: cada individuo (codigo LLaMEA ``.py``, fenotipo GE
+    ``.phenotype.txt``) y su ``.json``, mas ``operators.json``;
+  * ``initial_solutions/{real,permutation}/<instancia>/``: las poblaciones
+    iniciales (``experiment_NNN.txt``) y ``seeds.txt``, con el mismo formato
+    que ``mohh/evaluation/experiment.py``;
+  * ``fronts/<instancia>/best_front_consolidated{,_norm}.pof``: el marco GE de
+    cada instancia, tambien como en la evaluacion original;
+  * ``fronts.npz``: todos los frentes crudos por (protocolo, operador,
+    repeticion, instancia) para reanalizar sin repetir el MOEA
+    (``--no-save-fronts`` para omitirlo).
+
+``--init-from`` permite reutilizar poblaciones iniciales ya guardadas (por
+ejemplo las de ``Experiment_001``/``Experiment_002``): los individuos son los
+mismos que en la corrida anterior.
 """
 
 from __future__ import annotations
@@ -41,7 +69,6 @@ import json
 import os
 import random
 import sys
-import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache
@@ -303,7 +330,7 @@ def _protocol_name(solver: str, mutation: bool) -> str:
 
 
 def _collect_fronts(operators, paths, args, protocols, params_snapshot,
-                    instances):
+                    instances, seeds_by_instance=None):
     """Reejecuta todo y devuelve frentes por (protocolo, operador, rep, instancia)."""
     tasks = []
     keys = []
@@ -314,13 +341,15 @@ def _collect_fronts(operators, paths, args, protocols, params_snapshot,
                     # Todas las configuraciones de la repeticion comparten la
                     # misma instancia/poblacion inicial. La instancia vive en
                     # el worker (initializer), no en cada tarea.
+                    seed = (seeds_by_instance[index][rep]
+                            if seeds_by_instance else args.seed + rep)
                     keys.append((_protocol_name(solver, mutation), operator["name"], rep, index))
                     tasks.append({
                         "params": params_snapshot,
                         "operator": operator,
                         "instance_index": index,
                         "experiment": rep + 1,
-                        "seed": args.seed + rep,
+                        "seed": seed,
                         "solver": solver,
                         "mutation": mutation,
                         "budget": args.budget,
@@ -513,7 +542,7 @@ def _fmt(value, digits=6, signed=False):
 
 
 def _write_report(path, args, rows, comparisons, frames, operators, protocols,
-                  failures, fallbacks):
+                  failures, fallbacks, frame_records=None):
     degenerate = [
         os.path.basename(args.paths[index])
         for index, frame in enumerate(frames)
@@ -532,8 +561,16 @@ def _write_report(path, args, rows, comparisons, frames, operators, protocols,
         "configuraciones y repeticiones (con el peeling de GE cuando el frente "
         "tiene <=2 puntos); normalizacion `(f - vmin)/(vmax - vmin)`; nadir "
         "fijo `[1.1] * K`; sin clipping extra.",
-        "- Semillas: `base + repeticion`; la misma poblacion inicial por "
-        "repeticion para todos los operadores y protocolos.",
+        "- Semillas: "
+        + ("las del experimento original (`initial_solutions/real/<instancia>/"
+           "seeds.txt`), pareadas dentro de cada (instancia, repeticion)."
+           if getattr(args, "reuse_seeds", False) else
+           "`base + repeticion`; la misma poblacion inicial por repeticion "
+           "para todos los operadores y protocolos."),
+        "- Poblaciones iniciales: "
+        + (f"reutilizadas de `{args.init_from}`." if args.init_from else
+           "generadas de nuevo con semilla determinista por instancia "
+           "(`base + indice`)."),
         "",
         "- Instancias sin escala (excluidas): "
         + (", ".join(degenerate) if degenerate else "ninguna"),
@@ -545,6 +582,26 @@ def _write_report(path, args, rows, comparisons, frames, operators, protocols,
             f"- AVISO: {fallbacks} corridas no alcanzaron `{args.budget}` y "
             "usaron el frente final."
         )
+    lines += [
+        "", "## Artefactos y procedencia", "",
+        f"- Individuos (poblaciones iniciales): `initial_solutions/"
+        "{real,permutation}/<instancia>/experiment_NNN.txt` y `seeds.txt`.",
+        "- Operadores evaluados: `operators/` (codigo LLaMEA `.py`, fenotipo GE "
+        "`.phenotype.txt`, metadata `.json`) y `operators.json`.",
+        "- Marco GE por instancia: `fronts/<instancia>/"
+        "best_front_consolidated{,_norm}.pof`.",
+        "- Frentes crudos por (protocolo, operador, repeticion, instancia): "
+        f"`fronts.npz`{' (omitido)' if args.no_save_fronts else ''}.",
+        f"- Dataset: `{args.dataset or 'mqap (default del proyecto)'}` "
+        f"({args.split}).",
+    ]
+    if frame_records:
+        lines += ["", "| Instancia | Puntos marco | Degenerada |", "|---|---:|---|"]
+        for record in frame_records:
+            lines.append(
+                f"| {record['instance']} | {record.get('size', 0)} | "
+                f"{'si' if record.get('degenerate') else 'no'} |"
+            )
     lines += [
         "", "## HV por operador", "",
         "Cada repeticion promedia sus celdas instancia x protocolo; la tabla "
@@ -580,6 +637,113 @@ def _write_report(path, args, rows, comparisons, frames, operators, protocols,
         handle.write("\n".join(lines) + "\n")
 
 
+def _write_front(front: np.ndarray, path: str) -> None:
+    """Escribe un frente con el mismo formato que ``experiment.py`` (``.pof``)."""
+    front = np.asarray(front, dtype=float)
+    rows, columns = front.shape
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(f"# {rows} {columns}\n")
+        for row in front:
+            handle.write(" ".join(f"{value:1.6e}" for value in row) + "\n")
+
+
+def _save_seeds(init_dir: str, instance_name: str, seeds: list[int]) -> list[str]:
+    """Guarda ``seeds.txt`` en ``real`` y ``permutation``, como la evaluacion GE."""
+    written = []
+    for kind in ("real", "permutation"):
+        folder = os.path.join(init_dir, kind, instance_name)
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, "seeds.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            for seed in seeds:
+                handle.write(f"{seed}\n")
+        written.append(path)
+    return written
+
+
+def _save_operators(out_dir: str, operators: list[dict]) -> tuple[str, list[dict]]:
+    """Guarda cada individuo evaluado (codigo/fenotipo) y su metadata.
+
+    Mismo espiritu que ``Experiment_*/*_operators.txt``: el artefacto guarda lo
+    que se corrio, no solo su nombre. Devuelve ``(carpeta, registros)``.
+    """
+    operators_dir = os.path.join(out_dir, "operators")
+    os.makedirs(operators_dir, exist_ok=True)
+    records = []
+    for operator in operators:
+        record = {
+            "name": operator["name"],
+            "kind": operator["kind"],
+            "source": operator["source"],
+            "label": operator["label"],
+        }
+        payload = operator["payload"]
+        if operator["kind"] == "llamea":
+            filename = f"{operator['name']}.py"
+            with open(os.path.join(operators_dir, filename), "w",
+                      encoding="utf-8") as handle:
+                handle.write(payload.rstrip("\n") + "\n")
+            record["file"] = filename
+        elif operator["kind"] == "ge":
+            filename = f"{operator['name']}.phenotype.txt"
+            with open(os.path.join(operators_dir, filename), "w",
+                      encoding="utf-8") as handle:
+                handle.write(payload.strip() + "\n")
+            record["file"] = filename
+        else:
+            record["reference"] = payload
+        record["payload"] = payload
+        records.append(record)
+        with open(os.path.join(operators_dir, f"{operator['name']}.json"), "w",
+                  encoding="utf-8") as handle:
+            json.dump(record, handle, indent=2, ensure_ascii=False)
+
+    with open(os.path.join(out_dir, "operators.json"), "w",
+              encoding="utf-8") as handle:
+        json.dump(records, handle, indent=2, ensure_ascii=False)
+    return operators_dir, records
+
+
+def _frame_record(frame) -> dict | None:
+    """Metadatos serializables del marco GE de una instancia."""
+    if frame is None or len(frame) == 0:
+        return None
+    vmin = frame.min(axis=0)
+    vmax = frame.max(axis=0)
+    return {
+        "size": int(len(frame)),
+        "vmin": [float(value) for value in vmin],
+        "vmax": [float(value) for value in vmax],
+        "degenerate": bool(np.any(vmax == vmin)),
+    }
+
+
+def _save_frames(out_dir: str, paths: list[str], frames: list) -> list[dict]:
+    """Guarda el marco GE por instancia como ``best_front_consolidated{,_norm}.pof``."""
+    frames_dir = os.path.join(out_dir, "fronts")
+    records = []
+    for index, frame in enumerate(frames):
+        name = os.path.basename(paths[index])
+        record = {"instance": name, **(_frame_record(frame) or {})}
+        if frame is None or len(frame) == 0:
+            records.append(record)
+            continue
+        folder = os.path.join(frames_dir, os.path.splitext(name)[0])
+        os.makedirs(folder, exist_ok=True)
+        _write_front(frame, os.path.join(folder, "best_front_consolidated.pof"))
+        vmin, vmax = frame.min(axis=0), frame.max(axis=0)
+        if np.all(vmax > vmin):
+            normalized = normalize_front(frame, (vmin, vmax))
+            _write_front(
+                normalized,
+                os.path.join(folder, "best_front_consolidated_norm.pof"),
+            )
+        record["front_file"] = os.path.join(
+            folder, "best_front_consolidated.pof")
+        records.append(record)
+    return records
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -593,9 +757,16 @@ def main():
     parser.add_argument("--ge-labels", default="Best,Middle,Worst",
                         help="etiquetas del .txt de GE separadas por comas "
                              "(default: Best,Middle,Worst)")
+    parser.add_argument("--dataset", default=None,
+                        help="dataset de Params (default: el del proyecto, "
+                             "mqap); usa mqap_original para reproducir la "
+                             "evaluacion original de Experiment_001/002")
     parser.add_argument("--split", choices=["train", "test"], default="test")
     parser.add_argument("--instances", default="all",
                         help="numero de instancias o 'all'")
+    parser.add_argument("--instance-names", default=None,
+                        help="lista de nombres (basename) separada por comas; "
+                             "tiene prioridad sobre --instances")
     parser.add_argument("--repeats", type=int, default=31,
                         help="repeticiones independientes (default 31, protocolo "
                              "final; usa 2-3 para un smoke test)")
@@ -618,8 +789,23 @@ def main():
     parser.add_argument("--name", default=None)
     parser.add_argument("--workers", type=int, default=None,
                         help="workers; default: MOHH_WORKERS/CPUs disponibles")
+    parser.add_argument("--init-from", default=None,
+                        help="carpeta con poblaciones iniciales ya guardadas "
+                             "(real/<instancia>/experiment_NNN.txt) para "
+                             "reutilizar los mismos individuos, p. ej. el "
+                             "initial_solutions de Experiment_001")
+    parser.add_argument("--reuse-seeds", dest="reuse_seeds",
+                        action="store_true", default=None,
+                        help="usar las semillas de <init-from>/real/<instancia>/"
+                             "seeds.txt (por defecto si se pasa --init-from)")
+    parser.add_argument("--no-reuse-seeds", dest="reuse_seeds",
+                        action="store_false",
+                        help="ignorar seeds.txt y usar semillas pareadas "
+                             "base + repeticion")
     parser.add_argument("--save-fronts", action="store_true",
-                        help="guardar fronts.npz")
+                        help="(obsoleto) fronts.npz ya se guarda por defecto")
+    parser.add_argument("--no-save-fronts", action="store_true",
+                        help="no guardar fronts.npz (si solo interesan los .pof)")
     args = parser.parse_args()
 
     if args.repeats < 1:
@@ -630,6 +816,10 @@ def main():
         raise SystemExit("--workers debe ser >= 1")
     if args.workers:
         os.environ["MOHH_WORKERS"] = str(args.workers)
+    if args.reuse_seeds is None:
+        args.reuse_seeds = bool(args.init_from)
+    if args.reuse_seeds and not args.init_from:
+        raise SystemExit("--reuse-seeds requiere --init-from")
 
     args.name = args.name or f"ge_frame_{time.strftime('%Y%m%d_%H%M%S')}"
     operators = load_specs(args.operator, [
@@ -637,15 +827,25 @@ def main():
     ])
     protocols = _protocols(args.solver, args.mutation)
 
+    out_dir = os.path.join(args.out, args.name)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Las poblaciones iniciales ("individuos") se guardan con el mismo formato
+    # que `experiment.py`: initial_solutions/{real,permutation}/<instancia>/.
+    init_dir = os.path.join(out_dir, "initial_solutions")
+    os.makedirs(init_dir, exist_ok=True)
+
     # `instance_paths()` lee DATASET de Params, asi que set_params va primero.
-    init_dir = tempfile.mkdtemp(prefix="compare_ge_frame_init_")
-    set_params({
+    overrides = {
         "SOLVERS": sorted({solver for solver, _mutation in protocols}),
         "MO_GENERATIONS": args.mo_generations,
         "MO_POPULATION_SIZE": args.mo_population_size,
         "FILE_PATH_INITIAL_SOLUTIONS": init_dir,
         "RANDOM_SEED": args.seed,
-    })
+    }
+    if args.dataset:
+        overrides["DATASET"] = args.dataset
+    set_params(overrides)
     params = Params()
     if args.budget not in params["EVAL_BUDGETS"]:
         raise SystemExit(
@@ -659,21 +859,61 @@ def main():
     args.paths = _select_instances(
         instance_paths(train=args.split == "train"), args.instances, args.seed
     )
+    if args.instance_names:
+        wanted = [name.strip() for name in args.instance_names.split(",")
+                  if name.strip()]
+        available = {os.path.basename(path): path for path in args.paths}
+        missing = [name for name in wanted if name not in available]
+        if missing:
+            raise SystemExit(f"instancias no encontradas: {missing}")
+        args.paths = [available[name] for name in wanted]
     if not args.paths:
         raise SystemExit("no hay instancias para evaluar")
 
     # Poblaciones iniciales: una por repeticion, compartida por todos los
-    # operadores/protocolos. Se generan una vez por instancia.
+    # operadores/protocolos. Se generan (o se cargan de --init-from) una vez
+    # por instancia y se guardan en disco, igual que la evaluacion GE.
     instances = []
     for index, path in enumerate(args.paths):
         np.random.seed(args.seed + index)
         random.seed(args.seed + index)
         instance = Instance(args.mo_population_size, params["SOLUTION_TYPE"])
-        instance.load_problem("QAP", path, args.repeats)
+        instance.load_problem("QAP", path, args.repeats, args.init_from or "")
         instances.append(instance)
 
+    # Semillas del MOEA por (instancia, repeticion). Por defecto, pareadas
+    # (base + repeticion, identicas en todas las instancias). Con --reuse-seeds
+    # se cargan las del experimento original (seeds.txt por instancia), que
+    # siguen siendo pareadas dentro de cada (instancia, repeticion).
+    paired_seeds = [args.seed + rep for rep in range(args.repeats)]
+    seeds_by_instance = []
+    for instance in instances:
+        seeds = paired_seeds
+        if args.reuse_seeds:
+            seed_file = os.path.join(
+                args.init_from, "real", instance.file_name, "seeds.txt"
+            )
+            if os.path.exists(seed_file):
+                with open(seed_file, encoding="utf-8") as handle:
+                    seeds = [int(line) for line in handle if line.strip()]
+                if len(seeds) < args.repeats:
+                    raise SystemExit(
+                        f"{seed_file}: {len(seeds)} semillas < --repeats "
+                        f"{args.repeats}"
+                    )
+                seeds = seeds[:args.repeats]
+            else:
+                print(f"AVISO: no hay {seed_file}; semillas pareadas", flush=True)
+        seeds_by_instance.append(seeds)
+
+    # Se guardan por instancia como en `save_seeds` de `experiment.py`.
+    for index, instance in enumerate(instances):
+        _save_seeds(init_dir, instance.file_name, seeds_by_instance[index])
+    operators_dir, operator_records = _save_operators(out_dir, operators)
+
     fronts, failures, fallbacks = _collect_fronts(
-        operators, args.paths, args, protocols, snapshot, instances
+        operators, args.paths, args, protocols, snapshot, instances,
+        seeds_by_instance,
     )
     frames = _shared_frames(fronts, operators, protocols, args.paths, args.repeats)
     values, hv_failures = _hv_values(
@@ -690,21 +930,52 @@ def main():
         if frame is None or np.any(frame.max(axis=0) == frame.min(axis=0))
     ]
 
-    out_dir = os.path.join(args.out, args.name)
-    os.makedirs(out_dir, exist_ok=True)
+    # Marco GE de cada instancia en disco (best_front_consolidated{,_norm}.pof).
+    frame_records = _save_frames(out_dir, args.paths, frames)
+
+    # HV completo por (protocolo, operador, repeticion) -> lista por instancia.
+    per_instance_hv = {
+        operator["name"]: {
+            _protocol_name(solver, mutation): [
+                values[(_protocol_name(solver, mutation), operator["name"], rep)]
+                for rep in range(args.repeats)
+            ]
+            for solver, mutation in protocols
+        }
+        for operator in operators
+    }
+
     result = {
         "config": {
             "name": args.name,
             "argv": sys.argv,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "split": args.split,
             "instances": [os.path.basename(path) for path in args.paths],
             "initial_population_seeds": {
                 os.path.basename(path): args.seed + index
                 for index, path in enumerate(args.paths)
             },
+            "initial_solutions_dir": init_dir,
+            "initial_solutions_reused_from": args.init_from,
+            "operators_dir": operators_dir,
             "ge_labels": args.ge_labels,
             "repeats": args.repeats,
             "seed": args.seed,
+            "reuse_seeds": bool(args.reuse_seeds),
+            "run_seeds_by_instance": {
+                instance.file_name: seeds_by_instance[index]
+                for index, instance in enumerate(instances)
+            },
+            "seeds_policy": (
+                "semillas del experimento original cargadas de "
+                "initial_solutions/real/<instancia>/seeds.txt (pareadas dentro "
+                "de cada instancia y repeticion)"
+                if args.reuse_seeds else
+                "semilla MOEA = base + repeticion, identica para todos los "
+                "operadores y protocolos; una poblacion inicial por repeticion "
+                "compartida por todos"
+            ),
             "solver": args.solver,
             "protocols": [
                 {"solver": solver, "mutation": mutation,
@@ -716,21 +987,28 @@ def main():
             "budget": args.budget,
             "allow_budget_fallback": args.allow_budget_fallback,
             "frame": "consolidated over every operator, protocol and repetition",
+            "frame_operators": [operator["name"] for operator in operators],
             "nadir_factor": NADIR_FACTOR,
             "degenerate_instances": degenerate,
             "failed_runs": len(failures),
             "budget_fallbacks": fallbacks,
+            "save_fronts": not args.no_save_fronts,
         },
         "operators": rows,
+        "operator_files": operator_records,
         "comparisons": comparisons,
         "per_run_scores": scores,
+        "per_instance_hv": per_instance_hv,
+        "frames": frame_records,
         "failures": [
             {"protocol": protocol, "operator": operator, "repeat": rep,
              "instance": os.path.basename(args.paths[index]), "reason": reason}
             for (protocol, operator, rep, index), reason in sorted(failures.items())
         ],
         "run_seeds": [
-            {"operator": operator["name"], "repeat": rep, "seed": args.seed + rep}
+            {"instance": instance.file_name, "repeat": rep,
+             "seed": seeds_by_instance[index][rep], "operator": operator["name"]}
+            for index, instance in enumerate(instances)
             for operator in operators
             for rep in range(args.repeats)
         ],
@@ -739,15 +1017,19 @@ def main():
         json.dump(result, handle, indent=2, ensure_ascii=False)
     _write_report(
         os.path.join(out_dir, "report.md"), args, rows, comparisons, frames,
-        operators, protocols, failures, fallbacks,
+        operators, protocols, failures, fallbacks, frame_records,
     )
-    if args.save_fronts:
+    if not args.no_save_fronts:
         arrays = {
             f"{protocol}|{operator}|{rep}|{index}": front
             for (protocol, operator, rep, index), front in fronts.items()
         }
         np.savez_compressed(os.path.join(out_dir, "fronts.npz"), **arrays)
-    print(f"Resultados en {out_dir}", flush=True)
+    print(
+        f"Resultados en {out_dir} (individuos en {init_dir}, "
+        f"operadores en {operators_dir})",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
