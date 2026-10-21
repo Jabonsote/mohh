@@ -139,10 +139,10 @@ fi
 # no romper versiones antiguas ni futuras.
 VLLM_HELP="$(python -m vllm.entrypoints.openai.api_server --help 2>&1 || true)"
 VLLM_LOG_ARG=""
-if grep -q -- "--disable-log-requests" <<<"$VLLM_HELP"; then
-    VLLM_LOG_ARG="--disable-log-requests"
-elif grep -q -- "--no-enable-log-requests" <<<"$VLLM_HELP"; then
+if grep -q -- "--no-enable-log-requests" <<<"$VLLM_HELP"; then
     VLLM_LOG_ARG="--no-enable-log-requests"
+elif grep -q -- "--disable-log-requests" <<<"$VLLM_HELP"; then
+    VLLM_LOG_ARG="--disable-log-requests"
 fi
 VLLM_COMMON_ARGS=(
     --max-num-seqs 4
