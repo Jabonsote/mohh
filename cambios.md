@@ -865,3 +865,16 @@ modelos distintos, no el mismo quant en dos máquinas.
 imprime y que `VLLM_ARGS` incluye `--reasoning-parser glm45`. El Q4_K_M local se
 puede validar antes de una búsqueda con `llama-server` y una petición corta
 (la descarga son ~6.2 GB); en esta sesión no se ejecutó esa descarga.
+
+### 13.5 Raíz persistente cuando `$LUSTRE` no está exportado
+
+En ixachi el directorio real es `/LUSTRE/<usuario>`, pero el login no siempre
+exporta la variable `$LUSTRE` (el job mostró `LUSTRE=(sin definir)`). Eso hacía
+que `models_root()` cayera en `~/mohh-models`, violando la regla de no usar
+`$HOME`. Ahora, si `MOHH_MODELS_DIR`, `$SCRATCH` y `$LUSTRE` no están definidos,
+se usa `/LUSTRE/<usuario>/mohh-models` cuando esa ruta existe; `$HOME` queda
+solo como último recurso en una máquina personal.
+
+También se corrigió `MODEL_ROOT="$(python scripts/mohh_models.py root)"`: el
+comando imprime la ruta y dos líneas de diagnóstico, así que `HF_HOME` quedaba
+con una ruta multilínea. Ahora los `.slrm` usan `root | head -1`.

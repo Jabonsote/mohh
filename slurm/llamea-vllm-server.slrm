@@ -67,7 +67,7 @@ conda activate "$SLURM_SUBMIT_DIR/.conda-env"
 mkdir -p results
 
 # 0. Raiz persistente de pesos (LUSTRE/$SCRATCH; nunca $HOME).
-MODEL_ROOT="$(python scripts/mohh_models.py root)"
+MODEL_ROOT="$(python scripts/mohh_models.py root | head -1)"
 export HF_HOME="$MODEL_ROOT"
 export HUGGINGFACE_HUB_CACHE="$MODEL_ROOT/hub"
 echo "Raiz de modelos: $MODEL_ROOT"

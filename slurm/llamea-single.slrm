@@ -83,7 +83,7 @@ eval "$(conda shell.bash hook)"
 conda activate "$SLURM_SUBMIT_DIR/.conda-env"
 
 mkdir -p results
-MODEL_ROOT="$(python scripts/mohh_models.py root)"
+MODEL_ROOT="$(python scripts/mohh_models.py root | head -1)"
 # vLLM y huggingface no deben escribir nada en $HOME (se borra y no lo ven los
 # nodos de computo): todo el cache va a la raiz persistente.
 export HF_HOME="$MODEL_ROOT"

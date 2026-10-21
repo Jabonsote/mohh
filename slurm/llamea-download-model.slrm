@@ -49,7 +49,7 @@ conda activate "$PWD/.conda-env"
 
 # Raiz persistente y espacio disponible antes de bajar decenas de GB.
 python scripts/mohh_models.py root
-df -h "$(python scripts/mohh_models.py root)" || true
+df -h "$(python scripts/mohh_models.py root | head -1)" || true
 
 ARGS=(download "$MODEL")
 [ -n "${REVISION:-}" ] && ARGS+=(--revision "$REVISION")

@@ -39,6 +39,20 @@ def test_models_root_uses_lustre(tmp_path, monkeypatch):
     assert models.models_root() == os.path.join(str(tmp_path), "tester", "mohh-models")
 
 
+def test_models_root_uses_cluster_lustre_without_env(monkeypatch):
+    # ixachi no siempre exporta $LUSTRE; /LUSTRE/$USER es la ruta real.
+    monkeypatch.delenv("MOHH_MODELS_DIR", raising=False)
+    monkeypatch.delenv("SCRATCH", raising=False)
+    monkeypatch.delenv("LUSTRE", raising=False)
+    monkeypatch.setenv("USER", "tester")
+    real_isdir = models.os.path.isdir
+    monkeypatch.setattr(
+        models.os.path, "isdir",
+        lambda path: path == "/LUSTRE/tester" or real_isdir(path),
+    )
+    assert models.models_root() == "/LUSTRE/tester/mohh-models"
+
+
 def test_safe_name_and_model_dir(tmp_path):
     assert models.safe_name("Qwen/Qwen2.5-Coder-7B") == "Qwen--Qwen2.5-Coder-7B"
     assert models.model_dir("a/b", root=str(tmp_path)) == os.path.join(str(tmp_path), "a--b")

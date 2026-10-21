@@ -11,7 +11,8 @@ Raíz de modelos (`models_root()`), por orden de prioridad:
 1. `$MOHH_MODELS_DIR` (explícito; es lo que usan los scripts `.slrm`),
 2. `$SCRATCH/models` si `$SCRATCH` existe,
 3. `$LUSTRE/$USER/mohh-models` si `$LUSTRE` existe,
-4. `~/mohh-models` (último recurso en una máquina personal).
+4. `/LUSTRE/$USER/mohh-models` si existe (ixachi no siempre exporta `$LUSTRE`),
+5. `~/mohh-models` (último recurso en una máquina personal).
 
 Cada modelo vive en `<raiz>/<nombre-seguro>/` con el layout de HuggingFace
 (`config.json`, `*.safetensors`, tokenizer) más un manifiesto `mohh-model.json`
@@ -53,6 +54,12 @@ def models_root(explicit: str | None = None) -> str:
     if lustre and os.path.isdir(lustre):
         user = os.environ.get("USER") or os.environ.get("LOGNAME") or "user"
         return os.path.join(lustre, user, "mohh-models")
+    # ixachi define /LUSTRE pero no siempre exporta $LUSTRE en el login.
+    # Preferir la ruta real antes de caer en $HOME, que no es persistente.
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or "user"
+    cluster_lustre = os.path.join("/LUSTRE", user)
+    if os.path.isdir(cluster_lustre):
+        return os.path.join(cluster_lustre, "mohh-models")
     return os.path.expanduser("~/mohh-models")
 
 
