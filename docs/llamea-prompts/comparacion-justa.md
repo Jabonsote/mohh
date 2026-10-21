@@ -202,6 +202,9 @@ hace exactamente eso:
   configuraciones y repeticiones, `comprobate` (peeling cuando el frente tiene
   ≤2 puntos), normalización `(f - vmin)/(vmax - vmin)` y nadir fijo `[1.1] * K`,
   sin clipping (idéntico a `experiment.py`);
+- `--frame-operators` restringe qué operadores definen el marco: para usar el
+  **marco original de GE**, pasa solo sus operadores (Best/Middle/Worst + PMX/CX)
+  y LLaMEA se evalúa contra ese marco sin contribuir a él;
 - comparación pareada por repetición (Wilcoxon + Holm).
 
 **Artefactos** (en `results/evaluations_ge_frame/<nombre>/`), con el mismo

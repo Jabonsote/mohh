@@ -16,10 +16,13 @@ No modifica el nucleo de GE ni ``mohh-evaluate``. Solo usa sus clases.
 
 Ejemplos:
 
-    # LLaMEA contra los operadores (Best/Middle/Worst) de un experimento GE
+    # LLaMEA contra los operadores (Best/Middle/Worst) de un experimento GE,
+    # midiendo el HV de LLaMEA contra el marco original de GE
     python scripts/compare_ge_frame.py \
         --operator llamea=results/final_a10/LLaMEA_single_.../llamea_best_operator.py \
         --operator ge1=ge:results/Experiment_001/MOEAD_operators.txt \
+        --operator pmx=classic:pmx --operator cx=classic:cx \
+        --frame-operators ge1_Best,ge1_Middle,ge1_Worst,pmx,cx \
         --repeats 31 --instances all --name llamea_vs_ge1
 
     # Tabla final (caro): 31 repeticiones, protocolo GE completo
@@ -415,14 +418,26 @@ def _ge_frame(*point_sets):
     return np.asarray(best, dtype=float) if best else None
 
 
-def _shared_frames(fronts, operators, protocols, paths, repeats):
-    """Marco GE por instancia: frente consolidado de TODAS las configuraciones."""
+def _shared_frames(fronts, operators, protocols, paths, repeats,
+                   frame_operators=None):
+    """Marco GE por instancia: frente consolidado de las configuraciones dadas.
+
+    ``frame_operators`` restringe que operadores contribuyen al marco. Para
+    reproducir el marco original de una evaluacion GE hay que pasar solo sus
+    operadores (Best/Middle/Worst + PMX/CX): LLaMEA se sigue evaluando, pero su
+    HV se mide contra el marco de GE, igual que en la evaluacion original.
+    """
+    if frame_operators is None:
+        frame_operators = [operator["name"] for operator in operators]
+    frame_operators = set(frame_operators)
+    sources = [operator for operator in operators
+               if operator["name"] in frame_operators]
     frames = []
     for index in range(len(paths)):
         pieces = [
             fronts[(_protocol_name(solver, mutation), operator["name"], rep, index)]
             for solver, mutation in protocols
-            for operator in operators
+            for operator in sources
             for rep in range(repeats)
         ]
         pieces = [piece for piece in pieces if piece is not None and len(piece)]
@@ -560,7 +575,9 @@ def _write_report(path, args, rows, comparisons, frames, operators, protocols,
         "- Marco: por instancia, frente no dominado consolidado de todas las "
         "configuraciones y repeticiones (con el peeling de GE cuando el frente "
         "tiene <=2 puntos); normalizacion `(f - vmin)/(vmax - vmin)`; nadir "
-        "fijo `[1.1] * K`; sin clipping extra.",
+        "fijo `[1.1] * K`; sin clipping extra. Operadores del marco: "
+        + (", ".join(f"`{name}`" for name in getattr(
+            args, "frame_operators_resolved", [])) or "todos") + ".",
         "- Semillas: "
         + ("las del experimento original (`initial_solutions/real/<instancia>/"
            "seeds.txt`), pareadas dentro de cada (instancia, repeticion)."
@@ -785,6 +802,13 @@ def main():
     parser.add_argument("--baseline", default=None,
                         help="operador de referencia; si se omite, se comparan "
                              "todos los pares")
+    parser.add_argument("--frame-operators", default=None,
+                        help="lista de operadores separada por comas que define "
+                             "el marco GE (todos los demas se evaluan contra el, "
+                             "pero no contribuyen al frente consolidado). "
+                             "Default: todos. Para el marco original de una "
+                             "evaluacion GE, pasa solo sus operadores "
+                             "(p. ej. ge1_Best,ge1_Middle,ge1_Worst,pmx,cx)")
     parser.add_argument("--out", default="results/evaluations_ge_frame")
     parser.add_argument("--name", default=None)
     parser.add_argument("--workers", type=int, default=None,
@@ -826,6 +850,18 @@ def main():
         label.strip() for label in args.ge_labels.split(",") if label.strip()
     ])
     protocols = _protocols(args.solver, args.mutation)
+
+    operator_names = [operator["name"] for operator in operators]
+    if args.frame_operators:
+        frame_operators = [name.strip() for name in args.frame_operators.split(",")
+                           if name.strip()]
+        unknown = [name for name in frame_operators if name not in operator_names]
+        if unknown:
+            raise SystemExit(f"--frame-operators desconocidos: {unknown}; "
+                             f"opciones: {operator_names}")
+    else:
+        frame_operators = list(operator_names)
+    args.frame_operators_resolved = frame_operators
 
     out_dir = os.path.join(args.out, args.name)
     os.makedirs(out_dir, exist_ok=True)
@@ -915,7 +951,8 @@ def main():
         operators, args.paths, args, protocols, snapshot, instances,
         seeds_by_instance,
     )
-    frames = _shared_frames(fronts, operators, protocols, args.paths, args.repeats)
+    frames = _shared_frames(fronts, operators, protocols, args.paths,
+                            args.repeats, frame_operators)
     values, hv_failures = _hv_values(
         fronts, operators, protocols, frames, args.paths, args.repeats
     )
@@ -987,7 +1024,7 @@ def main():
             "budget": args.budget,
             "allow_budget_fallback": args.allow_budget_fallback,
             "frame": "consolidated over every operator, protocol and repetition",
-            "frame_operators": [operator["name"] for operator in operators],
+            "frame_operators": frame_operators,
             "nadir_factor": NADIR_FACTOR,
             "degenerate_instances": degenerate,
             "failed_runs": len(failures),
