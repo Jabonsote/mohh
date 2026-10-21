@@ -133,11 +133,24 @@ fi
 # `VLLM_ARGS` sigue aportando cuantizacion/KV cache por perfil y `EXTRA_VLLM_ARGS`
 # permite sobrescribir. `max-num-seqs=4` deja margen para reintentos sin reservar
 # recursos para una concurrencia que la busqueda no usa.
+#
+# vLLM 0.32 elimino `--disable-log-requests` y lo reemplazo por
+# `--no-enable-log-requests`. Detectamos el flag que acepta la instalacion para
+# no romper versiones antiguas ni futuras.
+VLLM_HELP="$(python -m vllm.entrypoints.openai.api_server --help 2>&1 || true)"
+VLLM_LOG_ARG=""
+if grep -q -- "--disable-log-requests" <<<"$VLLM_HELP"; then
+    VLLM_LOG_ARG="--disable-log-requests"
+elif grep -q -- "--no-enable-log-requests" <<<"$VLLM_HELP"; then
+    VLLM_LOG_ARG="--no-enable-log-requests"
+fi
 VLLM_COMMON_ARGS=(
     --max-num-seqs 4
     --enable-prefix-caching
-    --disable-log-requests
 )
+if [ -n "$VLLM_LOG_ARG" ]; then
+    VLLM_COMMON_ARGS+=("$VLLM_LOG_ARG")
+fi
 
 python -m vllm.entrypoints.openai.api_server \
     --model "$MODEL_PATH" \

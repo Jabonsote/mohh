@@ -401,8 +401,11 @@ def test_llamea_single_job_serves_and_searches_in_one_job():
     assert "OMP_NUM_THREADS:-4" in content
     # Parametros de servidor para una peticion secuencial con prefijo comun.
     for flag in ("--max-num-seqs 4", "--enable-prefix-caching",
-                 "--disable-log-requests"):
+                 "--no-enable-log-requests"):
         assert flag in content
+    # vLLM 0.32 elimino --disable-log-requests; se conserva solo como fallback
+    # detectado a partir de --help.
+    assert "grep -q -- \"--disable-log-requests\"" in content
     # Poblacion recomendada: 5 padres / 2 hijos y presupuesto derivado para
     # que GENERATIONS=1000 sean 1000 iteraciones (no 1000 evaluaciones).
     assert '--n-parents "$NPARENTS"' in content

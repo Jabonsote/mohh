@@ -574,11 +574,13 @@ que pedir más solo alarga la cola. Se dejan 4 hilos OpenMP para
 vLLM/tokenización y un hilo BLAS (`OPENBLAS`/`MKL`) para la búsqueda. `CPUS` y
 `MEM` son overrides del wrapper.
 
-vLLM recibe `--max-num-seqs 4`, `--enable-prefix-caching` y
-`--disable-log-requests`. LLaMEA envía una petición cada vez; el prefijo largo
-del prompt se reutiliza entre generaciones y los prompts completos ya se
-guardan en `prompts/index.jsonl`, así que desactivar el log de peticiones no
-pierde evidencia.
+vLLM recibe `--max-num-seqs 4`, `--enable-prefix-caching` y desactiva el log
+de peticiones. En vLLM 0.32 el flag es `--no-enable-log-requests`;
+`--disable-log-requests` fue eliminado. El `.slrm` consulta `api_server --help`
+y usa el que exista, para no romper versiones antiguas. LLaMEA envía una
+petición cada vez; el prefijo largo del prompt se reutiliza entre generaciones
+y los prompts completos ya se guardan en `prompts/index.jsonl`, así que
+desactivar el log de peticiones no pierde evidencia.
 
 ### 9.2 Perfiles de GPU con modelos grandes
 
@@ -878,3 +880,17 @@ solo como último recurso en una máquina personal.
 También se corrigió `MODEL_ROOT="$(python scripts/mohh_models.py root)"`: el
 comando imprime la ruta y dos líneas de diagnóstico, así que `HF_HOME` quedaba
 con una ruta multilínea. Ahora los `.slrm` usan `root | head -1`.
+
+### 13.6 vLLM 0.32 y `--disable-log-requests`
+
+El job `15301` murió al arrancar con:
+
+```text
+api_server.py: error: unrecognized arguments: --disable-log-requests
+```
+
+vLLM 0.32 eliminó ese flag. El `.slrm` ahora consulta `api_server --help` y usa
+`--no-enable-log-requests` si existe; solo cae en `--disable-log-requests` para
+instalaciones antiguas. El cliente seguía esperando el servidor hasta el
+timeout de 30 minutos porque el proceso vLLM ya había terminado; por eso la GPU
+seguía en 0 MiB.

@@ -264,9 +264,11 @@ Variables de entorno del `.slrm` (todas opcionales):
 `CONSTRAINT`, `PORT` (8000), `GPU_MEM_UTIL` (0.9), `MAX_MODEL_LEN`,
 `TENSOR_PARALLEL`, `VLLM_ARGS` (del perfil, p. ej. `--quantization awq_marlin`
 o `--kv-cache-dtype fp8`) y `EXTRA_VLLM_ARGS` (override del usuario). El script
-usa además `--max-num-seqs 4`, `--enable-prefix-caching` y
-`--disable-log-requests`: LLaMEA hace una petición cada vez, los prompts
-comparten preámbulo y los prompts completos ya quedan en `prompts/`.
+usa además `--max-num-seqs 4`, `--enable-prefix-caching` y desactiva el log de
+peticiones (`--no-enable-log-requests` en vLLM 0.32; `--disable-log-requests`
+solo si la versión instalada aún lo acepta): LLaMEA hace una petición cada vez,
+los prompts comparten preámbulo y los prompts completos ya quedan en
+`prompts/`.
 
 `glm47-flash-awq` además exporta las variables que pide la card de QuantTrio
 (`VLLM_USE_DEEP_GEMM=0`, `VLLM_USE_FLASHINFER_MOE_FP16=1`,

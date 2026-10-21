@@ -408,9 +408,11 @@ The raw HV is never modified by this check. The target-family evidence is in
 `llamea_best_info.json`. Use `COMBINE=0` for the original refine/redesign
 baseline, or `BEHAVIORAL_PARENTS=0` to isolate the target-family check.
 
-The server adds `--max-num-seqs 4`, `--enable-prefix-caching` and
-`--disable-log-requests`: LLaMEA sends one request at a time, prompts share a
-long preamble, and the full prompts are already saved under `prompts/`.
+The server adds `--max-num-seqs 4`, `--enable-prefix-caching` and disables
+vLLM request logs (`--no-enable-log-requests` in vLLM 0.32; the old
+`--disable-log-requests` is used only if that version supports it): LLaMEA sends
+one request at a time, prompts share a long preamble, and the full prompts are
+already saved under `prompts/`.
 
 For a 1000-generation run with the final evidence, use one of:
 
