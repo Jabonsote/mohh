@@ -1,0 +1,38 @@
+#!/bin/bash
+#
+# Figuras por generación para el modo intercalado.
+#
+#SBATCH -J mohh-eval-gen-fig
+#SBATCH -p ixachi
+#SBATCH -N 1
+#SBATCH -c 4
+#SBATCH --mem=16G
+#SBATCH --time=01:00:00
+#SBATCH -o mohh-eval-gen-fig-%A_%a.out
+#SBATCH -e mohh-eval-gen-fig-%A_%a.err
+#SBATCH --array=0-30
+
+set -euo pipefail
+
+EXPERIMENT="${EXPERIMENT:?define EXPERIMENT=...}"
+DATASET_PATH="${DATASET_PATH:-$SLURM_SUBMIT_DIR/datasets/mqap}"
+SOLVERS="${SOLVERS:-MOEAD,NSGAII,SMSEMOA}"
+GEN="${SLURM_ARRAY_TASK_ID}"
+SALIDA="evaluation_by_generation/generation_$(printf '%04d' "$GEN")"
+
+cd "$SLURM_SUBMIT_DIR"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export PYTHONUNBUFFERED=1
+
+module load python/miniforge
+eval "$(conda shell.bash hook)"
+conda activate "${CONDA_ENV:-$SLURM_SUBMIT_DIR/.conda-env}"
+
+mohh-evaluate "$EXPERIMENT" \
+    --dataset-path "$DATASET_PATH" \
+    --generation "$GEN" \
+    --evaluation-dir "$SALIDA" \
+    --figures-only \
+    --solvers "$SOLVERS"

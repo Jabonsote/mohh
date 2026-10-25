@@ -54,8 +54,26 @@ def _evaluation_overrides(args, solvers: list, models: list) -> dict:
         overrides["DATASET"] = args.dataset
         if not getattr(args, "dataset_path", None):
             overrides["DATASET_PATH"] = None
+    if getattr(args, "evaluation_dir", None):
+        overrides["EVALUATION_DIR"] = args.evaluation_dir
+    if (getattr(args, "generation", None) is not None
+            and not getattr(args, "evaluation_dir", None)):
+        overrides["EVALUATION_DIR"] = (
+            f"evaluation_by_generation/generation_{args.generation:04d}")
 
     return overrides
+
+
+def _evaluation_dir(experiment_path: str, args):
+    """Ruta de evaluation, absoluta o relativa al experimento."""
+    value = getattr(args, "evaluation_dir", None)
+    if not value and getattr(args, "generation", None) is not None:
+        value = f"evaluation_by_generation/generation_{args.generation:04d}"
+    if not value:
+        return os.path.join(experiment_path, "evaluation_results")
+    if os.path.isabs(value):
+        return value
+    return os.path.join(experiment_path, value)
 
 
 def _resolve_test_instances(args):
@@ -173,6 +191,13 @@ def evaluate():
                         help="No generar figuras (útil en shards paralelos).")
     parser.add_argument("--figures-only", action="store_true",
                         help="Sólo generar figuras de un evaluation_results ya calculado.")
+    parser.add_argument("--generation", type=int, default=None,
+                        help="Evalúa Best/Middle/Worst de una generación "
+                             "concreta (0-based), no sólo la última.")
+    parser.add_argument("--evaluation-dir", default=None,
+                        help="Carpeta de salida. Relativa al experimento o "
+                             "absoluta. Por defecto evaluation_results; con "
+                             "--generation usa evaluation_by_generation/generation_NNNN.")
     args = parser.parse_args()
 
     if args.no_figures and args.figures_only:
@@ -186,7 +211,7 @@ def evaluate():
         from mohh.evaluation.params import set_params
         from mohh.evaluation.make_plots import make_figures
         set_params(overrides)
-        ruta = os.path.join(args.experiment_path, "evaluation_results")
+        ruta = _evaluation_dir(args.experiment_path, args)
         print(f"Generando figuras de {ruta}")
         make_figures(ruta)
         return
@@ -199,7 +224,12 @@ def evaluate():
     for ruta in instances:
         print(f"  - {os.path.basename(ruta)}")
 
-    operators = extract_operators(args.experiment_path, models)
+    if args.generation is not None:
+        print(f"Generación   : {args.generation}")
+    print(f"Salida       : {_evaluation_dir(args.experiment_path, args)}")
+
+    operators = extract_operators(args.experiment_path, models,
+                                  generation=args.generation)
     execute_experiments(args.experiment_path, "", operators, overrides,
                         instances=instances, figures=not args.no_figures)
 

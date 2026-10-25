@@ -47,3 +47,28 @@ def test_instancias_concretas(tmp_path):
     rutas = _resolve_test_instances(_args(tmp_path, ["KC20-2fl-2un"]))
 
     assert [p.split("/")[-1] for p in rutas] == ["KC20-2fl-2un.txt"]
+
+
+def test_extrae_operadores_de_una_generacion(tmp_path):
+    """El modo intercalado lee population.json + general_info.json."""
+    import json
+    from mohh.run_evaluation import extract_generation_operators
+
+    run = tmp_path / "MOEAD_test" / "generation_results"
+    gen = run / "generations" / "generation_0002"
+    gen.mkdir(parents=True)
+    (run / "parameters.txt").write_text("ELITE_SIZE: 3\n")
+    (gen / "population.json").write_text(json.dumps(["A", "B", "C"]))
+
+    for nombre, fenotipo in (("A", "reverse(x)"),
+                             ("B", "order_based(x,y)"),
+                             ("C", "move_right(x)")):
+        individual = run / "individuals" / nombre
+        individual.mkdir(parents=True)
+        (individual / "general_info.json").write_text(
+            json.dumps({"phenotype": fenotipo}))
+
+    operadores = extract_generation_operators(
+        str(tmp_path), ["MOEAD"], generation=2)
+
+    assert operadores == ["reverse(x)", "order_based(x,y)", "move_right(x)"]

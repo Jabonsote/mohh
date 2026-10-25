@@ -33,9 +33,12 @@ def make_experiment_paths(experiment_path: list[str]):
     # Load params
     params = Params()
 
-    folder_name = "evaluation_results"
+    folder_name = params["EVALUATION_DIR"] or "evaluation_results"
 
-    dir_path = os.path.join(experiment_path, folder_name)
+    if os.path.isabs(folder_name):
+        dir_path = folder_name
+    else:
+        dir_path = os.path.join(experiment_path, folder_name)
 
     for solver in params["SOLVERS"]:
 

@@ -232,6 +232,22 @@ sola vez:
 EXPERIMENT=... DATASET_PATH=... bash slurm/submit_evaluate_array.sh
 ```
 
+### Evaluación intercalada por generación
+
+Además de evaluar los operadores finales, se puede evaluar cada generación:
+
+```bash
+mohh-evaluate results/Experiment_001 --dataset-path datasets/mqap \
+    --generation 5 --n-experiments 31
+# -> results/Experiment_001/evaluation_by_generation/generation_0005/
+
+# Todas las generaciones en un job array + figuras
+EXPERIMENT=results/Experiment_001 DATASET_PATH=$PWD/datasets/mqap \
+    bash slurm/submit_evaluate_generations.sh
+```
+
+Herramientas de análisis y P* incluidos: ver [`ANALYSIS.md`](ANALYSIS.md).
+
 ### A quick, fast sanity run
 
 To confirm the pipeline works end-to-end without waiting for a full-scale

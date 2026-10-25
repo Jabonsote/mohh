@@ -1,0 +1,78 @@
+{
+  "generated_by": "larger_pipeline/generate_references.py",
+  "dataset_dir": "/LUSTRE/javier.ramirez/proyectos/SDD/results/dataset_larger/mqap",
+  "split": "test",
+  "source": "moea_sweep",
+  "ge_generation": null,
+  "instances": [
+    "KC100-5fl-1un",
+    "KC11-2fl-1rl",
+    "KC11-2fl-1un",
+    "KC12-5fl-1rl",
+    "KC18-4fl-1un",
+    "KC21-5fl-1un",
+    "KC31-3fl-1un",
+    "KC33-4fl-1un",
+    "KC38-4fl-1rl",
+    "KC39-4fl-1un",
+    "KC44-5fl-1un",
+    "KC45-2fl-1un",
+    "KC46-4fl-1rl",
+    "KC51-2fl-1un",
+    "KC59-2fl-1rl",
+    "KC63-3fl-1un",
+    "KC64-2fl-1rl",
+    "KC76-5fl-1rl",
+    "KC77-2fl-1un",
+    "KC82-3fl-1rl"
+  ],
+  "n_instances": 20,
+  "ground_sets_json": "/home/jabonsote/Desktop/THESIS/MOHH-v1-lab-paralel/SDD/larger_pipeline/references_moea/test/ground_sets/ground_sets_test.json",
+  "parameters": {
+    "sweep": {
+      "solvers": [
+        "MOEAD",
+        "NSGAII",
+        "SMSEMOA"
+      ],
+      "mutations": [
+        "NullMutation",
+        "Swap_Mutation"
+      ],
+      "seeds": 20,
+      "seed_base": 1000,
+      "mo_generations": 300
+    },
+    "subset_size": 100,
+    "runs": 21,
+    "t_max": 10000,
+    "select": "spread",
+    "profile": null
+  },
+  "operators_experiment": "/LUSTRE/javier.ramirez/proyectos/SDD/results/experiments_larger/Experiment_001",
+  "merge_ge": false,
+  "extra_fronts": [],
+  "manifest_entries": 20,
+  "shards": [
+    "task_80",
+    "task_81",
+    "task_82",
+    "task_83",
+    "task_84",
+    "task_85",
+    "task_86",
+    "task_87",
+    "task_88",
+    "task_89",
+    "task_90",
+    "task_91",
+    "task_92",
+    "task_93",
+    "task_94",
+    "task_95",
+    "task_96",
+    "task_97",
+    "task_98",
+    "task_99"
+  ]
+}

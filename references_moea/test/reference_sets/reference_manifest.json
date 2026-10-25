@@ -1,0 +1,222 @@
+{
+  "KC100-5fl-1un": {
+    "reference_file": "KC100-5fl-1un_ref.pof",
+    "subset_size": 44,
+    "nobj": 5,
+    "ground_size": 44,
+    "selected_run": 1,
+    "selected_seed": 7040001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC11-2fl-1rl": {
+    "reference_file": "KC11-2fl-1rl_ref.pof",
+    "subset_size": 38,
+    "nobj": 2,
+    "ground_size": 38,
+    "selected_run": 1,
+    "selected_seed": 6100001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC11-2fl-1un": {
+    "reference_file": "KC11-2fl-1un_ref.pof",
+    "subset_size": 24,
+    "nobj": 2,
+    "ground_size": 24,
+    "selected_run": 1,
+    "selected_seed": 6157001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC12-5fl-1rl": {
+    "reference_file": "KC12-5fl-1rl_ref.pof",
+    "subset_size": 100,
+    "nobj": 5,
+    "ground_size": 6212,
+    "selected_run": 13,
+    "selected_seed": 6122013,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC18-4fl-1un": {
+    "reference_file": "KC18-4fl-1un_ref.pof",
+    "subset_size": 15,
+    "nobj": 4,
+    "ground_size": 15,
+    "selected_run": 1,
+    "selected_seed": 6197001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC21-5fl-1un": {
+    "reference_file": "KC21-5fl-1un_ref.pof",
+    "subset_size": 100,
+    "nobj": 5,
+    "ground_size": 15941,
+    "selected_run": 9,
+    "selected_seed": 6178009,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC31-3fl-1un": {
+    "reference_file": "KC31-3fl-1un_ref.pof",
+    "subset_size": 100,
+    "nobj": 3,
+    "ground_size": 2092,
+    "selected_run": 4,
+    "selected_seed": 6169004,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC33-4fl-1un": {
+    "reference_file": "KC33-4fl-1un_ref.pof",
+    "subset_size": 100,
+    "nobj": 4,
+    "ground_size": 3474,
+    "selected_run": 11,
+    "selected_seed": 6183011,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC38-4fl-1rl": {
+    "reference_file": "KC38-4fl-1rl_ref.pof",
+    "subset_size": 100,
+    "nobj": 4,
+    "ground_size": 1020,
+    "selected_run": 3,
+    "selected_seed": 6146003,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC39-4fl-1un": {
+    "reference_file": "KC39-4fl-1un_ref.pof",
+    "subset_size": 100,
+    "nobj": 4,
+    "ground_size": 3345,
+    "selected_run": 15,
+    "selected_seed": 6207015,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC44-5fl-1un": {
+    "reference_file": "KC44-5fl-1un_ref.pof",
+    "subset_size": 100,
+    "nobj": 5,
+    "ground_size": 14794,
+    "selected_run": 7,
+    "selected_seed": 6196007,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC45-2fl-1un": {
+    "reference_file": "KC45-2fl-1un_ref.pof",
+    "subset_size": 25,
+    "nobj": 2,
+    "ground_size": 25,
+    "selected_run": 1,
+    "selected_seed": 6182001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC46-4fl-1rl": {
+    "reference_file": "KC46-4fl-1rl_ref.pof",
+    "subset_size": 100,
+    "nobj": 4,
+    "ground_size": 1022,
+    "selected_run": 20,
+    "selected_seed": 6141020,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC51-2fl-1un": {
+    "reference_file": "KC51-2fl-1un_ref.pof",
+    "subset_size": 100,
+    "nobj": 2,
+    "ground_size": 104,
+    "selected_run": 1,
+    "selected_seed": 6169001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC59-2fl-1rl": {
+    "reference_file": "KC59-2fl-1rl_ref.pof",
+    "subset_size": 100,
+    "nobj": 2,
+    "ground_size": 155,
+    "selected_run": 5,
+    "selected_seed": 6144005,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC63-3fl-1un": {
+    "reference_file": "KC63-3fl-1un_ref.pof",
+    "subset_size": 86,
+    "nobj": 3,
+    "ground_size": 86,
+    "selected_run": 1,
+    "selected_seed": 6186001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC64-2fl-1rl": {
+    "reference_file": "KC64-2fl-1rl_ref.pof",
+    "subset_size": 100,
+    "nobj": 2,
+    "ground_size": 178,
+    "selected_run": 16,
+    "selected_seed": 6127016,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC76-5fl-1rl": {
+    "reference_file": "KC76-5fl-1rl_ref.pof",
+    "subset_size": 100,
+    "nobj": 5,
+    "ground_size": 1648,
+    "selected_run": 12,
+    "selected_seed": 6156012,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC77-2fl-1un": {
+    "reference_file": "KC77-2fl-1un_ref.pof",
+    "subset_size": 12,
+    "nobj": 2,
+    "ground_size": 12,
+    "selected_run": 1,
+    "selected_seed": 6199001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC82-3fl-1rl": {
+    "reference_file": "KC82-3fl-1rl_ref.pof",
+    "subset_size": 100,
+    "nobj": 3,
+    "ground_size": 438,
+    "selected_run": 19,
+    "selected_seed": 6131019,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  }
+}

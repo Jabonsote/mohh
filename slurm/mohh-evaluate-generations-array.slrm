@@ -1,0 +1,57 @@
+#!/bin/bash
+#
+# Evaluación intercalada: una tarea del job array por cada generación del
+# experimento. Cada tarea evalúa en test el Best/Middle/Worst de esa generación.
+#
+# Envío recomendado:
+#   EXPERIMENT=... DATASET_PATH=... bash slurm/submit_evaluate_generations.sh
+#
+#SBATCH -J mohh-eval-gen
+#SBATCH -p ixachi
+#SBATCH -N 1
+#SBATCH -c 32
+#SBATCH --mem=96G
+#SBATCH --time=3-00:00:00
+#SBATCH -o mohh-eval-gen-%A_%a.out
+#SBATCH -e mohh-eval-gen-%A_%a.err
+#SBATCH --array=0-30
+
+set -euo pipefail
+
+EXPERIMENT="${EXPERIMENT:?define EXPERIMENT=...}"
+DATASET_PATH="${DATASET_PATH:?define DATASET_PATH=...}"
+SOLVERS="${SOLVERS:-MOEAD,NSGAII,SMSEMOA}"
+N_EXPERIMENTS="${N_EXPERIMENTS:-31}"
+EVAL_ARGS="${EVAL_ARGS:---solvers $SOLVERS --n-experiments $N_EXPERIMENTS}"
+
+cd "$SLURM_SUBMIT_DIR"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export MOHH_WORKERS="${SLURM_CPUS_PER_TASK:-32}"
+export PYTHONUNBUFFERED=1
+
+module load python/miniforge
+eval "$(conda shell.bash hook)"
+conda activate "${CONDA_ENV:-$SLURM_SUBMIT_DIR/.conda-env}"
+
+GEN="${SLURM_ARRAY_TASK_ID}"
+SALIDA="evaluation_by_generation/generation_$(printf '%04d' "$GEN")"
+
+echo "Host        : $(hostname)"
+echo "Array       : ${SLURM_ARRAY_JOB_ID:-?}[$GEN]"
+echo "Experimento : $EXPERIMENT"
+echo "Generación  : $GEN"
+echo "Salida      : $EXPERIMENT/$SALIDA"
+echo "Workers     : $MOHH_WORKERS"
+echo "Inicio      : $(date)"
+
+# shellcheck disable=SC2086
+mohh-evaluate "$EXPERIMENT" \
+    --dataset-path "$DATASET_PATH" \
+    --generation "$GEN" \
+    --evaluation-dir "$SALIDA" \
+    --no-figures \
+    $EVAL_ARGS
+
+echo "Fin         : $(date)"

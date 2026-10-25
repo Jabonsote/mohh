@@ -85,6 +85,8 @@ problem_params = {
     # Ruta explícita al dataset (con train/ y test/). Si es None se usa
     # <project_root>/datasets/<DATASET>, que mantiene el comportamiento antiguo.
     'DATASET_PATH': None,
+    # Carpeta de salida; None = <experimento>/evaluation_results.
+    'EVALUATION_DIR': None,
     'DATASET_TRAIN': None,
     'DATASET_TEST': "test",
 }
