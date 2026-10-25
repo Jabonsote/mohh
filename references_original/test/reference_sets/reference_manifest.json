@@ -1,0 +1,178 @@
+{
+  "KC10-2fl-4rl": {
+    "reference_file": "KC10-2fl-4rl_ref.pof",
+    "subset_size": 53,
+    "nobj": 2,
+    "ground_size": 53,
+    "selected_run": 1,
+    "selected_seed": 6126001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC20-2fl-3un": {
+    "reference_file": "KC20-2fl-3un_ref.pof",
+    "subset_size": 100,
+    "nobj": 2,
+    "ground_size": 133,
+    "selected_run": 3,
+    "selected_seed": 6176003,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC30-3fl-2rl": {
+    "reference_file": "KC30-3fl-2rl_ref.pof",
+    "subset_size": 100,
+    "nobj": 3,
+    "ground_size": 622,
+    "selected_run": 18,
+    "selected_seed": 6118018,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC30-3fl-3rl": {
+    "reference_file": "KC30-3fl-3rl_ref.pof",
+    "subset_size": 100,
+    "nobj": 3,
+    "ground_size": 669,
+    "selected_run": 19,
+    "selected_seed": 6128019,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC10-2fl-3rl": {
+    "reference_file": "KC10-2fl-3rl_ref.pof",
+    "subset_size": 55,
+    "nobj": 2,
+    "ground_size": 55,
+    "selected_run": 1,
+    "selected_seed": 6116001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC20-2fl-4rl": {
+    "reference_file": "KC20-2fl-4rl_ref.pof",
+    "subset_size": 72,
+    "nobj": 2,
+    "ground_size": 72,
+    "selected_run": 1,
+    "selected_seed": 6129001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC20-2fl-3rl": {
+    "reference_file": "KC20-2fl-3rl_ref.pof",
+    "subset_size": 100,
+    "nobj": 2,
+    "ground_size": 141,
+    "selected_run": 6,
+    "selected_seed": 6119006,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC20-2fl-5rl": {
+    "reference_file": "KC20-2fl-5rl_ref.pof",
+    "subset_size": 99,
+    "nobj": 2,
+    "ground_size": 99,
+    "selected_run": 1,
+    "selected_seed": 6139001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC30-3fl-3un": {
+    "reference_file": "KC30-3fl-3un_ref.pof",
+    "subset_size": 100,
+    "nobj": 3,
+    "ground_size": 547,
+    "selected_run": 8,
+    "selected_seed": 6185008,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC10-2fl-2un": {
+    "reference_file": "KC10-2fl-2un_ref.pof",
+    "subset_size": 1,
+    "nobj": 2,
+    "ground_size": 1,
+    "selected_run": 1,
+    "selected_seed": 6163001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": true
+  },
+  "KC10-2fl-2rl": {
+    "reference_file": "KC10-2fl-2rl_ref.pof",
+    "subset_size": 15,
+    "nobj": 2,
+    "ground_size": 15,
+    "selected_run": 1,
+    "selected_seed": 6106001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC30-3fl-2un": {
+    "reference_file": "KC30-3fl-2un_ref.pof",
+    "subset_size": 100,
+    "nobj": 3,
+    "ground_size": 117,
+    "selected_run": 1,
+    "selected_seed": 6175001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC20-2fl-2un": {
+    "reference_file": "KC20-2fl-2un_ref.pof",
+    "subset_size": 5,
+    "nobj": 2,
+    "ground_size": 5,
+    "selected_run": 1,
+    "selected_seed": 6166001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC10-2fl-3un": {
+    "reference_file": "KC10-2fl-3un_ref.pof",
+    "subset_size": 100,
+    "nobj": 2,
+    "ground_size": 130,
+    "selected_run": 17,
+    "selected_seed": 6173017,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC10-2fl-5rl": {
+    "reference_file": "KC10-2fl-5rl_ref.pof",
+    "subset_size": 49,
+    "nobj": 2,
+    "ground_size": 49,
+    "selected_run": 1,
+    "selected_seed": 6136001,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  },
+  "KC20-2fl-2rl": {
+    "reference_file": "KC20-2fl-2rl_ref.pof",
+    "subset_size": 100,
+    "nobj": 2,
+    "ground_size": 147,
+    "selected_run": 17,
+    "selected_seed": 6109017,
+    "select": "spread",
+    "n_runs": 21,
+    "singleton": false
+  }
+}

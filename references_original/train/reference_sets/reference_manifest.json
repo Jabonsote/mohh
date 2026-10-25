@@ -1,0 +1,62 @@
+{
+  "KC30-3fl-1un": {
+    "reference_file": "KC30-3fl-1un_ref.pof",
+    "subset_size": 100,
+    "nobj": 3,
+    "ground_size": 452,
+    "selected_run": 20,
+    "selected_seed": 6165020,
+    "select": "spread",
+    "n_runs": 21
+  },
+  "KC10-2fl-1un": {
+    "reference_file": "KC10-2fl-1un_ref.pof",
+    "subset_size": 13,
+    "nobj": 2,
+    "ground_size": 13,
+    "selected_run": 1,
+    "selected_seed": 6153001,
+    "select": "spread",
+    "n_runs": 21
+  },
+  "KC30-3fl-1rl": {
+    "reference_file": "KC30-3fl-1rl_ref.pof",
+    "subset_size": 100,
+    "nobj": 3,
+    "ground_size": 607,
+    "selected_run": 12,
+    "selected_seed": 6108012,
+    "select": "spread",
+    "n_runs": 21
+  },
+  "KC10-2fl-1rl": {
+    "reference_file": "KC10-2fl-1rl_ref.pof",
+    "subset_size": 58,
+    "nobj": 2,
+    "ground_size": 58,
+    "selected_run": 1,
+    "selected_seed": 6096001,
+    "select": "spread",
+    "n_runs": 21
+  },
+  "KC20-2fl-1rl": {
+    "reference_file": "KC20-2fl-1rl_ref.pof",
+    "subset_size": 73,
+    "nobj": 2,
+    "ground_size": 73,
+    "selected_run": 1,
+    "selected_seed": 6099001,
+    "select": "spread",
+    "n_runs": 21
+  },
+  "KC20-2fl-1un": {
+    "reference_file": "KC20-2fl-1un_ref.pof",
+    "subset_size": 48,
+    "nobj": 2,
+    "ground_size": 48,
+    "selected_run": 1,
+    "selected_seed": 6156001,
+    "select": "spread",
+    "n_runs": 21
+  }
+}

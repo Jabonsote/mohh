@@ -1,0 +1,57 @@
+{
+  "generated_by": "python -m setref.cli extract",
+  "config_file": "set-reference/hhm_config.json",
+  "split": "train",
+  "profile": "base",
+  "effective": {
+    "split": "train",
+    "profile": "base",
+    "solvers": [
+      "MOEAD",
+      "NSGAII",
+      "SMSEMOA"
+    ],
+    "mutations": [
+      "NullMutation",
+      "Swap_Mutation"
+    ],
+    "seeds": 20,
+    "seed_base": 1000,
+    "mo_generations": 300,
+    "merge_ge_fronts": true,
+    "subset_size": 100,
+    "runs": 21,
+    "iterations": 10000,
+    "select": "spread",
+    "tool": {
+      "name": "RSEHH - RSEIterative",
+      "reference": "Falcon-Cardona et al., A Hyper-Heuristic for Subset Selection in Multiobjective Problems (RSEIterative, esquema de distancias aprendido S^bst_m; paradigma train-once, use indefinitely).",
+      "entry_point": "Public.subset_selection_algs.Iterative",
+      "distances": [
+        "euclidean",
+        "jensenshannon",
+        "cityblock",
+        "chebyshev",
+        "braycurtis",
+        "cosine"
+      ]
+    }
+  },
+  "rsehh": {
+    "available": true,
+    "source": "set-reference/RSEHH/RSEHH",
+    "commit": "632aad2d80b73359b42aeab64ca3fa251ee9f224",
+    "sequences": {
+      "2": "RSEHH/RSEHH/input/sequences/best_02D.txt",
+      "3": "RSEHH/RSEHH/input/sequences/best_03D.txt",
+      "5": "RSEHH/RSEHH/input/sequences/best_05D.txt",
+      "8": "RSEHH/RSEHH/input/sequences/best_08D.txt",
+      "10": "RSEHH/RSEHH/input/sequences/best_10D.txt"
+    }
+  },
+  "outputs": {
+    "reference_file_pattern": "<instancia>_ref.pof",
+    "manifest": "reference_manifest.json",
+    "all_runs_dir": "runs/<instancia>/run_NN.pof"
+  }
+}

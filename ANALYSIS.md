@@ -11,7 +11,8 @@ analyze_search.py           análisis de la búsqueda train -> test
 evaluate_31.py              evaluación de 31 réplicas
 ast_diversity.py            diversidad AST
 indicator_quality.py        calidad/saturación de indicadores
-references_moea/            P* de train y test
+references_moea/            P* del dataset nuevo (80 train / 20 test)
+references_original/        P* del dataset antiguo (6 train / 16 test)
 src/mohh/analysis/          paquete de análisis
 src/mohh/core/indicators/   IGD+, DeltaP, R2 y ReferenceSet
 ```
@@ -22,6 +23,7 @@ src/mohh/core/indicators/   IGD+, DeltaP, R2 y ReferenceSet
 references_moea/train/reference_sets/
 references_moea/test/reference_sets/
 references_moea/nondominated_counts.{csv,md}
+references_original/{train,test}/reference_sets/
 ```
 
 Se pueden usar con cualquier experimento compatible (train/test del dataset
