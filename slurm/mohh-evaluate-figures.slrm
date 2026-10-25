@@ -27,7 +27,7 @@ export PYTHONUNBUFFERED=1
 
 module load python/miniforge
 eval "$(conda shell.bash hook)"
-conda activate "$SLURM_SUBMIT_DIR/.conda-env"
+conda activate "${CONDA_ENV:-$SLURM_SUBMIT_DIR/.conda-env}"
 
 # shellcheck disable=SC2086
 mohh-evaluate "$EXPERIMENT" \

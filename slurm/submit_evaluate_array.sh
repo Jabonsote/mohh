@@ -31,6 +31,9 @@ if [ "$N" -eq 0 ]; then
 fi
 
 EXPORT="ALL,EXPERIMENT=$EXPERIMENT,DATASET_PATH=$DATASET_PATH,SOLVERS=$SOLVERS,N_EXPERIMENTS=$N_EXPERIMENTS"
+if [ -n "${CONDA_ENV:-}" ]; then
+    EXPORT="$EXPORT,CONDA_ENV=$CONDA_ENV"
+fi
 
 echo "Experimento : $EXPERIMENT"
 echo "Dataset     : $DATASET_PATH ($N test)"
