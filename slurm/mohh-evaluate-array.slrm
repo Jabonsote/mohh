@@ -1,0 +1,71 @@
+#!/bin/bash
+#
+# mohh-evaluate en paralelo: un shard por tarea del job array.
+#
+# Cada tarea evalúa una o varias instancias de test. El bucle interno de
+# N_EXPERIMENTS (31 réplicas) ya usa un pool de 31 workers, así que con -c 32
+# cada tarea ocupa un nodo estándar completo.
+#
+# Ejemplo para el dataset nuevo (20 test):
+#   N=$(find datasets/mqap/test -maxdepth 1 -name '*.txt' | wc -l)
+#   EXPERIMENT=results/experiments_larger/Experiment_001 \
+#   DATASET_PATH=$PWD/datasets/mqap \
+#   sbatch --array=0-$((N-1)) slurm/mohh-evaluate-array.slrm
+#
+# Después de que termine el array, generar las figuras una sola vez:
+#   EXPERIMENT=... DATASET_PATH=... sbatch slurm/mohh-evaluate-figures.slrm
+#
+#SBATCH -J mohh-eval
+#SBATCH -p ixachi
+#SBATCH -N 1
+#SBATCH -c 32
+#SBATCH --mem=96G
+#SBATCH --time=3-00:00:00
+#SBATCH -o mohh-eval-%A_%a.out
+#SBATCH -e mohh-eval-%A_%a.err
+#SBATCH --array=0-19
+
+set -euo pipefail
+
+EXPERIMENT="${EXPERIMENT:-$(ls -d results/Experiment_* 2>/dev/null | sort | tail -n 1)}"
+if [ -z "${EXPERIMENT:-}" ]; then
+    echo "error: define EXPERIMENT=..." >&2
+    exit 1
+fi
+
+DATASET_PATH="${DATASET_PATH:-$SLURM_SUBMIT_DIR/datasets/mqap}"
+SOLVERS="${SOLVERS:-MOEAD,NSGAII,SMSEMOA}"
+N_EXPERIMENTS="${N_EXPERIMENTS:-31}"
+EVAL_ARGS="${EVAL_ARGS:---solvers $SOLVERS --n-experiments $N_EXPERIMENTS}"
+
+cd "$SLURM_SUBMIT_DIR"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export MOHH_WORKERS="${SLURM_CPUS_PER_TASK:-32}"
+export PYTHONUNBUFFERED=1
+
+module load python/miniforge
+eval "$(conda shell.bash hook)"
+conda activate "$SLURM_SUBMIT_DIR/.conda-env"
+
+INSTANCIAS=$(find "$DATASET_PATH/test" -maxdepth 1 -name '*.txt' | wc -l)
+SHARD_COUNT="${SHARD_COUNT:-${SLURM_ARRAY_TASK_COUNT:-$INSTANCIAS}}"
+
+echo "Host        : $(hostname)"
+echo "Array       : ${SLURM_ARRAY_JOB_ID:-?}[$SLURM_ARRAY_TASK_ID]"
+echo "Experimento : $EXPERIMENT"
+echo "Dataset     : $DATASET_PATH ($INSTANCIAS test)"
+echo "Shard       : $SLURM_ARRAY_TASK_ID / $SHARD_COUNT"
+echo "Workers     : $MOHH_WORKERS"
+echo "Inicio      : $(date)"
+
+# shellcheck disable=SC2086
+mohh-evaluate "$EXPERIMENT" \
+    --dataset-path "$DATASET_PATH" \
+    --shard-index "$SLURM_ARRAY_TASK_ID" \
+    --shard-count "$SHARD_COUNT" \
+    --no-figures \
+    $EVAL_ARGS
+
+echo "Fin         : $(date)"

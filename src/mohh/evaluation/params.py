@@ -82,6 +82,9 @@ problem_params = {
     # ------------
     # Select problem dataset
     'DATASET': "mqap",
+    # Ruta explícita al dataset (con train/ y test/). Si es None se usa
+    # <project_root>/datasets/<DATASET>, que mantiene el comportamiento antiguo.
+    'DATASET_PATH': None,
     'DATASET_TRAIN': None,
     'DATASET_TEST': "test",
 }

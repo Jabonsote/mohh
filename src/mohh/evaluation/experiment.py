@@ -254,7 +254,8 @@ def write_front(front: np.ndarray, file_path: str):
         file.close()
 
 
-def run_experiments(experiment_path, results_paths, operators, overrides: dict = None) -> str:
+def run_experiments(experiment_path, results_paths, operators,
+                    overrides: dict = None, instances=None) -> str:
 
     # Set the parameters
     set_params(overrides)
@@ -318,8 +319,13 @@ def run_experiments(experiment_path, results_paths, operators, overrides: dict =
             "mo_generations": params["MO_GENERATIONS"],
         })
 
-    # Get instances
-    instances = instance_paths(train=False)
+    # Get instances. `instances` permite ejecutar un shard concreto (una o
+    # varias instancias de test); si es None se usan todas las del split.
+    if instances is None:
+        instances = instance_paths(train=False)
+    else:
+        instances = [os.path.abspath(os.path.expanduser(str(ruta)))
+                     for ruta in instances]
 
     # Total time
     program_time = time.time()

@@ -35,6 +35,14 @@ SOLVERS="MOEAD,NSGAII,SMSEMOA"
 # 31 ejecuciones independientes por combinacion instancia/operador/solver.
 EVAL_ARGS="--solvers $SOLVERS --n-experiments 31"
 
+# Dataset: vacio = <repo>/datasets/<DATASET> (comportamiento historico).
+# Para el dataset grande: DATASET_PATH=$PWD/datasets/mqap
+# Para el antiguo:         DATASET_PATH=$PWD/datasets/mqap_original
+DATASET_ARGS=""
+if [ -n "${DATASET_PATH:-}" ]; then
+    DATASET_ARGS="--dataset-path $DATASET_PATH"
+fi
+
 cd "$SLURM_SUBMIT_DIR"
 
 echo "Ejecutandose en el nodo $SLURM_JOB_NODELIST."
@@ -56,6 +64,7 @@ conda activate "$SLURM_SUBMIT_DIR/.conda-env"
 mkdir -p logs
 
 # shellcheck disable=SC2086
-mohh-evaluate "$EXPERIMENT" $EVAL_ARGS
+# shellcheck disable=SC2086
+mohh-evaluate "$EXPERIMENT" $DATASET_ARGS $EVAL_ARGS
 
 echo "Fin del script."

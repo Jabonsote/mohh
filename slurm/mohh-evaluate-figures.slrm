@@ -1,0 +1,36 @@
+#!/bin/bash
+#
+# Genera las figuras de un evaluation_results ya calculado en paralelo.
+# Se lanza después de que termine el job array.
+#
+#SBATCH -J mohh-eval-fig
+#SBATCH -p ixachi
+#SBATCH -N 1
+#SBATCH -c 4
+#SBATCH --mem=16G
+#SBATCH --time=00:30:00
+#SBATCH -o mohh-eval-fig-%j.out
+#SBATCH -e mohh-eval-fig-%j.err
+
+set -euo pipefail
+
+EXPERIMENT="${EXPERIMENT:?define EXPERIMENT=...}"
+DATASET_PATH="${DATASET_PATH:-$SLURM_SUBMIT_DIR/datasets/mqap}"
+SOLVERS="${SOLVERS:-MOEAD,NSGAII,SMSEMOA}"
+EVAL_ARGS="${EVAL_ARGS:---solvers $SOLVERS --n-experiments 31}"
+
+cd "$SLURM_SUBMIT_DIR"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export PYTHONUNBUFFERED=1
+
+module load python/miniforge
+eval "$(conda shell.bash hook)"
+conda activate "$SLURM_SUBMIT_DIR/.conda-env"
+
+# shellcheck disable=SC2086
+mohh-evaluate "$EXPERIMENT" \
+    --dataset-path "$DATASET_PATH" \
+    --figures-only \
+    $EVAL_ARGS

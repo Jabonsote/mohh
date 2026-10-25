@@ -1,5 +1,6 @@
 
 import argparse
+import glob
 import os
 
 from mohh.main import make_experiment_path, run_generation
@@ -46,8 +47,64 @@ def _evaluation_overrides(args, solvers: list, models: list) -> dict:
         overrides["N_EXPERIMENTS"] = args.n_experiments
     if args.eval_budgets is not None:
         overrides["EVAL_BUDGETS"] = _parse_eval_budgets(args.eval_budgets)
+    if getattr(args, "dataset_path", None):
+        overrides["DATASET_PATH"] = os.path.abspath(
+            os.path.expanduser(args.dataset_path))
+    if getattr(args, "dataset", None):
+        overrides["DATASET"] = args.dataset
+        if not getattr(args, "dataset_path", None):
+            overrides["DATASET_PATH"] = None
 
     return overrides
+
+
+def _resolve_test_instances(args):
+    """
+    Resuelve las instancias de test que debe ejecutar este proceso.
+
+    Por defecto usa todas las `.txt` del test del dataset. Con `--instances` se
+    pueden elegir nombres concretos y con `--shard-index/--shard-count` se
+    reparte el conjunto entre varios jobs.
+    """
+    from mohh.core.utilities.paths import project_root
+
+    if getattr(args, "dataset_path", None):
+        dataset_root = os.path.abspath(
+            os.path.expanduser(args.dataset_path))
+    else:
+        dataset = (getattr(args, "dataset", None)
+                   or evaluation_params_dict["DATASET"])
+        dataset_root = os.path.join(project_root(), "datasets", dataset)
+
+    test_dir = os.path.join(dataset_root, "test")
+    todas = sorted(glob.glob(os.path.join(test_dir, "*.txt")))
+    if not todas:
+        raise FileNotFoundError(
+            f"no hay instancias .txt en {test_dir}")
+
+    pedidas = getattr(args, "instances", None)
+    if pedidas:
+        elegidas = []
+        for nombre in pedidas:
+            ruta = nombre
+            if not os.path.isfile(ruta):
+                archivo = nombre if nombre.endswith(".txt") else nombre + ".txt"
+                ruta = os.path.join(test_dir, archivo)
+            if not os.path.isfile(ruta):
+                raise FileNotFoundError(
+                    f"no existe la instancia de test {nombre!r} "
+                    f"(buscada en {test_dir})")
+            elegidas.append(os.path.abspath(ruta))
+        todas = elegidas
+
+    count = int(getattr(args, "shard_count", 1) or 1)
+    index = int(getattr(args, "shard_index", 0) or 0)
+    if count < 1:
+        raise ValueError("--shard-count debe ser >= 1")
+    if not 0 <= index < count:
+        raise ValueError("--shard-index debe estar en [0, shard-count)")
+
+    return todas[index::count]
 
 def _add_mo_args(parser: argparse.ArgumentParser):
 
@@ -99,14 +156,52 @@ def evaluate():
     parser.add_argument("--n-experiments", type=int, default=None)
     _add_mo_args(parser)
     _add_eval_budgets_arg(parser)
+    parser.add_argument("--dataset-path", default=None,
+                        help="Ruta al dataset con train/ y test/ (por defecto "
+                             "<repo>/datasets/<DATASET>).")
+    parser.add_argument("--dataset", default=None,
+                        help="Nombre del dataset bajo <repo>/datasets/ "
+                             "(por defecto el de params).")
+    parser.add_argument("--instances", nargs="+", default=None,
+                        help="Instancias de test concretas (nombres o rutas). "
+                             "Por defecto todas las .txt del test.")
+    parser.add_argument("--shard-index", type=int, default=0,
+                        help="Índice de este shard (para job arrays).")
+    parser.add_argument("--shard-count", type=int, default=1,
+                        help="Número total de shards (para job arrays).")
+    parser.add_argument("--no-figures", action="store_true",
+                        help="No generar figuras (útil en shards paralelos).")
+    parser.add_argument("--figures-only", action="store_true",
+                        help="Sólo generar figuras de un evaluation_results ya calculado.")
     args = parser.parse_args()
+
+    if args.no_figures and args.figures_only:
+        parser.error("--no-figures y --figures-only son incompatibles")
 
     models = args.models.split(",") if args.models else discover_models(args.experiment_path)
     solvers = args.solvers.split(",") if args.solvers else evaluation_params_dict["SOLVERS"]
     overrides = _evaluation_overrides(args, solvers, models)
 
+    if args.figures_only:
+        from mohh.evaluation.params import set_params
+        from mohh.evaluation.make_plots import make_figures
+        set_params(overrides)
+        ruta = os.path.join(args.experiment_path, "evaluation_results")
+        print(f"Generando figuras de {ruta}")
+        make_figures(ruta)
+        return
+
+    instances = _resolve_test_instances(args)
+    if not instances:
+        print("No hay instancias de test para este shard; nada que hacer.")
+        return
+    print(f"Instancias de test en este job: {len(instances)}")
+    for ruta in instances:
+        print(f"  - {os.path.basename(ruta)}")
+
     operators = extract_operators(args.experiment_path, models)
-    execute_experiments(args.experiment_path, "", operators, overrides)
+    execute_experiments(args.experiment_path, "", operators, overrides,
+                        instances=instances, figures=not args.no_figures)
 
 def run_full():
 

@@ -1,0 +1,49 @@
+"""Selección de instancias de test para mohh-evaluate."""
+
+from argparse import Namespace
+
+from mohh.cli import _resolve_test_instances
+
+
+def _args(dataset_path, instances=None, index=0, count=1):
+    return Namespace(dataset_path=str(dataset_path), dataset=None,
+                     instances=instances, shard_index=index,
+                     shard_count=count)
+
+
+def test_usa_todas_las_instancias_de_test(tmp_path):
+    test_dir = tmp_path / "test"
+    test_dir.mkdir()
+    for nombre in ("KC10-2fl-2rl", "KC20-2fl-2un", "KC30-3fl-2rl"):
+        (test_dir / f"{nombre}.txt").write_text("x")
+
+    rutas = _resolve_test_instances(_args(tmp_path))
+
+    assert [p.split("/")[-1] for p in rutas] == [
+        "KC10-2fl-2rl.txt", "KC20-2fl-2un.txt", "KC30-3fl-2rl.txt"]
+
+
+def test_shard_reparte_sin_solapar(tmp_path):
+    test_dir = tmp_path / "test"
+    test_dir.mkdir()
+    for i in range(5):
+        (test_dir / f"KC{i}-2fl-2rl.txt").write_text("x")
+
+    vistos = []
+    for index in range(3):
+        parcial = _resolve_test_instances(_args(tmp_path, index=index, count=3))
+        vistos.extend(p.split("/")[-1] for p in parcial)
+
+    assert len(vistos) == 5
+    assert len(set(vistos)) == 5
+
+
+def test_instancias_concretas(tmp_path):
+    test_dir = tmp_path / "test"
+    test_dir.mkdir()
+    for nombre in ("KC10-2fl-2rl", "KC20-2fl-2un"):
+        (test_dir / f"{nombre}.txt").write_text("x")
+
+    rutas = _resolve_test_instances(_args(tmp_path, ["KC20-2fl-2un"]))
+
+    assert [p.split("/")[-1] for p in rutas] == ["KC20-2fl-2un.txt"]

@@ -187,6 +187,51 @@ mohh-evaluate results/Experiment_001 --models MOEAD --solvers MOEAD,NSGAII \
 | `--n-experiments N` | Repeated experiments per instance/operator combination |
 | `--full` | Required on `mohh-run` to confirm running both stages |
 
+### Datasets y evaluación en paralelo
+
+`mohh-evaluate` acepta ahora un dataset explícito y puede repartir las
+instancias de test entre varios jobs:
+
+```bash
+# dataset nuevo (20 test)
+mohh-evaluate results/experiments_larger/Experiment_001 \
+    --dataset-path /LUSTRE/$USER/proyectos/SDD/results/dataset_larger/mqap \
+    --n-experiments 31
+
+# dataset antiguo (16 test)
+mohh-evaluate results/Experiment_001 \
+    --dataset-path /LUSTRE/$USER/proyectos/SDD/datasets/mqap \
+    --n-experiments 31
+```
+
+Por defecto se ejecutan **todas** las `.txt` de `test/`. También se puede
+limitar:
+
+```bash
+mohh-evaluate results/experiments_larger/Experiment_001 \
+    --dataset-path .../results/dataset_larger/mqap \
+    --instances KC100-5fl-1un KC31-3fl-1un
+```
+
+Para un job array, una tarea por instancia:
+
+```bash
+N=$(find /LUSTRE/$USER/proyectos/SDD/results/dataset_larger/mqap/test \
+        -maxdepth 1 -name '*.txt' | wc -l)
+EXPERIMENT=/LUSTRE/$USER/proyectos/SDD/results/experiments_larger/Experiment_001 \
+DATASET_PATH=/LUSTRE/$USER/proyectos/SDD/results/dataset_larger/mqap \
+sbatch --array=0-$((N-1)) slurm/mohh-evaluate-array.slrm
+```
+
+Cada tarea usa 32 núcleos: 31 workers para las 31 réplicas + el proceso
+principal. Las tareas no dibujan figuras; al terminar el array se generan una
+sola vez:
+
+```bash
+# o directamente, calculando el array y encadenando las figuras:
+EXPERIMENT=... DATASET_PATH=... bash slurm/submit_evaluate_array.sh
+```
+
 ### A quick, fast sanity run
 
 To confirm the pipeline works end-to-end without waiting for a full-scale
