@@ -21,8 +21,8 @@
 #SBATCH -c 32
 #SBATCH --mem=96G
 #SBATCH --time=3-00:00:00
-#SBATCH -o mohh-eval-%A_%a.out
-#SBATCH -e mohh-eval-%A_%a.err
+#SBATCH -o logs/mohh-eval-%A_%a.out
+#SBATCH -e logs/mohh-eval-%A_%a.err
 #SBATCH --array=0-19
 
 set -euo pipefail

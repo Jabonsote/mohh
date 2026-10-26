@@ -25,3 +25,17 @@ exp-*/
 docs/llamea-prompts/pdfs/
 # Nota de trabajo, no material del proyecto.
 best.md
+
+# Logs de SLURM y depuración: no se versionan.
+logs/*
+!logs/.gitkeep
+*.out
+*.err
+mohh-eval-*
+mohh-evaluate-*
+mohh-generate-*
+llamea-single-*
+llamea-models-*
+llamea-generate-*
+llamea-vllm-*
+eval_debug_*.tar.gz

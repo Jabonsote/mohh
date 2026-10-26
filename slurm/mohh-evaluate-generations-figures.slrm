@@ -8,8 +8,8 @@
 #SBATCH -c 4
 #SBATCH --mem=16G
 #SBATCH --time=01:00:00
-#SBATCH -o mohh-eval-gen-fig-%A_%a.out
-#SBATCH -e mohh-eval-gen-fig-%A_%a.err
+#SBATCH -o logs/mohh-eval-gen-fig-%A_%a.out
+#SBATCH -e logs/mohh-eval-gen-fig-%A_%a.err
 #SBATCH --array=0-30
 
 set -euo pipefail

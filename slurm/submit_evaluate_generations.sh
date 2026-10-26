@@ -9,6 +9,8 @@
 #
 set -euo pipefail
 
+mkdir -p logs
+
 EXPERIMENT="${EXPERIMENT:?define EXPERIMENT=...}"
 DATASET_PATH="${DATASET_PATH:?define DATASET_PATH=...}"
 SOLVERS="${SOLVERS:-MOEAD,NSGAII,SMSEMOA}"

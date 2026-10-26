@@ -25,8 +25,8 @@
 #SBATCH -N 1
 #SBATCH -c 50
 #SBATCH --time=3-00:00:00
-#SBATCH -o mohh-generate-%j.out
-#SBATCH -e mohh-generate-%j.err
+#SBATCH -o logs/mohh-generate-%j.out
+#SBATCH -e logs/mohh-generate-%j.err
 
 # --- Parametros del experimento (editar aqui) ---
 # Un modelo por job en N nodos (150 cores con 3 jobs). Cada job necesita su

@@ -147,11 +147,12 @@ def test_evaluate_runs_31_independent_experiments():
     "script", ["mohh-generate.slrm", "mohh-generate-big.slrm", "mohh-evaluate.slrm"]
 )
 def test_slurm_outputs_in_submit_dir(script):
-    # Como holamundo.out en la metodologia: sin subcarpetas, para que el
-    # job no muera si el directorio no existe al arrancar.
+    # Los logs van a logs/ (el directorio se versiona con .gitkeep).
     for flag in ("-o", "-e"):
         match = re.search(rf"#SBATCH\s+{flag}\s+(\S+)", _read(script))
-        assert match and "/" not in match.group(1), f"{script}: {flag} usa subcarpeta"
+        nombre = match.group(1) if match else ""
+        assert nombre.startswith("logs/"), f"{script}: {flag} fuera de logs/"
+    assert os.path.isfile(os.path.join(SLURM_DIR, "..", "logs", ".gitkeep"))
 
 
 @pytest.mark.parametrize(
@@ -220,10 +221,12 @@ def test_llamea_slurm_required_directives(script):
         r"#SBATCH\s+--time=\S+",
     ):
         assert re.search(pattern, content), f"{script}: missing {pattern}"
-    # Como los .slrm de GE: logs en el dir de trabajo, sin subcarpetas.
+    # Logs dentro de logs/ (versionado con .gitkeep).
     for flag in ("-o", "-e"):
         match = re.search(rf"#SBATCH\s+{flag}\s+(\S+)", content)
-        assert match and "/" not in match.group(1), f"{script}: {flag} usa subcarpeta"
+        nombre = match.group(1) if match else ""
+        assert nombre.startswith("logs/"), f"{script}: {flag} fuera de logs/"
+    assert os.path.isfile(os.path.join(SLURM_DIR, "..", "logs", ".gitkeep"))
 
 
 @pytest.mark.parametrize("script", LLAMEA_SLRM)

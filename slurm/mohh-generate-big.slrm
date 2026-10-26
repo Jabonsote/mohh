@@ -22,8 +22,8 @@
 #SBATCH -c 110
 #SBATCH --exclusive
 #SBATCH --time=3-00:00:00
-#SBATCH -o mohh-generate-big-%j.out
-#SBATCH -e mohh-generate-big-%j.err
+#SBATCH -o logs/mohh-generate-big-%j.out
+#SBATCH -e logs/mohh-generate-big-%j.err
 
 # --- Parametros del experimento (editar aqui) ---
 MODELS="${MODELS:-MOEAD}"

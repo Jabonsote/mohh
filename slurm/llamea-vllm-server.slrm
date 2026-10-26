@@ -40,8 +40,8 @@
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="A100|H100"
 #SBATCH --time=30-00:00:00
-#SBATCH -o llamea-vllm-%j.out
-#SBATCH -e llamea-vllm-%j.err
+#SBATCH -o logs/llamea-vllm-%j.out
+#SBATCH -e logs/llamea-vllm-%j.err
 
 cd "$SLURM_SUBMIT_DIR"
 

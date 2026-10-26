@@ -51,8 +51,8 @@
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="A100|H100"
 #SBATCH --time=3-00:00:00
-#SBATCH -o llamea-single-%j.out
-#SBATCH -e llamea-single-%j.err
+#SBATCH -o logs/llamea-single-%j.out
+#SBATCH -e logs/llamea-single-%j.err
 
 set -euo pipefail
 

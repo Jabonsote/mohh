@@ -30,8 +30,8 @@
 #SBATCH -N 1
 #SBATCH -c 8
 #SBATCH --time=12:00:00
-#SBATCH -o llamea-models-%j.out
-#SBATCH -e llamea-models-%j.err
+#SBATCH -o logs/llamea-models-%j.out
+#SBATCH -e logs/llamea-models-%j.err
 
 set -euo pipefail
 
