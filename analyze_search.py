@@ -1048,10 +1048,14 @@ def figura_trayectorias(largo, tablas, metricas, directorio, split):
                   flush=True)
 
         figura, eje = plt.subplots(figsize=(8, 4.5))
-        for instancia in normalizado.index:
+        instancias = list(normalizado.index)
+        cmap = plt.get_cmap("viridis")
+        norm = plt.Normalize(vmin=0, vmax=max(1, len(instancias) - 1))
+        for posicion, instancia in enumerate(instancias):
             serie = normalizado.loc[instancia]
             eje.plot(serie.index, serie.to_numpy(), marker="o", markersize=3,
-                     linewidth=1.2, alpha=0.8, label=instancia)
+                     linewidth=1.2, alpha=0.8,
+                     color=cmap(norm(posicion)))
 
         medias = normalizado.mean(axis=0)
         eje.plot(medias.index, medias.to_numpy(), color="black", linewidth=2.4,
@@ -1061,7 +1065,13 @@ def figura_trayectorias(largo, tablas, metricas, directorio, split):
         eje.set_xlabel("generacion")
         eje.set_ylabel("normalizado")
         eje.grid(alpha=0.3)
-        eje.legend(fontsize=6, ncol=2)
+        # 80 instancias no caben en una leyenda: colorbar ordenada.
+        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+        sm.set_array([])
+        cbar = figura.colorbar(sm, ax=eje, pad=0.015, fraction=0.035)
+        cbar.set_label("instancia (orden alfabético)", fontsize=7)
+        eje.legend(handles=[Line2D([], [], color="black", linewidth=2.4,
+                                   label="media")], loc="best", fontsize=8)
 
         guardar(figura, os.path.join(directorio,
                                      f"trayectorias/{split}_{metrica}.png"))
@@ -1080,16 +1090,23 @@ def figura_trayectorias(largo, tablas, metricas, directorio, split):
                   flush=True)
 
         figura, eje = plt.subplots(figsize=(8, 4.5))
-        for instancia in norm_mejor.index:
+        instancias = list(norm_mejor.index)
+        cmap = plt.get_cmap("viridis")
+        norm = plt.Normalize(vmin=0, vmax=max(1, len(instancias) - 1))
+        for posicion, instancia in enumerate(instancias):
             serie = norm_mejor.loc[instancia]
             eje.plot(serie.index, serie.to_numpy(), marker="o", markersize=3,
-                     linewidth=1.2, alpha=0.8, label=instancia)
+                     linewidth=1.2, alpha=0.8,
+                     color=cmap(norm(posicion)))
 
         eje.set_title(f"{metrica} mejor")
         eje.set_xlabel("generacion")
         eje.set_ylabel("normalizado")
         eje.grid(alpha=0.3)
-        eje.legend(fontsize=6, ncol=2)
+        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+        sm.set_array([])
+        cbar = figura.colorbar(sm, ax=eje, pad=0.015, fraction=0.035)
+        cbar.set_label("instancia (orden alfabético)", fontsize=7)
 
         guardar(figura, os.path.join(
             directorio, f"trayectorias/mejor_{split}_{metrica}.png"))

@@ -1,6 +1,12 @@
-*__pycache__
+__pycache__/
+*.pyc
 .DS_Store
-results*/
+results/*
+!results/analysis_scripts/
+!results/analysis_scripts/**
+!results/larger_RESULTS.md
+!results/references_moea_counts.md
+results_*/
 temporal*/
 analysis_express*/
 *.png
