@@ -16,7 +16,11 @@ set -euo pipefail
 
 EXPERIMENT="${EXPERIMENT:?define EXPERIMENT=...}"
 DATASET_PATH="${DATASET_PATH:-$SLURM_SUBMIT_DIR/datasets/mqap}"
-SOLVERS="${SOLVERS:-MOEAD,NSGAII,SMSEMOA}"
+if [ -n "${SOLVER_LIST:-}" ]; then
+    SOLVERS="${SOLVER_LIST//:/,}"
+else
+    SOLVERS="${SOLVERS:-MOEAD,NSGAII,SMSEMOA}"
+fi
 GEN="${SLURM_ARRAY_TASK_ID}"
 SALIDA="evaluation_by_generation/generation_$(printf '%04d' "$GEN")"
 

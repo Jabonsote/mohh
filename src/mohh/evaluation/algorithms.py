@@ -1,5 +1,7 @@
 
 import copy
+from math import comb
+
 import numpy as np
 
 from mohh.evaluation.params import Params
@@ -122,6 +124,25 @@ class MOSolver(ABC):
         return
 
 
+def reference_directions_for_size(k_objectives: int, target_size: int):
+    """
+    Reference directions uniformes con un tamaño válido para pymoo.
+
+    `get_reference_directions(..., n_points=N)` sólo acepta tamaños que sean
+    combinaciones `C(partitions + k - 1, k - 1)`. Para 105 puntos y k=4/5 no
+    existe, así que se elige la partición cuyo tamaño queda más cerca del
+    objetivo y se devuelve también el tamaño real.
+    """
+    particiones = min(
+        range(1, max(1, target_size) + 1),
+        key=lambda p: abs(comb(p + k_objectives - 1, k_objectives - 1)
+                          - target_size)
+    )
+    ref_dirs = get_reference_directions(
+        "uniform", k_objectives, n_partitions=particiones)
+    return ref_dirs, len(ref_dirs)
+
+
 class MOEA_Decomposition(MOSolver):
 
     def __init__(self) -> None:
@@ -135,8 +156,19 @@ class MOEA_Decomposition(MOSolver):
         # Load parameters
         params = Params()
 
-        # Create reference directions
-        ref_dirs = get_reference_directions("uniform", self.k_objectives, n_points=self.pop_size)
+        # Create reference directions with a size valid for this many objectives.
+        ref_dirs, nuevo_tamano = reference_directions_for_size(
+            self.k_objectives, self.pop_size)
+        self.pop_size = nuevo_tamano
+
+        # MOEAD needs exactly one initial solution per reference direction.
+        if len(self.pop) > self.pop_size:
+            self.pop = self.pop[:self.pop_size]
+        elif len(self.pop) < self.pop_size:
+            faltan = self.pop_size - len(self.pop)
+            extra = Population.new("X", self.pop[:faltan].get("X"))
+            Evaluator().eval(self.problem, extra)
+            self.pop = Population.merge(self.pop, extra)
 
         # Build algorithm
         self.algorithm = MOEAD(

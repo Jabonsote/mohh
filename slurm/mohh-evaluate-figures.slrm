@@ -16,7 +16,11 @@ set -euo pipefail
 
 EXPERIMENT="${EXPERIMENT:?define EXPERIMENT=...}"
 DATASET_PATH="${DATASET_PATH:-$SLURM_SUBMIT_DIR/datasets/mqap}"
-SOLVERS="${SOLVERS:-MOEAD,NSGAII,SMSEMOA}"
+if [ -n "${SOLVER_LIST:-}" ]; then
+    SOLVERS="${SOLVER_LIST//:/,}"
+else
+    SOLVERS="${SOLVERS:-MOEAD,NSGAII,SMSEMOA}"
+fi
 EVAL_ARGS="${EVAL_ARGS:---solvers $SOLVERS --n-experiments 31}"
 
 cd "$SLURM_SUBMIT_DIR"

@@ -13,6 +13,7 @@ EXPERIMENT="${EXPERIMENT:?define EXPERIMENT=...}"
 DATASET_PATH="${DATASET_PATH:?define DATASET_PATH=...}"
 SOLVERS="${SOLVERS:-MOEAD,NSGAII,SMSEMOA}"
 N_EXPERIMENTS="${N_EXPERIMENTS:-31}"
+MAX_CONCURRENT="${MAX_CONCURRENT:-12}"
 
 GEN_ROOT=$(find "$EXPERIMENT" -type d -path '*/generation_results/generations' | head -n 1)
 if [ -z "$GEN_ROOT" ]; then
@@ -25,7 +26,8 @@ if [ "$N" -eq 0 ]; then
     exit 1
 fi
 
-EXPORT="ALL,EXPERIMENT=$EXPERIMENT,DATASET_PATH=$DATASET_PATH,SOLVERS=$SOLVERS,N_EXPERIMENTS=$N_EXPERIMENTS"
+SOLVER_LIST="${SOLVERS//,/:}"
+EXPORT="ALL,EXPERIMENT=$EXPERIMENT,DATASET_PATH=$DATASET_PATH,SOLVER_LIST=$SOLVER_LIST,N_EXPERIMENTS=$N_EXPERIMENTS"
 if [ -n "${CONDA_ENV:-}" ]; then
     EXPORT="$EXPORT,CONDA_ENV=$CONDA_ENV"
 fi
@@ -36,14 +38,14 @@ echo "Generaciones: $N (0..$((N-1)))"
 echo "Réplicas    : $N_EXPERIMENTS por combinación"
 
 JOB=$(sbatch --parsable \
-    --array="0-$((N - 1))" \
+    --array="0-$((N - 1))%$MAX_CONCURRENT" \
     --export="$EXPORT" \
     slurm/mohh-evaluate-generations-array.slrm)
 echo "Array eval  : $JOB"
 
 FIG=$(sbatch --parsable \
     --dependency="afterok:$JOB" \
-    --array="0-$((N - 1))" \
+    --array="0-$((N - 1))%$MAX_CONCURRENT" \
     --export="$EXPORT" \
     slurm/mohh-evaluate-generations-figures.slrm)
 echo "Array figs  : $FIG"

@@ -34,7 +34,11 @@ if [ -z "${EXPERIMENT:-}" ]; then
 fi
 
 DATASET_PATH="${DATASET_PATH:-$SLURM_SUBMIT_DIR/datasets/mqap}"
-SOLVERS="${SOLVERS:-MOEAD,NSGAII,SMSEMOA}"
+if [ -n "${SOLVER_LIST:-}" ]; then
+    SOLVERS="${SOLVER_LIST//:/,}"
+else
+    SOLVERS="${SOLVERS:-MOEAD,NSGAII,SMSEMOA}"
+fi
 N_EXPERIMENTS="${N_EXPERIMENTS:-31}"
 EVAL_ARGS="${EVAL_ARGS:---solvers $SOLVERS --n-experiments $N_EXPERIMENTS}"
 

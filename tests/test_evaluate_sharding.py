@@ -72,3 +72,12 @@ def test_extrae_operadores_de_una_generacion(tmp_path):
         str(tmp_path), ["MOEAD"], generation=2)
 
     assert operadores == ["reverse(x)", "order_based(x,y)", "move_right(x)"]
+
+
+def test_reference_directions_validas_para_4_y_5_objetivos():
+    from mohh.evaluation.algorithms import reference_directions_for_size
+
+    for k, esperado in ((4, 120), (5, 126)):
+        ref_dirs, tamano = reference_directions_for_size(k, 105)
+        assert tamano == len(ref_dirs) == esperado
+        assert ref_dirs.shape == (esperado, k)
