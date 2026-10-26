@@ -775,15 +775,23 @@ def mejor_por_generacion(largo):
         generacion), o por (metrica, instancia, generacion) si la tabla no trae
         la columna `split`.
     """
-    claves = ["metric", "instance", "generation"]
+    claves = ["instance", "generation"]
     if "split" in largo.columns:
         # Imprescindible cuando se pasan los dos splits juntos: sin `split` en
         # el groupby, la generacion 3 de train y la de test acabarian en la
         # misma fila y el boxplot compararia particiones que no se corresponden.
         claves.insert(0, "split")
 
-    return (largo.groupby(claves)["value"]
-            .min().reset_index().rename(columns={"value": "mejor"}))
+    filas = []
+    for metrica, grupo in largo.groupby("metric", sort=True):
+        # HV se maximiza; IGD+, DELTA_P y R2 se minimizan.
+        agregacion = "max" if str(metrica).upper() == "HV" else "min"
+        tabla = (grupo.groupby(claves)["value"]
+                 .agg(agregacion).reset_index()
+                 .rename(columns={"value": "mejor"}))
+        tabla.insert(0, "metric", metrica)
+        filas.append(tabla)
+    return pd.concat(filas, ignore_index=True)
 
 
 def figura_boxplot_generacion_train_test(largo, metricas, directorio):

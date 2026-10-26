@@ -6,6 +6,9 @@ results/*
 !results/analysis_scripts/**
 !results/larger_RESULTS.md
 !results/references_moea_counts.md
+!results/README.md
+!results/figure_values/
+!results/figure_values/**
 results_*/
 temporal*/
 analysis_express*/
@@ -45,3 +48,6 @@ llamea-models-*
 llamea-generate-*
 llamea-vllm-*
 eval_debug_*.tar.gz
+# Aunque analysis_scripts se versiona, sus cachés no.
+results/analysis_scripts/**/__pycache__/
+results/analysis_scripts/**/*.pyc
