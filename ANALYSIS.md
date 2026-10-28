@@ -57,6 +57,39 @@ python analyze_search.py /ruta/Experiment_001 \
 Si el test no tiene un train equivalente exacto, empareja por `n` y omite los
 casos sin train del mismo tamaño. Lo deja registrado en `summary.json`.
 
+### Escala de HV justa
+
+Por defecto la escala `vmin/vmax` se congela con los individuos de **ese**
+experimento: el HV es comparable entre sus generaciones, pero no entre corridas
+(la escala de `Experiment_001` y `Experiment_002` puede diferir en las 80
+instancias). Para comparar generaciones entre experimentos, o para que el HV
+cuadre con la tabla de `mohh-evaluate`, hay que usar **una sola escala**:
+
+```bash
+# 1) congelar la escala de la evaluación GE (la que escribió mohh-evaluate)
+python analyze_search.py Experiment_001 --output .../analysis_search \
+    --hv-from-evaluation --hv-budget 50k --save-hv-scale results/hv_scale.json
+
+# 2) medir el segundo experimento con esa misma escala
+python analyze_search.py Experiment_002 --output .../analysis_search \
+    --hv-scale results/hv_scale.json
+```
+
+Las instancias con `vmax == vmin` en algún objetivo se excluyen (igual que
+`mohh-evaluate` las invalida) y quedan anotadas en `summary.json`
+(`hv_scale.<split>.degenerate_excluded`). `summary.json` también registra
+`hv_comparable_across_experiments`.
+
+Si train y test necesitan ficheros distintos (porque `mohh-evaluate` solo
+evaluó uno de los splits), pasa `--hv-scale` varias veces; se combinan y se
+rechaza cualquier instancia común con `vmin/vmax` contradictorios:
+
+```bash
+python analyze_search.py Experiment_002 --output .../analysis_search \
+    --hv-scale results/hv_scale_train.json \
+    --hv-scale results/hv_scale_test.json
+```
+
 ## `evaluate_31`
 
 ```bash

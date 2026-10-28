@@ -199,25 +199,25 @@ JOB="$(MODEL="$MODEL" PROFILE="$PROFILE" CONSTRAINT="$CONSTRAINT" \
     MOHH_MODELS_DIR="${MOHH_MODELS_DIR:-}" \
     sbatch "${SBATCH_ARGS[@]}" slurm/llamea-single.slrm)"
 echo "  job: $JOB"
-echo "  log: llamea-single-${JOB}.out"
-echo "  err: llamea-single-${JOB}.err"
+echo "  log: logs/llamea-single-${JOB}.out"
+echo "  err: logs/llamea-single-${JOB}.err"
 
 if [ "${WAIT:-0}" = "1" ] && command -v squeue >/dev/null 2>&1; then
     echo "Esperando a que termine el job $JOB ..."
     while squeue -h -j "$JOB" 2>/dev/null | grep -q .; do
         sleep 30
     done
-    echo "--- ultimas lineas de llamea-single-${JOB}.out ---"
-    tail -n 80 "llamea-single-${JOB}.out" 2>/dev/null || true
-    echo "--- ultimas lineas de llamea-single-${JOB}.err ---"
-    tail -n 40 "llamea-single-${JOB}.err" 2>/dev/null || true
+    echo "--- ultimas lineas de logs/llamea-single-${JOB}.out ---"
+    tail -n 80 "logs/llamea-single-${JOB}.out" 2>/dev/null || true
+    echo "--- ultimas lineas de logs/llamea-single-${JOB}.err ---"
+    tail -n 40 "logs/llamea-single-${JOB}.err" 2>/dev/null || true
 fi
 
 echo
 echo "Monitoreo:"
 echo "  squeue --user=\$USER"
-echo "  tail -f llamea-single-${JOB}.out"
-echo "  cat llamea-single-${JOB}.err"
+echo "  tail -f logs/llamea-single-${JOB}.out"
+echo "  cat logs/llamea-single-${JOB}.err"
 echo "  tail -f results/${CATEGORY:-searches}/${EXPERIMENT_NAME}/progress.txt"
 echo "  tail -f results/${CATEGORY:-searches}/latest/progress.txt"
 echo "Resultados en: results/${CATEGORY:-searches}/${EXPERIMENT_NAME}/"

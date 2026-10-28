@@ -44,6 +44,12 @@ COMO LEERLO, Y COMO NO LEERLO
   `mohh-evaluate`: el frente no dominado consolidado de TODOS los individuos da
   `vmin`/`vmax` y el punto de referencia es 1.1. Sin congelarla, los HVs de
   generaciones distintas no serian comparables y las trayectorias serian ruido.
+- Esa escala se construye con los individuos de ESTE experimento, asi que es
+  comparable entre sus generaciones pero NO entre corridas. Para comparar
+  experimentos (o el HV con la tabla de `mohh-evaluate`) hay que congelar una
+  sola escala y pasarla con `--hv-scale`, o reutilizar la de la evaluacion con
+  `--hv-from-evaluation`. `--save-hv-scale` la escribe para reutilizarla. Las
+  instancias degeneradas (`vmax == vmin`) se excluyen, como en `mohh-evaluate`.
 - Entre train y test NO se comparan valores absolutos: son instancias distintas
   con matriz de distancias distinta. Lo comparable es la TRAYECTORIA: si una
   generacion mejora en train, ¿mejora en test? Si divergen, hay sobreajuste a
@@ -82,7 +88,10 @@ from mohh.analysis.indicators_all import (INDICATORS, compute_indicators,
                                           load_references)
 from mohh.analysis.io_utils import (iter_experiment_individuals,
                                      load_experiment, write_json)
-from mohh.analysis.hv_scale import HvScale, save_hv_scale
+from mohh.analysis.hv_scale import (HvScale, HvScaleError, load_hv_scale,
+                                    load_hv_scale_from_evaluation,
+                                    conflictos_escala, restringir_escala,
+                                    save_hv_scale, instancias_sin_escala)
 from mohh.core.indicators.reference_sets import (
     NADIR_MARGIN, ReferenceSet, pooled_reference_sets)
 from analyze_gen import diagnostico_saturacion
@@ -480,6 +489,76 @@ def escala_hv_por_instancia(frentes_por_individuo, ref_point=1.1):
                              consolidado.max(axis=0))
 
     return HvScale(bounds=bounds, ref_point=ref_point, source="consolidado")
+
+
+def preparar_escala_split(escala, instancias, split, verbose=True, strict=True):
+    """Valida y sanea la escala de HV que se usara en un split.
+
+    Exige que cubra las instancias del split y descarta las que no tienen
+    escala (`vmax == vmin`), igual que `mohh-evaluate`. Asi ninguna generacion
+    se mide con una escala distinta ni en una instancia que GE invalidaria.
+
+    @param escala: `HvScale` congelada (externa o consolidada).
+    @param instancias: instancias del split.
+    @param split: 'train' o 'test', para los mensajes.
+    @param verbose: avisar de las instancias descartadas.
+    @param strict: si True, una instancia sin escala es un error (escala
+        externa que no cubre el dataset); si False, se omite con aviso (escala
+        local construida con los frentes disponibles).
+    @return: (escala_utilizable, degeneradas).
+    """
+    faltan = escala.missing(instancias)
+    if faltan and strict:
+        raise AnalisisSearchError(
+            f"la escala de HV no cubre {len(faltan)} instancia(s) de {split}: "
+            f"{faltan[:8]}{'...' if len(faltan) > 8 else ''}")
+    if faltan and verbose:
+        print(f"  AVISO escala {split}: {len(faltan)} instancia(s) sin frente "
+              f"ni escala, se omiten: "
+              f"{faltan[:8]}{'...' if len(faltan) > 8 else ''}", flush=True)
+    degeneradas = [nombre for nombre in instancias_sin_escala(escala)
+                   if nombre in set(instancias)]
+    usables = [nombre for nombre in instancias
+               if nombre in escala.bounds and nombre not in degeneradas]
+    if degeneradas and verbose:
+        print(f"  AVISO escala {split}: {len(degeneradas)} instancia(s) sin "
+              f"escala (vmax == vmin; se excluyen como en mohh-evaluate): "
+              f"{degeneradas}", flush=True)
+    return restringir_escala(escala, usables), degeneradas
+
+
+def combinar_escalas(escalas):
+    """Une varias escalas (por ejemplo train y test) en una sola.
+
+    Las instancias presentes solo en una escala se conservan; si una instancia
+    aparece en dos con `vmin/vmax` distintos, o los `ref_point` no coinciden, es
+    un error: mezclarlas daria un HV arbitrario.
+
+    @param escalas: iterable de `HvScale` (se ignoran los None).
+    @return: `HvScale` combinada, o None si no hay ninguna.
+    """
+    escalas = [escala for escala in escalas if escala is not None]
+    if not escalas:
+        return None
+    base = escalas[0]
+    for indice, izquierda in enumerate(escalas):
+        if abs(izquierda.ref_point - base.ref_point) > 1e-12:
+            raise AnalisisSearchError(
+                f"ref_point distinto entre escalas: {base.ref_point} vs "
+                f"{izquierda.ref_point}")
+        for derecha in escalas[indice + 1:]:
+            conflictos = conflictos_escala(izquierda, derecha)
+            if conflictos:
+                raise AnalisisSearchError(
+                    f"las escalas de HV se contradicen en {len(conflictos)} "
+                    f"instancia(s): {conflictos[:8]}"
+                    f"{'...' if len(conflictos) > 8 else ''}")
+    bounds = {}
+    for escala in escalas:
+        bounds.update(escala.bounds)
+    return HvScale(
+        bounds=bounds, ref_point=base.ref_point,
+        source="+".join(dict.fromkeys(escala.source for escala in escalas)))
 
 
 def medir_split(experimento, nombres, frentes_por_individuo, escala,
@@ -1306,7 +1385,7 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
              datos_train="datasets/mqap/train", datos_test="datasets/mqap/test",
              referencias_train="set-reference/train/reference_sets",
              referencias_test="set-reference/test/reference_sets",
-             figuras=True, verbose=True):
+             figuras=True, verbose=True, escala_hv=None, guardar_escala=None):
     """
     Analiza una corrida completa en train y test.
 
@@ -1319,6 +1398,13 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
     @param referencias_test: carpeta con los P* de test.
     @param figuras: dibujar las figuras.
     @param verbose: imprimir progreso.
+    @param escala_hv: `HvScale` compartida (train+test) para medir el HV. Si es
+        None se congela una por split con los individuos del experimento, que
+        solo es comparable DENTRO de esa corrida. Pasarla (via `--hv-scale` o
+        `--hv-from-evaluation`) es lo que hace comparables las generaciones
+        entre experimentos y con `mohh-evaluate`.
+    @param guardar_escala: ruta donde escribir la escala usada (train+test) para
+        reutilizarla en otra corrida.
     @return: diccionario con el resumen.
     """
     if not os.path.isdir(ruta_experimento):
@@ -1376,6 +1462,7 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
     escalas = {}
     escalas_referencia = {}
     descartados_por_split = {}
+    degeneradas_por_split = {}
 
     # --- train: dos pasadas, sin retener los 1100 individuos completos -----
     if verbose:
@@ -1396,8 +1483,17 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
 
     bounds = {instancia: (frente.min(axis=0), frente.max(axis=0))
               for instancia, frente in consolidado.items()}
-    escala_train = HvScale(bounds, source="consolidado")
+    if escala_hv is not None:
+        # Escala congelada compartida: la misma para las dos particiones y para
+        # cualquier otra corrida que la reutilice.
+        escala_train_full = escala_hv
+    else:
+        escala_train_full = HvScale(bounds, source="consolidado")
+    escala_train, degeneradas_train = preparar_escala_split(
+        escala_train_full, instancias_train, "train", verbose,
+        strict=escala_hv is not None)
     escalas["train"] = escala_train
+    degeneradas_por_split["train"] = degeneradas_train
     referencias_usadas_train = _referencias_pooled(
         referencias_train_set, pooled_min, pooled_max)
     escalas_referencia["train"] = referencias_usadas_train
@@ -1430,8 +1526,15 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
         print("  [test] reevaluando individuos", flush=True)
     frentes_test = frentes_de_split(experimento, nombres, problemas_test,
                                     emparejamiento, verbose)
-    escala_test = escala_hv_por_instancia(frentes_test)
+    if escala_hv is not None:
+        escala_test_full = escala_hv
+    else:
+        escala_test_full = escala_hv_por_instancia(frentes_test)
+    escala_test, degeneradas_test = preparar_escala_split(
+        escala_test_full, instancias_test, "test", verbose,
+        strict=escala_hv is not None)
     escalas["test"] = escala_test
+    degeneradas_por_split["test"] = degeneradas_test
     largo_test, referencias_usadas_test = medir_split(
         experimento, nombres, frentes_test, escala_test, referencias_test_set,
         metricas)
@@ -1445,6 +1548,24 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
     for split, escala in escalas.items():
         save_hv_scale(escala, os.path.join(salida, "00_config",
                                            f"hv_scale_{split}.json"))
+
+    # Escala unica train+test, para que otra corrida pueda medir con los mismos
+    # `vmin/vmax` sin recalcularlos (comparacion justa entre experimentos).
+    if guardar_escala:
+        # Se guarda la escala COMPLETA (incluidas las degeneradas): al
+        # reutilizarla, la cobertura sigue siendo completa y cada corrida las
+        # excluye al medir. Si se guardara ya recortada, la siguiente corrida
+        # fallaria por "instancia no cubierta".
+        combinada = HvScale(
+            bounds={**escala_train_full.bounds, **escala_test_full.bounds},
+            ref_point=escala_train_full.ref_point,
+            source=(escala_hv.source if escala_hv is not None
+                    else f"consolidado:{ruta_experimento}"),
+        )
+        save_hv_scale(combinada, guardar_escala)
+        if verbose:
+            print(f"  escala HV compartida escrita en {guardar_escala}",
+                  flush=True)
 
     # La escala de las metricas relativas a P* queda a mano en el resumen: es
     # lo que hace comparables los valores entre individuos, asi que sin ella
@@ -1461,6 +1582,16 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
             }
         resumen_referencias[nombre_split] = dict(sorted(detalle.items()))
 
+    resumen_hv = {}
+    for nombre_split, escala in escalas.items():
+        resumen_hv[nombre_split] = {
+            "source": escala.source,
+            "ref_point": escala.ref_point,
+            "instances": len(escala),
+            "shared": escala_hv is not None,
+            "degenerate_excluded": degeneradas_por_split.get(nombre_split, []),
+        }
+
     resumen = {"experiment": ruta_experimento,
                "individuals": len(nombres),
                "train_instances": list(instancias_train),
@@ -1470,8 +1601,16 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
                "metrics": list(metricas),
                "convergence": {},
                "saturation": {},
+               "hv_comparable_across_experiments": escala_hv is not None,
+               "hv_scale": resumen_hv,
                "referencias_descartadas": descartados_por_split,
                "escala_referencias": resumen_referencias}
+
+    if verbose and escala_hv is None:
+        print("  AVISO HV: escala consolidada de ESTE experimento. El HV es "
+              "comparable entre generaciones, pero NO entre experimentos; para "
+              "comparar corridas congela una con --hv-scale o "
+              "--hv-from-evaluation.", flush=True)
 
     for split, parte in largos.items():
         tabla_por_generacion(parte).to_csv(
@@ -1550,6 +1689,22 @@ def parse_args(argv=None):
                             default="references_moea/test/reference_sets")
     analizador.add_argument("--no-figuras", action="store_true",
                             help="solo escribir tablas, sin dibujar")
+    analizador.add_argument("--hv-scale", action="append", default=None,
+                            help="JSON con una escala de HV congelada (el que "
+                                 "escribe analyze_gen o --save-hv-scale); se "
+                                 "puede repetir para train y test. Es lo que "
+                                 "hace comparable el HV entre experimentos y "
+                                 "con mohh-evaluate.")
+    analizador.add_argument("--hv-from-evaluation", action="store_true",
+                            help="reutiliza la escala que mohh-evaluate dejo en "
+                                 "evaluation_results/run_metrics.")
+    analizador.add_argument("--hv-budget", default=None,
+                            help="presupuesto (10k/30k/50k) para "
+                                 "--hv-from-evaluation; hace falta si el "
+                                 "experimento tiene varios.")
+    analizador.add_argument("--save-hv-scale", default=None,
+                            help="escribe la escala de HV usada (train+test) "
+                                 "para reutilizarla en otra corrida.")
     analizador.add_argument("--quiet", action="store_true",
                             help="no imprimir progreso")
     return analizador.parse_args(argv)
@@ -1572,6 +1727,17 @@ def main(argv=None):
         return 2
 
     try:
+        escalas_cargadas = [load_hv_scale(ruta)
+                            for ruta in (argumentos.hv_scale or [])]
+        if argumentos.hv_from_evaluation:
+            escalas_cargadas.append(load_hv_scale_from_evaluation(
+                argumentos.experiment, argumentos.hv_budget))
+        escala_hv = combinar_escalas(escalas_cargadas)
+        if escala_hv is not None and not argumentos.quiet:
+            print(f"  escala HV compartida: {len(escala_hv)} instancias, "
+                  f"ref_point={escala_hv.ref_point}, "
+                  f"origen={escala_hv.source}", flush=True)
+
         ejecutar(ruta_experimento=argumentos.experiment,
                  salida=argumentos.output,
                  metricas=metricas,
@@ -1580,8 +1746,10 @@ def main(argv=None):
                  referencias_train=argumentos.train_references,
                  referencias_test=argumentos.test_references,
                  figuras=not argumentos.no_figuras,
-                 verbose=not argumentos.quiet)
-    except AnalisisSearchError as error:
+                 verbose=not argumentos.quiet,
+                 escala_hv=escala_hv,
+                 guardar_escala=argumentos.save_hv_scale)
+    except (AnalisisSearchError, HvScaleError) as error:
         print(f"ERROR {error}", file=sys.stderr)
         return 1
 

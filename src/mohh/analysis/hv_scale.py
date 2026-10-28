@@ -54,6 +54,10 @@ __all__ = [
     "load_hv_scale",
     "contexts_from_scale",
     "load_hv_scale_from_evaluation",
+    "instancias_sin_escala",
+    "restringir_escala",
+    "conflictos_escala",
+    "diferencias_escala",
 ]
 
 
@@ -357,3 +361,96 @@ def load_hv_scale_from_evaluation(experiment_root: str,
                             + (f"/{label}" if label else ""),
                      usados=sorted(set(usados)))
     return escala
+
+
+def instancias_sin_escala(scale: "HvScale") -> List[str]:
+    """Instancias cuyo marco de HV colapsa (`vmax == vmin` en algun objetivo).
+
+    `mohh-evaluate` las invalida: `normalize_values` divide por
+    `vmax - vmin`, asi que el objetivo constante deja el frente en NaN y la
+    instancia no se puntua. Medirlas con `span = 1` (el relleno de
+    `HypervolumeContext`) daria un HV que el pipeline de GE no reporta, por eso
+    los analisis que quieren ser comparables con GE las excluyen y las dejan
+    anotadas.
+
+    @param scale: escala de HV.
+    @return: nombres de instancia ordenados.
+    """
+    return sorted(
+        nombre for nombre, (vmin, vmax) in scale.bounds.items()
+        if np.any(np.asarray(vmax, dtype=float)
+                  <= np.asarray(vmin, dtype=float))
+    )
+
+
+def restringir_escala(scale: "HvScale", instances: Iterable[str],
+                      check: bool = True) -> "HvScale":
+    """Copia de `scale` limitada a `instances`, conservando `ref_point`.
+
+    Se usa para sanear una escala congelada antes de medir un split: quita las
+    instancias degeneradas (`instancias_sin_escala`) sin cambiar los limites de
+    las demas, de modo que todos los individuos y generaciones siguen midiendose
+    con exactamente los mismos `vmin/vmax`.
+
+    @param scale: escala de origen.
+    @param instances: instancias que se quieren conservar.
+    @param check: si True, exige que `scale` cubra todas las instancias.
+    @return: nueva `HvScale`.
+    """
+    wanted = list(dict.fromkeys(instances))
+    if check:
+        missing = scale.missing(wanted)
+        if missing:
+            raise HvScaleError(
+                f"la escala de HV no cubre {len(missing)} instancia(s): "
+                f"{missing[:8]}{'...' if len(missing) > 8 else ''}")
+    bounds = {nombre: scale.bounds[nombre]
+              for nombre in wanted if nombre in scale.bounds}
+    return HvScale(bounds, ref_point=scale.ref_point, source=scale.source,
+                   usados=scale.usados)
+
+
+def conflictos_escala(left: "HvScale", right: "HvScale",
+                      atol: float = 0.0) -> List[str]:
+    """Instancias **comunes** en las que dos escalas dan `vmin/vmax` distinto.
+
+    Es la comprobacion para *combinar* escalas de splits distintos (train y
+    test comparten pocas instancias, o ninguna): solo importa que, cuando una
+    instancia aparece en las dos, sus limites coincidan.
+
+    @param left: primera escala.
+    @param right: segunda escala.
+    @param atol: tolerancia absoluta al comparar los limites (0 = exacta).
+    @return: nombres de instancia en conflicto, ordenados.
+    """
+    problemas = []
+    for nombre in set(left.bounds) & set(right.bounds):
+        lo_l, hi_l = left.bounds[nombre]
+        lo_r, hi_r = right.bounds[nombre]
+        lo_l, hi_l = np.asarray(lo_l, float), np.asarray(hi_l, float)
+        lo_r, hi_r = np.asarray(lo_r, float), np.asarray(hi_r, float)
+        if (lo_l.shape != lo_r.shape or hi_l.shape != hi_r.shape
+                or not np.allclose(lo_l, lo_r, atol=atol, rtol=0.0)
+                or not np.allclose(hi_l, hi_r, atol=atol, rtol=0.0)):
+            problemas.append(nombre)
+    return sorted(problemas)
+
+
+def diferencias_escala(left: "HvScale", right: "HvScale",
+                       atol: float = 0.0) -> List[str]:
+    """Instancias en las que dos escalas NO son equivalentes.
+
+    Incluye tanto las instancias presentes solo en una de las dos como las
+    comunes con `vmin/vmax` distinto. Es la comprobacion que hace falta antes de
+    comparar HV entre experimentos: dos escalas con el mismo `ref_point` y el
+    mismo `source` ("consolidado") pueden tener limites distintos, y entonces
+    sus HV no son comparables.
+
+    @param left: primera escala.
+    @param right: segunda escala.
+    @param atol: tolerancia absoluta al comparar los limites (0 = exacta).
+    @return: nombres de instancia que difieren, ordenados.
+    """
+    problemas = set(left.bounds) ^ set(right.bounds)
+    problemas |= set(conflictos_escala(left, right, atol))
+    return sorted(problemas)

@@ -381,44 +381,148 @@ coordinate. A login wrapper downloads the weights (the login has internet) and
 submits that job.
 
 ```bash
-# 0. On the LOGIN node: get the code where the compute nodes can see it.
-cd /LUSTRE/$USER
-git clone -b cluster https://github.com/Jabonsote/mohh.git
-cd mohh
+# 0. Ya estas en el checkout del cluster (los nodos ven LUSTRE; $HOME no).
+cd /LUSTRE/mohh
 git pull origin cluster
 
-# 1. ONE COMMAND. On the first run it creates ./.conda-env (with vLLM) if it
-#    does not exist, downloads/verifies the model in the persistent root, and
-#    submits ONE GPU job that serves vLLM + runs the search. There is no
-#    separate model job and no second queue wait.
-PROFILE=big-quant GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+# 1. UNA VEZ: entorno local con vLLM (login, con internet).
+WITH_VLLM=1 bash slurm/ixachi-setup-env.sh
 
-# Shorter alias with exactly the same behavior.
-GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea.sh
+# 2. UNA VEZ: catalogo de perfiles y comprobacion sin gastar GPU.
+PROFILE=list bash slurm/llamea-all.sh
+DRY_RUN=1 PROFILE=coder30b-awq-a10 bash slurm/llamea-all.sh
 
-# Full pipeline in the SAME job: search + test evaluation + paired comparison
-# of the best operator against OX/PBX/PMX/CX/ERX (11 repetitions, same frame).
-PROFILE=coder30b-awq GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
+# 3. Busqueda (UN job GPU: vLLM + LLaMEA). A10 primero; ver mas abajo.
+PROFILE=coder30b-awq-a10 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
 
-# Ablation: original refine/redesign without the behavioral combine.
+# Alias corto, mismo comportamiento.
+PROFILE=coder30b-awq-a10 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea.sh
+
+# Pipeline completo en el MISMO job: busqueda + test + comparacion pareada
+# contra OX/PBX/PMX/CX/ERX (11 repeticiones, mismo marco).
+PROFILE=coder30b-awq-a10 GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 \
+  bash slurm/llamea-all.sh
+
+# Ablacion: refine/redesign original sin el combine conductual.
 COMBINE=0 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
 
-# Optional: wait on the login until the job ends and print the tail.
+# Opcional: esperar en el login y ver el final del log.
 WAIT=1 PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh
 
-# 2. Monitor (the command above already prints the JobID).
-squeue --user=$USER
-tail -f llamea-single-*.out             # server load + per-generation search
-cat llamea-single-*.err                 # empty = clean
-tail -f results/searches/LLaMEA_single/llamea.log     # per-generation log
-tail -f results/searches/LLaMEA_single/error.log      # warnings/tracebacks only
-cat results/searches/LLaMEA_single/progress.txt       # best-so-far
+# 4. Monitor (el comando anterior ya imprime el JobID).
+squeue --user=javier.ramirez
+tail -f logs/llamea-single-*.out        # servidor + busqueda por generacion
+cat logs/llamea-single-*.err            # vacio = limpio
+tail -f results/searches/<EXPERIMENT_NAME>/progress.txt   # mejor hasta ahora
 ```
 
 If the model is missing, the login wrapper downloads it **before** submitting.
 The GPU job never downloads: it fails fast with the exact command to run on the
 login. This avoids spending a GPU allocation (and queue time) on a node that has
 no internet. `DRY_RUN=1` prints the `sbatch` command without submitting.
+
+#### Desde `/LUSTRE/mohh`: puesta a punto y ejemplos por GPU (A10 primero)
+
+Todo lo de abajo asume que ya estas en el checkout del cluster:
+
+```bash
+cd /LUSTRE/mohh
+git pull origin cluster
+```
+
+**Puesta a punto (una sola vez, en el nodo de login).** El login tiene internet;
+los nodos de computo no. `llamea-all.sh` crea `./.conda-env` si falta,
+verifica/descarga el modelo en la raiz persistente y envia **un solo** job GPU:
+
+```bash
+module load python/miniforge
+WITH_VLLM=1 bash slurm/ixachi-setup-env.sh   # crea .conda-env con vLLM
+PROFILE=list bash slurm/llamea-all.sh        # catalogo de perfiles
+python scripts/mohh_models.py root           # raiz persistente de pesos
+```
+
+**Comprobacion sin gastar GPU.** `DRY_RUN=1` imprime el `sbatch` exacto
+(constraint, CPUs, memoria) sin enviar nada:
+
+```bash
+DRY_RUN=1 PROFILE=coder30b-awq-a10 bash slurm/llamea-all.sh
+# -> sbatch ... --constraint="A10" --cpus-per-task=16 --mem=64G ...
+```
+
+`slurm/llamea-single.slrm` trae `#SBATCH --constraint="A100|H100"`, pero
+`llamea-all.sh` **siempre** pasa `--constraint="$CONSTRAINT"`; la opcion de
+linea de comandos gana, asi que los perfiles A10 se programan en A10.
+
+**A10 24 GB (lo mas probable).** Tres opciones, de mas segura a mas ambiciosa:
+
+| Perfil | Modelo | VRAM | Contexto | Cuando usarlo |
+|---|---|---:|---:|---|
+| `a10-quant` | Qwen2.5-Coder-14B-AWQ | ~10 GB | 8k | Opcion segura; deja KV de sobra |
+| `coder8b` | Seed-Coder-8B-Instruct | ~16 GB | 8k | Mejor BigCodeBench entre los ~8B |
+| `coder30b-awq-a10` | Qwen3-Coder-30B-A3B-AWQ | ~18 GB | 8k | Mas capacidad; justo de VRAM |
+
+```bash
+# A10: la opcion segura
+PROFILE=a10-quant GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+
+# A10: mejor 8B
+PROFILE=coder8b GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+
+# A10: 30B/3B (si hay OOM, baja el contexto)
+PROFILE=coder30b-awq-a10 MAX_MODEL_LEN=4096 GENERATIONS=1000 EVAL_TEST=1 \
+  bash slurm/llamea-all.sh
+```
+
+`coder30b-awq-a10` ocupa ~18 GB de 24 GB. Si vLLM falla al arrancar por KV
+cache/OOM, baja `MAX_MODEL_LEN` (8192 → 4096) o `GPU_MEM_UTIL` (0.90 → 0.85);
+si sigue, usa `a10-quant` o `coder8b`.
+
+**A100 40 GB.**
+
+```bash
+PROFILE=coder30b-awq   GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh  # recomendado
+PROFILE=glm47-flash-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh # razonamiento/matematicas
+PROFILE=a100-fp16      GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh  # 14B fp16
+PROFILE=big-quant      GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh  # fallback probado
+```
+
+**H100 80 GB.**
+
+```bash
+PROFILE=coder30b-fp8  GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh   # FP8 nativo
+PROFILE=coder-next-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh  # 80B/3B
+PROFILE=h100-fp16     GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh   # 32B fp16
+```
+
+**Cualquier GPU (prueba de humo).**
+
+```bash
+PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh
+# y esperar el final en el login:
+WAIT=1 PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh
+```
+
+**Como saber que funciona.**
+
+1. `squeue --user=javier.ramirez` muestra el job en `gpu` (primero `PD`, luego `R`).
+2. `logs/llamea-single-<job>.err` debe quedar vacio; ahi aparecen los fallos.
+3. `logs/llamea-single-<job>.out` debe mostrar `Uvicorn running on http://127.0.0.1:8000`
+   y luego `[gen N] best=... valid=...`.
+4. `results/searches/<EXPERIMENT_NAME>/progress.txt` avanza por generacion.
+5. Al terminar: `llamea_best_operator.py`, `llamea_best_info.json`,
+   `report.md`, `evolution.png`, `generations.csv` y `fronts/`.
+
+**Problemas tipicos.**
+
+| Sintoma | Causa / solucion |
+|---|---|
+| `no hay 'module' ni .conda-env/` | Lo enviaste desde un nodo de computo. Ejecuta el wrapper en el **login**. |
+| `'...' no esta en la raiz persistente` | El modelo no se bajo. En el login: `python scripts/mohh_models.py download <modelo>` o usa `llamea-all.sh` (lo baja solo). |
+| Job en `PD` eternamente | El `constraint` no tiene nodos libres. Prueba `PROFILE=a10-quant` (A10) o `PROFILE=smoke` (`A100|A10|H100`). |
+| OOM / KV cache en A10 | `MAX_MODEL_LEN=4096` o `GPU_MEM_UTIL=0.85`; si no, `a10-quant`. |
+| vLLM no carga el AWQ | Cuantizacion de comunidad: verifica con `python scripts/mohh_models.py verify <modelo>` y cae a `big-quant`/`a10-quant`. |
+| Nada en `$HOME` | Correcto: `$HOME` se borra y los nodos no lo ven. Todo va a LUSTRE. |
+
 
 #### Defaults and sizing for a 1000-generation run
 
@@ -507,18 +611,22 @@ arguments (`coder30b-awq` forces `awq_marlin`; `coder30b-fp8` uses
 `MODEL=...`, `CONSTRAINT=...`, `MAX_MODEL_LEN=...`, `GPU_MEM_UTIL=...`,
 `VLLM_ARGS=...`; `PROFILE=list` prints the catalog.
 
-| `PROFILE` | Model | VRAM | Fits on |
+Si lo mas probable es una **A10 24 GB**, usa la tabla de arriba (seccion
+"Desde `/LUSTRE/mohh`"): `a10-quant` (segura), `coder8b` (mejor 8B) o
+`coder30b-awq-a10` (30B/3B, justo de VRAM). La tabla completa:
+
+| `PROFILE` | Model | VRAM | GPU / contexto |
 |---|---|---|---|
+| `coder30b-awq-a10` | `QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ` | ~18 GB | **A10** 24 GB, 8k |
+| `coder8b` | `ByteDance-Seed/Seed-Coder-8B-Instruct` | ~16 GB | **A10** 24 GB, 8k |
+| `a10-quant` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | ~10 GB | **A10** 24 GB, 8k |
 | `big-quant` (default) | `Qwen/Qwen2.5-Coder-32B-Instruct-AWQ` | ~19–21 GB | A100 40 GB, H100 80 GB |
 | `coder30b-awq` | `QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ` | ~18 GB | A100 40 GB, H100 80 GB |
 | `coder30b-fp8` | `Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8` | ~31 GB | H100 80 GB |
 | `glm47-flash-awq` | `QuantTrio/GLM-4.7-Flash-AWQ` | ~20 GB | A100 40 GB, H100 80 GB (30B/3B; vLLM main) |
 | `coder-next-awq` | `qtum/Qwen3-Coder-Next-AWQ` | ~42 GB | H100 80 GB (80B/3B; ~30 GB KV) |
-| `coder30b-awq-a10` | `QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ` | ~18 GB | A10 24 GB, 8k context |
 | `h100-fp16` | `Qwen/Qwen2.5-Coder-32B-Instruct` | ~65 GB | H100 80 GB |
 | `a100-fp16` | `Qwen/Qwen2.5-Coder-14B-Instruct` | ~29 GB | A100 40 GB |
-| `a10-quant` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | ~10 GB | A10 24 GB |
-| `coder8b` | `ByteDance-Seed/Seed-Coder-8B-Instruct` | ~16 GB | A10 24 GB |
 | `smoke` | `Qwen/Qwen2.5-1.5B-Instruct` | ~3 GB | any (smoke tests only) |
 
 Evidence for the choice (HumanEval+/BigCodeBench and quantization studies) and
@@ -543,13 +651,25 @@ default, because quantization raises its wikitext-2 perplexity from 7.74 to
 Examples:
 
 ```bash
+# A10 24 GB (lo mas probable)
+PROFILE=a10-quant GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh      # segura
+PROFILE=coder8b GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh        # mejor 8B
+PROFILE=coder30b-awq-a10 MAX_MODEL_LEN=4096 GENERATIONS=1000 EVAL_TEST=1 \
+  bash slurm/llamea-all.sh                                                   # 30B/3B, justo
+
+# A100 40 GB
 PROFILE=coder30b-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-PROFILE=glm47-flash-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh # A100/H100, reasoning
-PROFILE=coder30b-fp8 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh  # H100
-PROFILE=coder-next-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh # H100, 80B/3B
-PROFILE=coder8b GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh       # A10
-PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh                # sanity
-PROFILE=list bash slurm/llamea-all.sh                                       # catalog
+PROFILE=glm47-flash-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh # reasoning
+PROFILE=a100-fp16 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+
+# H100 80 GB
+PROFILE=coder30b-fp8 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+PROFILE=coder-next-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh # 80B/3B
+PROFILE=h100-fp16 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
+
+# Cualquier GPU / sanity
+PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh
+PROFILE=list bash slurm/llamea-all.sh                                        # catalog
 ```
 
 #### Alternative (advanced): a persistent server + separate searches
@@ -630,6 +750,58 @@ operators or reanalyzing.
 > `1.1**K`. Clipping only affects points outside the reference box and keeps
 > the comparison bounded. In the GE frame the candidate already belongs to the
 > frame, so normal values are unchanged.
+
+### C2. Compare against the original GE frame (`compare_ge_frame.py`)
+
+`compare_operators.py` (above) uses a **stationary** panel frame. To compare
+LLaMEA with the GE table you need the **GE evaluation harness** (`experiment.py`):
+same consolidated frame per instance, `comprobate`, `(f-vmin)/(vmax-vmin)`,
+nadir `[1.1]*K`, same initial populations and seeds. `compare_ge_frame.py`
+reproduces it and adds the LLaMEA `.py` operator to the panel. Run it from
+`/LUSTRE/mohh`.
+
+**Reproduce `Experiment_001`** (its individuals, seeds and frame; `mqap_original`,
+16 test instances):
+
+```bash
+python scripts/compare_ge_frame.py \
+  --operator llamea=results/searches/<EXPERIMENT_NAME>/llamea_best_operator.py \
+  --operator ge1=ge:results/Experiment_001/MOEAD_operators.txt \
+  --operator pmx=classic:pmx --operator cx=classic:cx \
+  --frame-operators ge1_Best,ge1_Middle,ge1_Worst,pmx,cx \
+  --dataset mqap_original --split test --instances all --repeats 31 \
+  --init-from results/Experiment_001/evaluation_results/initial_solutions \
+  --reuse-seeds --solver MOEAD,NSGAII,SMSEMOA --mutation both \
+  --mo-generations 500 --mo-population-size 105 --budget 50k \
+  --name final_llamea_vs_ge
+```
+
+**Project test set** (`mqap`, 20 test instances; new paired populations, no
+`--init-from`):
+
+```bash
+python scripts/compare_ge_frame.py \
+  --operator llamea=results/searches/<EXPERIMENT_NAME>/llamea_best_operator.py \
+  --operator ge1=ge:results/Experiment_001/MOEAD_operators.txt \
+  --operator pmx=classic:pmx --operator cx=classic:cx \
+  --frame-operators ge1_Best,ge1_Middle,ge1_Worst,pmx,cx \
+  --dataset mqap --split test --instances all --repeats 31 \
+  --solver MOEAD,NSGAII,SMSEMOA --mutation both \
+  --mo-generations 500 --mo-population-size 105 --budget 50k \
+  --name final_llamea_vs_ge_mqap
+```
+
+- `--repeats 31` = 31 MOEA runs per (instance, operator, protocol); `--solver`
+  × `--mutation both` = **6 protocols**; the same initial population is shared
+  by all operators within a repetition (paired Wilcoxon + Holm).
+- `--frame-operators` makes LLaMEA be measured against the **GE frame** without
+  contributing to it.
+- `--init-from` only works if the dataset matches the saved experiment
+  (`mqap_original` for `Experiment_001`); otherwise omit it.
+- Output: `results/evaluations_ge_frame/<name>/` with `evaluation.json`,
+  `report.md`, `operators/`, `initial_solutions/`, `fronts/` and `fronts.npz`.
+- If `Experiment_001` is not in the cluster, point `ge1=` to its
+  `MOEAD_operators.txt` and `--init-from` to its `initial_solutions/`.
 
 ### D. Replicate the search (not just the operator)
 
