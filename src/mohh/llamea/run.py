@@ -49,7 +49,7 @@ import numpy as np
 
 from mohh.core.utilities.instance_utils import instance_paths
 from mohh.llamea import metrics as model_metrics
-from mohh.llamea.fitness import EarlyStop, build_evaluator, init_params
+from mohh.llamea.fitness import EarlyStop, build_evaluator, build_population_evaluator, init_params
 from mohh.llamea.prompts import (
     ROLE_PROMPT,
     make_task_prompt,
@@ -188,19 +188,33 @@ def _model_revision(model):
 
 def _make_evaluator(paths, args, bounds=None, archive=None, fronts_dir=None,
                     diversity_log=None):
-    return build_evaluator(
+    model_names = [name.strip() for name in
+                   str(getattr(args, "solvers", "")).split(",") if name.strip()]
+    if not model_names:
+        model_names = [args.solver]
+    mutation_names = [name.strip().lower() for name in
+                      str(getattr(args, "mutations", "")).split(",") if name.strip()]
+    if mutation_names:
+        mutations = [name in ("swap", "wm", "true", "1", "yes")
+                     for name in mutation_names]
+    else:
+        mutations = [bool(args.mutation)]
+    builder = (build_population_evaluator
+               if getattr(args, "population_fitness", True)
+               else build_evaluator)
+    return builder(
         paths,
         mo_generations=args.mo_generations,
         mo_population_size=args.mo_population_size,
         seed=args.seed,
-        model_name=args.solver,
-        mutation=args.mutation,
+        model_name=model_names[0],
+        mutation=mutations[0],
         instance_timeout=args.instance_timeout,
         normalize=args.normalize,
         bounds=bounds,
         reference_operators=_reference_panel(args.reference_operators),
         archive=archive,
-        frame="stationary" if getattr(args, "stationary_frame", False) else "ge",
+        frame="ge" if getattr(args, "accumulated_frame", False) else "stationary",
         fronts_dir=fronts_dir,
         repeat_penalty=getattr(args, "repeat_penalty", 0.5),
         patience=getattr(args, "patience", 0),
@@ -209,6 +223,8 @@ def _make_evaluator(paths, args, bounds=None, archive=None, fronts_dir=None,
         target_penalty=getattr(args, "target_penalty", 1.0),
         require_target_family=getattr(args, "require_target_family", False),
         fitness_workers=getattr(args, "fitness_workers", 1),
+        model_names=model_names,
+        mutations=mutations,
     )
 
 
@@ -650,6 +666,7 @@ def run_llamea(args):
         elitism=not args.comma,
         minimization=False,
         max_workers=args.max_workers,
+        evaluate_population=bool(getattr(args, "population_fitness", True)),
         experiment_name=args.experiment_name,
         **_llamea_kwargs(args),
         **search_kwargs,
@@ -1087,6 +1104,20 @@ def main(argv=None):
                              "se ajusta con FITNESS_WORKERS.")
     parser.add_argument("--solver", default="MOEAD",
                         help="MOEA interno: MOEAD, NSGAII o SMSEMOA.")
+    parser.add_argument("--solvers", default="MOEAD,NSGAII,SMSEMOA",
+                        help="Protocolo GE: solvers a evaluar por candidato "
+                             "(lista separada por comas).")
+    parser.add_argument("--mutations", default="none,swap",
+                        help="Protocolo GE: mutaciones a evaluar por candidato "
+                             "(none,swap).")
+    parser.add_argument("--population-fitness", dest="population_fitness",
+                        action="store_true", default=True,
+                        help="Fitness por poblacion (predeterminado): consolida "
+                             "los frentes de padres e hijos por instancia, como "
+                             "HyperHeuristic.compute_metrics de GE.")
+    parser.add_argument("--no-population-fitness", dest="population_fitness",
+                        action="store_false",
+                        help="Fitness individual historico (no usar con el marco GE).")
     parser.add_argument("--mutation", action="store_true",
                         help="Agregar mutacion al MOEA interno (default: solo cruce). "
                              "Usa Swap_Mutation, la mutacion de permutacion de "
@@ -1095,8 +1126,8 @@ def main(argv=None):
                         help="Numero de instancias train, o 'all'.")
     parser.add_argument("--test-instances", default="all",
                         help="Numero de instancias test (con --eval-test), o 'all'.")
-    parser.add_argument("--mo-generations", type=int, default=30)
-    parser.add_argument("--mo-population-size", type=int, default=30)
+    parser.add_argument("--mo-generations", type=int, default=500)
+    parser.add_argument("--mo-population-size", type=int, default=105)
     parser.add_argument("--instance-timeout", type=float, default=300.0,
                         help="Segundos maximos por instancia del MOEA interno "
                              "(corta operadores que no terminan). Subirlo si se "

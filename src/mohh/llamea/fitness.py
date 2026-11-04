@@ -479,6 +479,30 @@ def _solve_front_namespace(instance, namespace, seed, model_name, mutation,
     return np.asarray(pareto_front, dtype=float)
 
 
+def _solve_front_protocols(instance, namespace, seed, protocols,
+                           instance_timeout):
+    """Corre el MOEA bajo cada protocolo (solver, mutacion) y consolida.
+
+    Es el protocolo de la evaluacion GE: un frente por cada combinacion de
+    solver y mutacion, unidos en un solo frente por instancia antes de medir
+    el HV. Un protocolo que falle no cancela los demas.
+    """
+    fronts = []
+    for model_name, mutation in protocols:
+        try:
+            front = _solve_front_namespace(
+                instance, namespace, seed=seed, model_name=model_name,
+                mutation=mutation, instance_timeout=instance_timeout,
+            )
+        except Exception:  # noqa: BLE001 - se omite el protocolo fallido
+            continue
+        if front is not None and len(front):
+            fronts.append(front)
+    if not fronts:
+        return None
+    return _consolidated_frame(*fronts)
+
+
 def _solve_front_task(task):
     """Worker picklable: una instancia de un candidato o de una referencia.
 
@@ -494,14 +518,22 @@ def _solve_front_task(task):
             namespace = namespace_for(task["reference"])
         else:
             namespace = _cached_operator(task["code"])
-        front = _solve_front_namespace(
-            task["instance"],
-            namespace,
-            seed=task["seed"],
-            model_name=task["model_name"],
-            mutation=task["mutation"],
-            instance_timeout=task["instance_timeout"],
-        )
+        protocols = task.get("protocols")
+        if protocols:
+            front = _solve_front_protocols(
+                task["instance"], namespace, seed=task["seed"],
+                protocols=protocols,
+                instance_timeout=task["instance_timeout"],
+            )
+        else:
+            front = _solve_front_namespace(
+                task["instance"],
+                namespace,
+                seed=task["seed"],
+                model_name=task["model_name"],
+                mutation=task["mutation"],
+                instance_timeout=task["instance_timeout"],
+            )
         return {"front": front, "error": None}
     except Exception as error:  # noqa: BLE001 - se reporta como feedback
         return {
@@ -700,13 +732,24 @@ class OperatorEvaluator:
                  frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0,
                  diversity_feedback=True, diversity_log=None,
                  target_penalty=1.0, require_target_family=False,
-                 fitness_workers=1):
+                 fitness_workers=1, model_names=None, mutations=None):
         self.instance_paths = [str(p) for p in instance_paths]
         self.mo_generations = mo_generations
         self.mo_population_size = mo_population_size
         self.seed = seed
         self.model_name = model_name
         self.mutation = mutation
+        # Protocolo GE: todos los solvers y ambas mutaciones. Si no se indica,
+        # se conserva el comportamiento de un solo solver/mutacion.
+        if model_names:
+            names = list(model_names)
+        else:
+            names = [model_name]
+        if mutations is None:
+            muts = [bool(mutation)]
+        else:
+            muts = [bool(value) for value in mutations]
+        self.protocols = [(name, mut) for name in names for mut in muts]
         self.instance_timeout = instance_timeout
         # Paralelismo dentro de un candidato: una tarea por instancia. Con
         # `1` se conserva el bucle secuencial historico. El cluster lo activa
@@ -826,12 +869,21 @@ class OperatorEvaluator:
     # -- evaluacion de un operador sobre una instancia -------------------- #
     def _solve_front(self, instance, namespace):
         """Corre el MOEA interno con `namespace['crossover']` y devuelve el frente."""
+        if len(self.protocols) > 1:
+            return _solve_front_protocols(
+                instance,
+                namespace,
+                seed=self.seed,
+                protocols=self.protocols,
+                instance_timeout=self.instance_timeout,
+            )
+        model_name, mutation = self.protocols[0]
         return _solve_front_namespace(
             instance,
             namespace,
             seed=self.seed,
-            model_name=self.model_name,
-            mutation=self.mutation,
+            model_name=model_name,
+            mutation=mutation,
             instance_timeout=self.instance_timeout,
         )
 
@@ -845,6 +897,7 @@ class OperatorEvaluator:
             "seed": self.seed,
             "model_name": self.model_name,
             "mutation": self.mutation,
+            "protocols": self.protocols,
             "instance_timeout": self.instance_timeout,
         }
 
@@ -1731,6 +1784,151 @@ class OperatorEvaluator:
                 f"normalize={self.normalize})")
 
 
+class PopulationEvaluator(OperatorEvaluator):
+    """Fitness por poblacion, replicando `HyperHeuristic.compute_metrics` de GE.
+
+    Para cada generacion se consolidan los frentes de **toda la poblacion**
+    (padres + descendientes) por instancia, se calcula el nadir del frente no
+    dominado consolidado y se asigna el rango HV de cada individuo. El fitness
+    es el rango medio entre instancias (negado para que LLaMEA maximice).
+
+    No acumula frentes de generaciones anteriores: el marco es el de la
+    poblacion actual, igual que en la busqueda por evolucion gramatical.
+    """
+
+    def __call__(self, new_population, parent_population=None, logger=None):
+        if parent_population is None or not isinstance(new_population, (list, tuple)):
+            return super().__call__(new_population, logger=logger)
+        return self._evaluate_batch(new_population, parent_population, logger)
+
+    def _evaluate_batch(self, new_population, parent_population, logger=None):
+        from mohh.core.utilities.algorithm.MO import (
+            compute_hypervolume,
+            compute_nadir_point,
+            non_dominated_sorting_vectorized,
+        )
+        from mohh.generation.utilities.algorithm.HH_auxiliars import compute_rank
+
+        population = list(parent_population) + list(new_population)
+        unique = {}
+        for solution in population:
+            key = (solution.code or "").strip()
+            unique.setdefault(key, solution)
+
+        instances = self._ensure_instances()
+        if self.normalize and self.bounds is None:
+            # El ranking por poblacion no necesita el marco de referencia:
+            # se usan los frentes crudos y el nadir consolidado de la poblacion.
+            self.bounds = [None] * len(instances)
+        for key, solution in unique.items():
+            if key not in self._cache:
+                self._evaluations += 1
+                entry = self._evaluate_code(solution, compute_hypervolume)
+                self._cache[key] = entry
+                if entry.get("fronts") is not None:
+                    self._valid_evaluations += 1
+                self._save_candidate_fronts(key, entry, solution)
+
+        ranks_by_key = {key: [] for key in unique}
+        for index in range(len(instances)):
+            points = set()
+            fronts = {}
+            for key in unique:
+                entry = self._cache.get(key)
+                if entry is None or entry.get("fronts") is None:
+                    continue
+                front = entry["fronts"][index]
+                if front is None or len(front) == 0:
+                    continue
+                array = np.asarray(front, dtype=float)
+                fronts[key] = array
+                for row in array:
+                    points.add(tuple(row.tolist()))
+            if not points:
+                continue
+            consolidated = np.asarray(sorted(points), dtype=float)
+            fronts_sorted = non_dominated_sorting_vectorized(consolidated)
+            if not fronts_sorted:
+                continue
+            ndf = np.asarray(fronts_sorted[0], dtype=float)
+            nadir = compute_nadir_point(set(map(tuple, ndf.tolist())))
+            keys = list(fronts)
+            hypervolumes = []
+            for key in keys:
+                try:
+                    hypervolumes.append(float(compute_hypervolume(
+                        np.asarray(nadir, dtype=float), fronts[key])))
+                except Exception:  # noqa: BLE001 - frente degenerado
+                    hypervolumes.append(0.0)
+            ranks = compute_rank(hypervolumes)
+            for key, rank in zip(keys, ranks):
+                ranks_by_key[key].append(rank)
+
+        for solution in population:
+            key = (solution.code or "").strip()
+            values = ranks_by_key.get(key) or []
+            if not values:
+                score = -1e9
+                feedback = ("GE population ranking: no valid fronts on any "
+                            "instance.")
+            else:
+                mean_rank = float(np.mean(values))
+                score = -mean_rank
+                best = min(values)
+                worst = max(values)
+                feedback = (
+                    f"GE population ranking: mean rank {mean_rank:.4f} "
+                    f"(1 = best; lower is better), best instance rank {best}, "
+                    f"worst {worst}, over {len(values)} instances. "
+                    f"Higher fitness is better (fitness = -mean rank)."
+                )
+            solution.set_scores(score, feedback=feedback)
+            self._track_best(score, solution)
+            self.archive.update(key, score)
+
+        return new_population, parent_population
+
+
+def build_population_evaluator(train_instances, mo_generations,
+                               mo_population_size, seed=42,
+                               model_name="MOEAD", mutation=False,
+                               instance_timeout=INSTANCE_TIMEOUT,
+                               normalize=True, bounds=None,
+                               reference_operators=None, archive=None,
+                               frame="stationary", fronts_dir=None,
+                               repeat_penalty=0.5, patience=0,
+                               diversity_feedback=True, diversity_log=None,
+                               target_penalty=1.0,
+                               require_target_family=False,
+                               fitness_workers=1, model_names=None,
+                               mutations=None):
+    """Construye el evaluador batch con el fitness de la busqueda GE."""
+    return PopulationEvaluator(
+        train_instances,
+        mo_generations=mo_generations,
+        mo_population_size=mo_population_size,
+        seed=seed,
+        model_name=model_name,
+        mutation=mutation,
+        instance_timeout=instance_timeout,
+        normalize=normalize,
+        bounds=bounds,
+        reference_operators=reference_operators,
+        archive=archive,
+        frame=frame,
+        fronts_dir=fronts_dir,
+        repeat_penalty=repeat_penalty,
+        patience=patience,
+        diversity_feedback=diversity_feedback,
+        diversity_log=diversity_log,
+        target_penalty=target_penalty,
+        require_target_family=require_target_family,
+        fitness_workers=fitness_workers,
+        model_names=model_names,
+        mutations=mutations,
+    )
+
+
 def build_evaluator(train_instances, mo_generations, mo_population_size,
                     seed=42, model_name="MOEAD", mutation=False,
                     instance_timeout=INSTANCE_TIMEOUT, normalize=True,
@@ -1738,7 +1936,7 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
                     frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0,
                     diversity_feedback=True, diversity_log=None,
                     target_penalty=1.0, require_target_family=False,
-                    fitness_workers=1):
+                    fitness_workers=1, model_names=None, mutations=None):
     """Construye la funcion de fitness que consume LLaMEA.
 
     @param train_instances: lista de rutas de instancias (train o test).
@@ -1788,4 +1986,6 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
         target_penalty=target_penalty,
         require_target_family=require_target_family,
         fitness_workers=fitness_workers,
+        model_names=model_names,
+        mutations=mutations,
     )
