@@ -171,9 +171,17 @@ def evaluate():
     parser.add_argument("--models", default=None,
                         help="Comma-separated generation models to pull operators from (default: auto-detect from experiment_path).")
     _add_solvers_arg(parser)
-    parser.add_argument("--n-experiments", type=int, default=None)
+    parser.add_argument("--n-experiments", type=int, default=31)
     _add_mo_args(parser)
     _add_eval_budgets_arg(parser)
+    parser.add_argument("--llamea-operator", action="append", default=None,
+                        help="Ruta a un operador Python de LLaMEA "
+                             "(crossover(x, y)). Se anade como modelo LLAMEA y "
+                             "se evalua con el mismo arnes GE. Fuerza 31 "
+                             "experimentos independientes.")
+    parser.add_argument("--llamea-model-name", default="LLAMEA",
+                        help="Nombre del modelo para el operador LLaMEA "
+                             "(default LLAMEA).")
     parser.add_argument("--dataset-path", default=None,
                         help="Ruta al dataset con train/ y test/ (por defecto "
                              "<repo>/datasets/<DATASET>).")
@@ -203,9 +211,20 @@ def evaluate():
     if args.no_figures and args.figures_only:
         parser.error("--no-figures y --figures-only son incompatibles")
 
-    models = args.models.split(",") if args.models else discover_models(args.experiment_path)
+    base_models = (args.models.split(",") if args.models
+                   else discover_models(args.experiment_path))
+    llamea_paths = [os.path.abspath(os.path.expanduser(p))
+                    for p in (args.llamea_operator or [])]
+    for ruta in llamea_paths:
+        if not os.path.isfile(ruta):
+            parser.error(f"no existe el operador LLaMEA: {ruta}")
+    llamea_models = [args.llamea_model_name] * len(llamea_paths)
+    models = base_models + llamea_models
     solvers = args.solvers.split(",") if args.solvers else evaluation_params_dict["SOLVERS"]
     overrides = _evaluation_overrides(args, solvers, models)
+    if llamea_paths:
+        # Requisito del proyecto: 31 ejecuciones independientes siempre.
+        overrides["N_EXPERIMENTS"] = 31
 
     if args.figures_only:
         from mohh.evaluation.params import set_params
@@ -228,8 +247,10 @@ def evaluate():
         print(f"Generación   : {args.generation}")
     print(f"Salida       : {_evaluation_dir(args.experiment_path, args)}")
 
-    operators = extract_operators(args.experiment_path, models,
+    operators = extract_operators(args.experiment_path, base_models,
                                   generation=args.generation)
+    for ruta in llamea_paths:
+        operators.extend([f"llamea:{ruta}"] * 3)
     execute_experiments(args.experiment_path, "", operators, overrides,
                         instances=instances, figures=not args.no_figures)
 

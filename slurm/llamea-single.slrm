@@ -103,6 +103,7 @@ if [ "${FITNESS_WORKERS:-}" = "" ]; then
     fi
 fi
 export FITNESS_WORKERS
+export MAX_MODEL_LEN
 echo "Fitness workers: $FITNESS_WORKERS (CPUs del job: $CPUS_TASK)"
 
 module load python/miniforge
@@ -226,16 +227,16 @@ ARGS=(
     --top-k "${TOP_K:-20}"
     --sampling-repetition-penalty "${SAMPLING_REPETITION_PENALTY:-1.05}"
     --thinking "${THINKING:-auto}"
-    --max-tokens "${MAX_TOKENS:-4096}"
-    --operator-memory "${OPERATOR_MEMORY:-12}"
+    --max-tokens "${MAX_TOKENS:-2048}"
+    --operator-memory "${OPERATOR_MEMORY:-6}"
     --repeat-penalty "${REPEAT_PENALTY:-0.5}"
     --patience "${PATIENCE:-0}"
     --stall-timeout "${STALL_TIMEOUT:-3600}"
     --parent-selection "${PARENT_SELECTION:-tournament}"
     --niching "${NICHING:-none}"
-    --eval-repeats "${EVAL_REPEATS:-11}"
+    --eval-repeats "${EVAL_REPEATS:-31}"
     --solver "${SOLVER:-MOEAD}"
-    --train-instances "${TRAIN_INSTANCES:-8}"
+    --train-instances "${TRAIN_INSTANCES:-all}"
     --mo-generations "${MO_GENERATIONS:-30}"
     --mo-population-size "${MO_POPULATION_SIZE:-30}"
     --instance-timeout "${INSTANCE_TIMEOUT:-300}"
@@ -245,7 +246,7 @@ ARGS=(
     --experiment-name "${EXPERIMENT_NAME}"
 )
 if [ "${EVAL_TEST:-0}" = "1" ]; then
-    ARGS+=(--eval-test --test-instances "${TEST_INSTANCES:-8}")
+    ARGS+=(--eval-test --test-instances "${TEST_INSTANCES:-all}")
 fi
 if [ "${MUTATION:-0}" = "1" ]; then
     ARGS+=(--mutation)
@@ -300,8 +301,8 @@ if [ "${COMPARE:-0}" = "1" ]; then
             --operator erx2=classic2:erx
             --fail-policy "${COMPARE_FAIL_POLICY:-zero}"
             --split "${COMPARE_SPLIT:-test}"
-            --instances "${COMPARE_INSTANCES:-${TEST_INSTANCES:-8}}"
-            --repeats "${COMPARE_REPEATS:-11}"
+            --instances "${COMPARE_INSTANCES:-${TEST_INSTANCES:-all}}"
+            --repeats "${COMPARE_REPEATS:-31}"
             --name "${COMPARE_NAME:-${EXPERIMENT_NAME}_vs_clasicos}"
             --save-fronts
         )

@@ -247,6 +247,37 @@ def _llamea_kwargs(args):
     return kwargs
 
 
+class _Tee:
+    """Duplica la salida estandar en consola y en `run.log`."""
+
+    def __init__(self, stream, handle):
+        self.stream = stream
+        self.handle = handle
+
+    def write(self, data):
+        self.stream.write(data)
+        self.handle.write(data)
+        self.handle.flush()
+        return len(data)
+
+    def flush(self):
+        self.stream.flush()
+        self.handle.flush()
+
+    def isatty(self):
+        return self.stream.isatty()
+
+
+def _setup_console_log(exp_dir):
+    """Escribe stdout y stderr en `<exp_dir>/run.log` (ademas de la consola)."""
+    os.makedirs(exp_dir, exist_ok=True)
+    handle = open(os.path.join(exp_dir, "run.log"), "a",
+                  encoding="utf-8", buffering=1)
+    sys.stdout = _Tee(sys.__stdout__, handle)
+    sys.stderr = _Tee(sys.__stderr__, handle)
+    return handle
+
+
 def _setup_logging(exp_dir):
     """Log de la corrida: `llamea.log` (todo) y `error.log` (solo avisos/errores).
 
@@ -365,6 +396,7 @@ def run_llamea(args):
     log_base = os.path.join(exp_dir, "llamea_logs")
     request_log = os.path.join(exp_dir, "llm_requests.jsonl")
     logger = _setup_logging(exp_dir)
+    _setup_console_log(exp_dir)
     os.makedirs(log_base, exist_ok=True)
     _start_stall_watchdog(exp_dir, logger, getattr(args, "stall_timeout", 0.0))
     logger.info("Inicio de la corrida: model=%s base_url=%s budget=%s",
@@ -773,20 +805,22 @@ def run_llamea(args):
         reference_by_rep = {}          # clasico -> [HV por repeticion]
         test_failures = []
         degenerate = None
-        test_frame = ("stationary (panel de referencia)" if args.normalize
-                      else "none (HV crudo)")
+        same_frame = getattr(args, "stationary_frame", False)
+        if args.normalize:
+            test_frame = ("stationary (panel de referencia)" if same_frame
+                          else "GE (frente consolidado por instancia)")
+        else:
+            test_frame = "none (HV crudo)"
         for rep in range(repeats):
-            # El marco final se fija al panel de referencia (`stationary`) en
-            # TODAS las repeticiones, no solo cuando hay varias: un marco que
-            # incluye al propio candidato lo favorece y no es un metro fijo.
-            # El marco GE completo (todas las configuraciones) lo reconstruye
-            # `scripts/compare_operators.py`; aqui solo se reporta candidato vs
-            # clasicos con el mismo criterio y las mismas semillas.
+            # La busqueda y la evaluacion final usan el mismo criterio de
+            # marco: `ge` por defecto (frente consolidado, como experiment.py)
+            # o `stationary` solo si se solicita explicitamente. El marco no se
+            # cambia entre fases.
             rep_args = argparse.Namespace(**vars(args))
             rep_args.seed = args.seed + rep * 7919
             rep_args.patience = 0
             rep_args.repeat_penalty = 1.0
-            rep_args.stationary_frame = True
+            rep_args.stationary_frame = same_frame
             rep_dir = (test_fronts_dir if (test_fronts_dir is None or repeats == 1)
                        else os.path.join(test_fronts_dir, f"rep-{rep}"))
             test_fitness = _make_evaluator(test_paths, rep_args, fronts_dir=rep_dir)
@@ -1057,9 +1091,9 @@ def main(argv=None):
                         help="Agregar mutacion al MOEA interno (default: solo cruce). "
                              "Usa Swap_Mutation, la mutacion de permutacion de "
                              "experiment.py; el nucleo GE no se modifica.")
-    parser.add_argument("--train-instances", default="8",
+    parser.add_argument("--train-instances", default="all",
                         help="Numero de instancias train, o 'all'.")
-    parser.add_argument("--test-instances", default="8",
+    parser.add_argument("--test-instances", default="all",
                         help="Numero de instancias test (con --eval-test), o 'all'.")
     parser.add_argument("--mo-generations", type=int, default=30)
     parser.add_argument("--mo-population-size", type=int, default=30)
@@ -1154,6 +1188,17 @@ def main(argv=None):
                         help="Segundos sin una generacion nueva antes de abortar la "
                              "corrida (watchdog del cluster). 0 = desactivado.")
     args = parser.parse_args(argv)
+
+    # Acotar `max_tokens` al contexto servido por vLLM. El error 400
+    # "maximum context length" aparece cuando prompt + max_tokens superan
+    # MAX_MODEL_LEN; se reserva el 75 % del contexto al prompt.
+    context = int(os.environ.get("MAX_MODEL_LEN", "0") or 0)
+    if context > 0 and args.max_tokens:
+        safe = max(256, context // 4)
+        if args.max_tokens > safe:
+            print(f"AVISO: --max-tokens {args.max_tokens} excede el contexto "
+                  f"seguro {safe} (MAX_MODEL_LEN={context}); se usa {safe}.")
+            args.max_tokens = safe
 
     if args.combine and args.n_parents < 2:
         parser.error("--combine requiere --n-parents >= 2")

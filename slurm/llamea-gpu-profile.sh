@@ -57,7 +57,7 @@
 #   PROFILE=h100-fp16 bash slurm/llamea-all.sh
 #   MODEL=Qwen/Qwen2.5-Coder-14B-Instruct PROFILE=a100-fp16 bash slurm/llamea-all.sh
 
-: "${PROFILE:=big-quant}"
+: "${PROFILE:=glm47-flash-awq}"
 
 if [ "$PROFILE" = "list" ]; then
     cat <<'EOF'
@@ -67,6 +67,8 @@ coder30b-awq      QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ  ~18 GB  A100/H100
 coder30b-fp8      Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8       ~31 GB  H100
 coder30b-awq-a10  QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ  ~18 GB  A10
 glm47-flash-awq   QuantTrio/GLM-4.7-Flash-AWQ                ~20 GB  A100/H100
+glm47-flash-awq-a10 QuantTrio/GLM-4.7-Flash-AWQ              ~20 GB  A10
+qwen3-8b-awq      Qwen/Qwen3-8B-AWQ                          ~6 GB   A10/A100/H100
 coder-next-awq    qtum/Qwen3-Coder-Next-AWQ                  ~42 GB  H100
 h100-fp16         Qwen/Qwen2.5-Coder-32B-Instruct             ~65 GB  H100
 a100-fp16         Qwen/Qwen2.5-Coder-14B-Instruct             ~29 GB  A100/H100
@@ -103,6 +105,26 @@ case "$PROFILE" in
         MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
         GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
         VLLM_ARGS="${VLLM_ARGS:---quantization awq_marlin}"
+        ;;
+    qwen3-8b-awq)
+        # Qwen3-8B AWQ (6.1 GB): cabe en A10 24 GB y deja KV cache amplia.
+        MODEL="${MODEL:-Qwen/Qwen3-8B-AWQ}"
+        CONSTRAINT="${CONSTRAINT:-A10}"
+        MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+        GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
+        VLLM_ARGS="${VLLM_ARGS:---quantization awq_marlin}"
+        ;;
+    glm47-flash-awq-a10)
+        # GLM-4.7-Flash AWQ (~20 GB) en A10 24 GB: contexto corto y KV cache
+        # limitada. Si hay OOM, reducir MAX_MODEL_LEN o usar qwen3-8b-awq.
+        MODEL="${MODEL:-QuantTrio/GLM-4.7-Flash-AWQ}"
+        CONSTRAINT="${CONSTRAINT:-A10}"
+        MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+        GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.95}"
+        VLLM_ARGS="${VLLM_ARGS:---trust-remote-code --reasoning-parser glm45}"
+        export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
+        export VLLM_USE_FLASHINFER_MOE_FP16="${VLLM_USE_FLASHINFER_MOE_FP16:-1}"
+        export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
         ;;
     coder-next-awq)
         # 80B/3B activos en W4A16: ~42 GB de pesos. Solo H100 80 GB; el AWQ

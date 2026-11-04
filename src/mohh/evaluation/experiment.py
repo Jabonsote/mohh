@@ -151,7 +151,18 @@ def build_solver(solver_name, cross_type, crossover, mutation):
         raise ValueError(f"Unknown solver: {solver_name}")
 
     # LOAD CROSSOVER
-    if cross_type == "operator_template":
+    if cross_type == "llamea":
+        # Operador Python generado por LLaMEA. Se inyecta con el mismo
+        # contrato que HH_Operator (dos padres -> dos hijos) pero evaluando
+        # la funcion `crossover(x, y)` del archivo, no un fenotipo GE.
+        from mohh.llamea.fitness import compile_operator
+        from mohh.llamea.operator import LLMOperator
+
+        path = crossover.split(":", 1)[1]
+        with open(path, encoding="utf-8") as handle:
+            code = handle.read()
+        solver.crossover = LLMOperator(compile_operator(code), prob=cross_prob)
+    elif cross_type == "operator_template":
         solver.load_operator(cross_type, "HH_Operator",
                              operator=crossover,
                              solution_type=solution_type,
@@ -294,9 +305,9 @@ def run_experiments(experiment_path, results_paths, operators,
 
         model_name = model_names[i // 3]
 
-        all_crossover.append(("operator_template", operators[i],   model_name, "Best"))
-        all_crossover.append(("operator_template", operators[i+1], model_name, "Middle"))
-        all_crossover.append(("operator_template", operators[i+2], model_name, "Worst"))
+        for label, operator in zip(("Best", "Middle", "Worst"), operators[i:i + 3]):
+            cross_type = "llamea" if operator.startswith("llamea:") else "operator_template"
+            all_crossover.append((cross_type, operator, model_name, label))
 
     all_crossover.append(("crossover", "PMX_Cross", "None", "Standard"))
     all_crossover.append(("crossover", "CX_Cross", "None", "Standard"))

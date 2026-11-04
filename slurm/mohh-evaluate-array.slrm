@@ -41,6 +41,9 @@ else
 fi
 N_EXPERIMENTS="${N_EXPERIMENTS:-31}"
 EVAL_ARGS="${EVAL_ARGS:---solvers $SOLVERS --n-experiments $N_EXPERIMENTS}"
+if [ -n "${LLAMEA_OPERATOR:-}" ]; then
+    EVAL_ARGS="$EVAL_ARGS --llamea-operator $LLAMEA_OPERATOR"
+fi
 
 cd "$SLURM_SUBMIT_DIR"
 export OMP_NUM_THREADS=1

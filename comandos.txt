@@ -1,0 +1,123 @@
+# ============================================================================
+# MOHH-R / LLaMEA - comandos de referencia
+# Copiar y pegar desde /LUSTRE/javier.ramirez/mohh
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 0. Actualizar el repositorio en el cluster
+# ----------------------------------------------------------------------------
+cd /LUSTRE/javier.ramirez/mohh
+git pull origin cluster
+
+# ----------------------------------------------------------------------------
+# 1. Entorno (una sola vez)
+# ----------------------------------------------------------------------------
+module load python/miniforge
+WITH_VLLM=1 bash slurm/ixachi-setup-env.sh
+PROFILE=list bash slurm/llamea-all.sh
+
+# ----------------------------------------------------------------------------
+# 2. Ver GPUs libres
+# ----------------------------------------------------------------------------
+sinfo -p ixachi -o "%20N %30G %10T"
+scontrol show node graphos1 | grep -E "NodeName|Gres=|AllocTRES|CfgTRES|State="
+scontrol show node graphos4 | grep -E "NodeName|Gres=|AllocTRES|CfgTRES|State="
+squeue -u $USER -o "%.10i %.9P %.20j %.2t %.10M %R %b"
+
+# Criterio: GPUs libres = CfgTRES(grES/gpu) - AllocTRES(grES/gpu).
+# State=idle implica GPU libre.
+
+# ----------------------------------------------------------------------------
+# 3. Verificar el perfil antes de enviar
+# Debe imprimir: modelo=QuantTrio/GLM-4.7-Flash-AWQ constraint=A10
+# ----------------------------------------------------------------------------
+PROFILE=glm47-flash-awq-a10 bash -c \
+  'source slurm/llamea-gpu-profile.sh; \
+   echo "modelo=$MODEL constraint=$CONSTRAINT max_len=$MAX_MODEL_LEN"'
+
+# Perfiles disponibles:
+#   glm47-flash-awq       GLM-4.7-Flash AWQ, A100/H100
+#   glm47-flash-awq-a10   GLM-4.7-Flash AWQ, A10 (8k)
+#   qwen3-8b-awq          Qwen3-8B AWQ, A10/A100/H100
+#   coder30b-awq-a10      Qwen3-Coder-30B AWQ, A10
+#   coder30b-awq          Qwen3-Coder-30B AWQ, A100/H100
+#   h100-fp16             Qwen2.5-Coder-32B fp16, H100
+
+# ----------------------------------------------------------------------------
+# 4. Busqueda LLaMEA con GLM en A10
+#    80 train / 20 test, 31 repeticiones, todos los nucleos
+# ----------------------------------------------------------------------------
+cd /LUSTRE/javier.ramirez/mohh
+
+RUN="llamea_glm_a10_$(date +%Y%m%d_%H%M%S)"
+
+OUT=$(PROFILE=glm47-flash-awq-a10 GENERATIONS=1000 EVAL_TEST=1 \
+  TRAIN_INSTANCES=all TEST_INSTANCES=all EVAL_REPEATS=31 \
+  EXPERIMENT_NAME="$RUN" bash slurm/llamea-all.sh)
+
+echo "$OUT"
+SEARCH_JOB=$(printf '%s\n' "$OUT" | awk '$1 == "job:" {print $2; exit}')
+echo "RUN=$RUN"
+echo "SEARCH_JOB=$SEARCH_JOB"
+
+# ----------------------------------------------------------------------------
+# 5. Evaluacion final GE con 31 ejecuciones, encadenada a la busqueda
+#    MAX_CONCURRENT=2 por QOSMaxNodePerUserLimit
+# ----------------------------------------------------------------------------
+DEPENDENCY="afterok:$SEARCH_JOB" \
+EXPERIMENT=$PWD/results/Experiment_001 \
+LLAMEA_OPERATOR=$PWD/results/searches/$RUN/llamea_best_operator.py \
+DATASET_PATH=$PWD/datasets/mqap \
+N_EXPERIMENTS=31 MAX_CONCURRENT=2 \
+bash slurm/submit_evaluate_array.sh
+
+# ----------------------------------------------------------------------------
+# 6. Monitoreo
+# ----------------------------------------------------------------------------
+squeue -u $USER -o "%.10i %.9P %.20j %.2t %.10M %R %b"
+tail -f logs/llamea-single-${SEARCH_JOB}.out
+tail -f results/searches/${RUN}/run.log
+tail -f results/searches/${RUN}/progress.txt
+cat results/searches/${RUN}/error.log
+
+# ----------------------------------------------------------------------------
+# 7. Evaluacion final sola (si la busqueda ya termino)
+# ----------------------------------------------------------------------------
+EXPERIMENT=$PWD/results/Experiment_001 \
+LLAMEA_OPERATOR=$PWD/results/searches/<RUN>/llamea_best_operator.py \
+DATASET_PATH=$PWD/datasets/mqap \
+N_EXPERIMENTS=31 MAX_CONCURRENT=2 \
+bash slurm/submit_evaluate_array.sh
+
+# ----------------------------------------------------------------------------
+# 8. Figuras de la evaluacion (si no se encadenaron)
+# ----------------------------------------------------------------------------
+EXPERIMENT=$PWD/results/Experiment_001 \
+DATASET_PATH=$PWD/datasets/mqap \
+sbatch slurm/mohh-evaluate-figures.slrm
+
+# ----------------------------------------------------------------------------
+# 9. Cancelar trabajos
+# ----------------------------------------------------------------------------
+scancel <JOBID>
+scancel -u $USER
+
+# ----------------------------------------------------------------------------
+# 10. GE puro (sin LLM)
+# ----------------------------------------------------------------------------
+mohh-generate
+mohh-evaluate results/Experiment_001
+
+# ----------------------------------------------------------------------------
+# 11. Analisis y reporte local
+# ----------------------------------------------------------------------------
+python analyze_operators.py
+# Reporte: results/reports/operators_report.html
+# CSV:     results/reports/operators_stats.csv
+# CSV:     results/reports/moea_stats.csv
+
+# ----------------------------------------------------------------------------
+# 12. Estado de un nodo concreto
+# ----------------------------------------------------------------------------
+scontrol show node graphos3 | grep -E "NodeName|Gres=|AllocTRES|CfgTRES|State="
+squeue -w graphos3 -o "%.10i %.9P %.20j %.8u %.2t %.10M %b"

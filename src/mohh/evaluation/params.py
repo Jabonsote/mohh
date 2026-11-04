@@ -17,7 +17,7 @@ mo_params = {
     'SOLVERS': ["MOEAD", "NSGAII", "SMSEMOA"],
 
     # Number of repeated experiments per instance/combination
-    'N_EXPERIMENTS': 11,
+    'N_EXPERIMENTS': 31,
 
     # Evaluation budgets to snapshot during a run (label: total evaluations).
     # 10500/31500/52500 = 105 (default MO_POPULATION_SIZE) * 100/300/500,

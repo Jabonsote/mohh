@@ -305,9 +305,9 @@ def _source_profile(profile, extra_env=None):
 
 
 def test_llamea_gpu_profile_defaults_to_big_model():
-    # El default del cluster no puede ser un modelo de juguete: 32B AWQ.
+    # El default del cluster no puede ser un modelo de juguete.
     model, constraint = _source_profile(None)
-    assert "32B" in model
+    assert "GLM-4.7-Flash" in model
     assert "A100" in constraint or "H100" in constraint
 
 

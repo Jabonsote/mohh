@@ -97,11 +97,11 @@ echo "Experimento: ${EXPERIMENT_NAME}"
 # 16 CPUs es el default recomendado. El MOEA interno ya no corre secuencial:
 # FITNESS_WORKERS evalua en paralelo las instancias de cada candidato (como el
 # pool de GE). Se dejan 4 nucleos para vLLM/tokenizacion.
-CPUS="${CPUS:-16}"
-MEM="${MEM:-64G}"
+CPUS="${CPUS:-32}"
+MEM="${MEM:-96G}"
 if [ "${FITNESS_WORKERS:-}" = "" ]; then
     if [ "$CPUS" -gt 4 ] 2>/dev/null; then
-        FITNESS_WORKERS=$((CPUS - 4))
+        FITNESS_WORKERS=$((CPUS - 1))
     else
         FITNESS_WORKERS=1
     fi

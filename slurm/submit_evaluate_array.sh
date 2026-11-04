@@ -38,13 +38,23 @@ EXPORT="ALL,EXPERIMENT=$EXPERIMENT,DATASET_PATH=$DATASET_PATH,SOLVER_LIST=$SOLVE
 if [ -n "${CONDA_ENV:-}" ]; then
     EXPORT="$EXPORT,CONDA_ENV=$CONDA_ENV"
 fi
+if [ -n "${LLAMEA_OPERATOR:-}" ]; then
+    EXPORT="$EXPORT,LLAMEA_OPERATOR=$LLAMEA_OPERATOR"
+fi
 
 echo "Experimento : $EXPERIMENT"
 echo "Dataset     : $DATASET_PATH ($N test)"
 echo "Array       : 0-$((N - 1))%$MAX_CONCURRENT"
 echo "Réplicas    : $N_EXPERIMENTS por combinación"
 
+DEPENDENCY="${DEPENDENCY:-}"
+SBATCH_DEP=()
+if [ -n "$DEPENDENCY" ]; then
+    SBATCH_DEP=(--dependency="$DEPENDENCY")
+fi
+
 JOB=$(sbatch --parsable \
+    "${SBATCH_DEP[@]}" \
     --array="0-$((N - 1))%$MAX_CONCURRENT" \
     --export="$EXPORT" \
     slurm/mohh-evaluate-array.slrm)
