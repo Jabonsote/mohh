@@ -1868,9 +1868,12 @@ class PopulationEvaluator(OperatorEvaluator):
             key = (solution.code or "").strip()
             values = ranks_by_key.get(key) or []
             if not values:
-                score = -1e9
+                # Un candidato sin frentes validos recibe el peor rango finito
+                # de la poblacion (no -1e9): asi la media de la generacion es
+                # interpretable y el orden relativo se conserva.
+                score = -float(len(unique) + 1)
                 feedback = ("GE population ranking: no valid fronts on any "
-                            "instance.")
+                            "instance; assigned the worst finite rank.")
             else:
                 mean_rank = float(np.mean(values))
                 score = -mean_rank
