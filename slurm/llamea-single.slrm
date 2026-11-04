@@ -237,7 +237,7 @@ ARGS=(
     --eval-repeats "${EVAL_REPEATS:-31}"
     --solver "${SOLVER:-MOEAD}"
     --train-instances "${TRAIN_INSTANCES:-all}"
-    --mo-generations "${MO_GENERATIONS:-500}"
+    --mo-generations "${MO_GENERATIONS:-300}"
     --mo-population-size "${MO_POPULATION_SIZE:-105}"
     --instance-timeout "${INSTANCE_TIMEOUT:-300}"
     --seed "${SEED:-42}"

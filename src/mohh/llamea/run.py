@@ -1104,10 +1104,10 @@ def main(argv=None):
                              "se ajusta con FITNESS_WORKERS.")
     parser.add_argument("--solver", default="MOEAD",
                         help="MOEA interno: MOEAD, NSGAII o SMSEMOA.")
-    parser.add_argument("--solvers", default="MOEAD,NSGAII,SMSEMOA",
+    parser.add_argument("--solvers", default="MOEAD",
                         help="Protocolo GE: solvers a evaluar por candidato "
                              "(lista separada por comas).")
-    parser.add_argument("--mutations", default="none,swap",
+    parser.add_argument("--mutations", default="none",
                         help="Protocolo GE: mutaciones a evaluar por candidato "
                              "(none,swap).")
     parser.add_argument("--population-fitness", dest="population_fitness",
@@ -1126,7 +1126,7 @@ def main(argv=None):
                         help="Numero de instancias train, o 'all'.")
     parser.add_argument("--test-instances", default="all",
                         help="Numero de instancias test (con --eval-test), o 'all'.")
-    parser.add_argument("--mo-generations", type=int, default=500)
+    parser.add_argument("--mo-generations", type=int, default=300)
     parser.add_argument("--mo-population-size", type=int, default=105)
     parser.add_argument("--instance-timeout", type=float, default=300.0,
                         help="Segundos maximos por instancia del MOEA interno "
