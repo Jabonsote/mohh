@@ -117,7 +117,7 @@ fi
 
 # 1. Ambiente. En el login, `module` existe. Si ya hay .conda-env con mohh y
 #    vLLM, no se reinstala nada; si falta, se crea en este mismo comando.
-mkdir -p logs results
+mkdir -p logs results "results/${CATEGORY:-searches}"
 if command -v module >/dev/null 2>&1; then
     module load python/miniforge || {
         echo "ERROR: no se pudo cargar python/miniforge." >&2
