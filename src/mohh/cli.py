@@ -182,10 +182,6 @@ def evaluate():
     parser.add_argument("--llamea-model-name", default="LLAMEA",
                         help="Nombre del modelo para el operador LLaMEA "
                              "(default LLAMEA).")
-    parser.add_argument("--reference-experiment", default=None,
-                        help="Experimento de GE del que se leen los operadores "
-                             "de referencia (Best/Middle/Worst). La salida y la "
-                             "estructura se escriben siempre en experiment_path.")
     parser.add_argument("--dataset-path", default=None,
                         help="Ruta al dataset con train/ y test/ (por defecto "
                              "<repo>/datasets/<DATASET>).")
@@ -215,9 +211,8 @@ def evaluate():
     if args.no_figures and args.figures_only:
         parser.error("--no-figures y --figures-only son incompatibles")
 
-    reference = (args.reference_experiment or args.experiment_path)
     base_models = (args.models.split(",") if args.models
-                   else discover_models(reference))
+                   else discover_models(args.experiment_path))
     llamea_paths = [os.path.abspath(os.path.expanduser(p))
                     for p in (args.llamea_operator or [])]
     for ruta in llamea_paths:
@@ -252,7 +247,7 @@ def evaluate():
         print(f"Generación   : {args.generation}")
     print(f"Salida       : {_evaluation_dir(args.experiment_path, args)}")
 
-    operators = extract_operators(reference, base_models,
+    operators = extract_operators(args.experiment_path, base_models,
                                   generation=args.generation)
     for ruta in llamea_paths:
         operators.extend([f"llamea:{ruta}"] * 3)

@@ -44,9 +44,6 @@ fi
 if [ -n "${EVALUATION_DIR:-}" ]; then
     EXPORT="$EXPORT,EVALUATION_DIR=$EVALUATION_DIR"
 fi
-if [ -n "${REFERENCE_EXPERIMENT:-}" ]; then
-    EXPORT="$EXPORT,REFERENCE_EXPERIMENT=$REFERENCE_EXPERIMENT"
-fi
 
 echo "Experimento : $EXPERIMENT"
 echo "Dataset     : $DATASET_PATH ($N test)"

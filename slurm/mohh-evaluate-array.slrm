@@ -47,9 +47,6 @@ fi
 if [ -n "${EVALUATION_DIR:-}" ]; then
     EVAL_ARGS="$EVAL_ARGS --evaluation-dir $EVALUATION_DIR"
 fi
-if [ -n "${REFERENCE_EXPERIMENT:-}" ]; then
-    EVAL_ARGS="$EVAL_ARGS --reference-experiment $REFERENCE_EXPERIMENT"
-fi
 
 cd "$SLURM_SUBMIT_DIR"
 export OMP_NUM_THREADS=1
