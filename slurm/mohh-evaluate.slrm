@@ -49,6 +49,10 @@ LLAMEA_ARGS=""
 if [ -n "${LLAMEA_OPERATOR:-}" ]; then
     LLAMEA_ARGS="--llamea-operator $LLAMEA_OPERATOR"
 fi
+EVAL_DIR_ARGS=""
+if [ -n "${EVALUATION_DIR:-}" ]; then
+    EVAL_DIR_ARGS="--evaluation-dir $EVALUATION_DIR"
+fi
 
 cd "$SLURM_SUBMIT_DIR"
 
@@ -71,6 +75,6 @@ conda activate "${CONDA_ENV:-$SLURM_SUBMIT_DIR/.conda-env}"
 mkdir -p logs
 
 # shellcheck disable=SC2086
-mohh-evaluate "$EXPERIMENT" $DATASET_ARGS $LLAMEA_ARGS $EVAL_ARGS
+mohh-evaluate "$EXPERIMENT" $DATASET_ARGS $LLAMEA_ARGS $EVAL_DIR_ARGS $EVAL_ARGS
 
 echo "Fin del script."

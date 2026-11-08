@@ -41,6 +41,9 @@ fi
 if [ -n "${LLAMEA_OPERATOR:-}" ]; then
     EXPORT="$EXPORT,LLAMEA_OPERATOR=$LLAMEA_OPERATOR"
 fi
+if [ -n "${EVALUATION_DIR:-}" ]; then
+    EXPORT="$EXPORT,EVALUATION_DIR=$EVALUATION_DIR"
+fi
 
 echo "Experimento : $EXPERIMENT"
 echo "Dataset     : $DATASET_PATH ($N test)"
