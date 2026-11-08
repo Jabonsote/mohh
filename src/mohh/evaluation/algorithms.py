@@ -193,6 +193,10 @@ class MOEA_Decomposition(MOSolver):
 
             # Ask the algorithm for the next population
             pop = self.algorithm.ask()
+            if pop is None:
+                # pymoo devuelve None cuando el apareamiento no produjo
+                # descendientes (p. ej. todos duplicados) y fuerza el fin.
+                break
 
             # Evaluate population
             self.algorithm.evaluator.eval(self.problem, pop)
@@ -255,6 +259,10 @@ class NSGAII(MOSolver):
 
             # Ask the algorithm for the next population
             pop = self.algorithm.ask()
+            if pop is None:
+                # pymoo devuelve None cuando el apareamiento no produjo
+                # descendientes (p. ej. todos duplicados) y fuerza el fin.
+                break
 
             # Evaluate population
             self.algorithm.evaluator.eval(self.problem, pop)
@@ -306,6 +314,10 @@ class SMS_MOEA(MOSolver):
 
             # Ask the algorithm for the next population
             pop = self.algorithm.ask()
+            if pop is None:
+                # pymoo devuelve None cuando el apareamiento no produjo
+                # descendientes (p. ej. todos duplicados) y fuerza el fin.
+                break
 
             # Evaluate population
             self.algorithm.evaluator.eval(self.problem, pop)
