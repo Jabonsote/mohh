@@ -1,5 +1,154 @@
 # Operadores Best
 
+## Operaciones Python
+
+### order_based
+
+```python
+def order_based(fill_method, preserve_method, x, y):
+    x = verify_inputs(x)
+    y = verify_inputs(y)
+
+    preserved_data_x = preserve_method(x)
+    preserved_data_y = preserve_method(y)
+
+    new_x = fill_method(preserved_data_x, y)
+    new_y = fill_method(preserved_data_y, x)
+
+    return new_x, new_y
+```
+
+### preserve_elements
+
+```python
+def preserve_elements(x):
+    x = verify_inputs(x)
+
+    k = np.random.randint(1, len(x))
+    x = np.array(x)
+
+    selected = np.random.choice(len(x), size=k, replace=False)
+
+    result = -np.ones_like(x)
+    result[selected] = x[selected]
+
+    return result
+```
+
+### preserve_segments
+
+```python
+def preserve_segments(x):
+    x = verify_inputs(x)
+
+    i = 0
+    j = len(x) - 1
+    while (i == 0 and j == len(x) - 1) or (i == j):
+        selected = np.sort(np.random.choice(len(x), size=2, replace=False))
+        i, j = selected
+        j -= 1
+
+    result = -np.ones_like(x)
+    result[i:j] = x[i:j]
+
+    return result
+```
+
+### fill_first_occurring
+
+```python
+def fill_first_occurring(preserved, filler):
+    preserved = verify_inputs(preserved)
+    filler = verify_inputs(filler)
+
+    existing_values = set(preserved[preserved != -1])
+
+    j = 0
+    for i in range(len(preserved)):
+        while preserved[i] == -1 and j < len(filler):
+            if filler[j] not in existing_values:
+                preserved[i] = filler[j]
+            j += 1
+
+    return preserved
+```
+
+### move_right
+
+```python
+def move_right(x):
+    x = verify_inputs(x)
+    return np.concatenate(([x[-1]], x[:-1]))
+```
+
+### reverse
+
+```python
+def reverse(x):
+    x = verify_inputs(x)
+    return x[::-1]
+```
+
+### map_list
+
+```python
+def map_list(x, y):
+    x = verify_inputs(x)
+    y = verify_inputs(y)
+
+    if not np.all((y >= 0) & (y < len(x))):
+        raise ValueError("All elements of y must be valid indices for x and y.")
+
+    if not np.all((x >= 0) & (x < len(y))):
+        raise ValueError("All elements of x must be valid indices for x and y.")
+
+    new_x = x[y]
+    new_y = y[x]
+
+    return new_x, new_y
+```
+
+### alternate_elements
+
+```python
+def alternate_elements(x, y):
+    x = verify_inputs(x)
+    y = verify_inputs(y)
+
+    new_x = []
+    new_y = []
+
+    for i in range(len(x)):
+        if np.random.rand() < 0.5:
+            new_x.extend([x[i], y[i]])
+            new_y.extend([y[i], x[i]])
+        else:
+            new_x.extend([y[i], x[i]])
+            new_y.extend([x[i], y[i]])
+
+    new_x, new_y = np.array(new_x), np.array(new_y)
+
+    _, indx = np.unique(new_x, return_index=True)
+    new_x = new_x[np.sort(indx)]
+
+    _, indx = np.unique(new_y, return_index=True)
+    new_y = new_y[np.sort(indx)]
+
+    return new_x, new_y
+```
+
+### verify_inputs
+
+```python
+def collapse(x, y=None):
+    return x
+
+def verify_inputs(z):
+    if isinstance(z, tuple):
+        z = collapse(z[0], z[1])
+    return z
+```
+
 ## GE — Experiment_001
 
 ### Fenotipo
@@ -8,25 +157,9 @@
 order_based(fill_first_occurring,preserve_elements,y,order_based(fill_first_occurring,preserve_elements,x,order_based(fill_first_occurring,preserve_elements,x,order_based(fill_first_occurring,preserve_segments,x,order_based(fill_first_occurring,preserve_elements,x,move_right(order_based(fill_first_occurring,preserve_elements,x,map_list(order_based(fill_first_occurring,preserve_segments,y,order_based(fill_first_occurring,preserve_segments,y,order_based(fill_first_occurring,preserve_segments,x,order_based(fill_first_occurring,preserve_segments,x,order_based(fill_first_occurring,preserve_elements,x,reverse(order_based(fill_first_occurring,preserve_segments,x,move_right(y)))))))),order_based(fill_first_occurring,preserve_elements,x,x)))))))))
 ```
 
-### Operaciones
-
-| Operación | Significado |
-|---|---|
-| `order_based(fill, preserve, x, y)` | Aplica `preserve` a `x` e `y`; rellena cada parte preservada con el otro padre usando `fill`. Devuelve dos hijos. |
-| `preserve_elements(x)` | Elige `k` posiciones aleatorias y conserva sus valores; el resto queda a `-1`. |
-| `preserve_segments(x)` | Elige un segmento aleatorio `[i:j]` y lo conserva; el resto queda a `-1`. |
-| `fill_first_occurring(preserved, filler)` | Rellena cada `-1` con el primer elemento de `filler` que no esté ya presente. |
-| `move_right(x)` | Rotación a la derecha: el último elemento pasa al principio. |
-| `reverse(x)` | Invierte el orden de los elementos. |
-| `map_list(x, y)` | `new_x = x[y]`, `new_y = y[x]`; requiere índices válidos. |
-| `alternate_elements(x, y)` | Alterna elementos de `x` e `y` y elimina duplicados. |
-| `verify_inputs(z)` | Si `z` es una tupla, toma el primer elemento; normaliza la entrada. |
-
 ### Python
 
 ```python
-import numpy as np
-
 def crossover(x, y):
     x = verify_inputs(x)
     y = verify_inputs(y)
@@ -79,7 +212,7 @@ def crossover(x, y):
     )
 ```
 
-Módulo completo con las funciones auxiliares: [`operadores_ge1.py`](operadores_ge1.py).
+Módulo completo: [`operadores_ge1.py`](operadores_ge1.py).
 
 ## GE — Experiment_002
 
@@ -89,25 +222,9 @@ Módulo completo con las funciones auxiliares: [`operadores_ge1.py`](operadores_
 order_based(fill_first_occurring,preserve_elements,x,order_based(fill_first_occurring,preserve_elements,y,order_based(fill_first_occurring,preserve_elements,y,alternate_elements(order_based(fill_first_occurring,preserve_segments,x,x),order_based(fill_first_occurring,preserve_elements,x,order_based(fill_first_occurring,preserve_segments,y,order_based(fill_first_occurring,preserve_elements,x,order_based(fill_first_occurring,preserve_segments,x,reverse(map_list(y,reverse(y)))))))))))
 ```
 
-### Operaciones
-
-| Operación | Significado |
-|---|---|
-| `order_based(fill, preserve, x, y)` | Aplica `preserve` a `x` e `y`; rellena cada parte preservada con el otro padre usando `fill`. Devuelve dos hijos. |
-| `preserve_elements(x)` | Elige `k` posiciones aleatorias y conserva sus valores; el resto queda a `-1`. |
-| `preserve_segments(x)` | Elige un segmento aleatorio `[i:j]` y lo conserva; el resto queda a `-1`. |
-| `fill_first_occurring(preserved, filler)` | Rellena cada `-1` con el primer elemento de `filler` que no esté ya presente. |
-| `move_right(x)` | Rotación a la derecha: el último elemento pasa al principio. |
-| `reverse(x)` | Invierte el orden de los elementos. |
-| `map_list(x, y)` | `new_x = x[y]`, `new_y = y[x]`; requiere índices válidos. |
-| `alternate_elements(x, y)` | Alterna elementos de `x` e `y` y elimina duplicados. |
-| `verify_inputs(z)` | Si `z` es una tupla, toma el primer elemento; normaliza la entrada. |
-
 ### Python
 
 ```python
-import numpy as np
-
 def crossover(x, y):
     x = verify_inputs(x)
     y = verify_inputs(y)
@@ -140,7 +257,7 @@ def crossover(x, y):
     )
 ```
 
-Módulo completo con las funciones auxiliares: [`operadores_ge2.py`](operadores_ge2.py).
+Módulo completo: [`operadores_ge2.py`](operadores_ge2.py).
 
 ## LLaMEA — best_so_far.py
 
