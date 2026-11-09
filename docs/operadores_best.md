@@ -2,15 +2,145 @@
 
 ## GE — Experiment_001
 
+### Fenotipo
+
 ```text
 order_based(fill_first_occurring,preserve_elements,y,order_based(fill_first_occurring,preserve_elements,x,order_based(fill_first_occurring,preserve_elements,x,order_based(fill_first_occurring,preserve_segments,x,order_based(fill_first_occurring,preserve_elements,x,move_right(order_based(fill_first_occurring,preserve_elements,x,map_list(order_based(fill_first_occurring,preserve_segments,y,order_based(fill_first_occurring,preserve_segments,y,order_based(fill_first_occurring,preserve_segments,x,order_based(fill_first_occurring,preserve_segments,x,order_based(fill_first_occurring,preserve_elements,x,reverse(order_based(fill_first_occurring,preserve_segments,x,move_right(y)))))))),order_based(fill_first_occurring,preserve_elements,x,x)))))))))
 ```
 
+### Operaciones
+
+| Operación | Significado |
+|---|---|
+| `order_based(fill, preserve, x, y)` | Aplica `preserve` a `x` e `y`; rellena cada parte preservada con el otro padre usando `fill`. Devuelve dos hijos. |
+| `preserve_elements(x)` | Elige `k` posiciones aleatorias y conserva sus valores; el resto queda a `-1`. |
+| `preserve_segments(x)` | Elige un segmento aleatorio `[i:j]` y lo conserva; el resto queda a `-1`. |
+| `fill_first_occurring(preserved, filler)` | Rellena cada `-1` con el primer elemento de `filler` que no esté ya presente. |
+| `move_right(x)` | Rotación a la derecha: el último elemento pasa al principio. |
+| `reverse(x)` | Invierte el orden de los elementos. |
+| `map_list(x, y)` | `new_x = x[y]`, `new_y = y[x]`; requiere índices válidos. |
+| `alternate_elements(x, y)` | Alterna elementos de `x` e `y` y elimina duplicados. |
+| `verify_inputs(z)` | Si `z` es una tupla, toma el primer elemento; normaliza la entrada. |
+
+### Python
+
+```python
+import numpy as np
+
+def crossover(x, y):
+    x = verify_inputs(x)
+    y = verify_inputs(y)
+    return order_based(
+        fill_first_occurring, preserve_elements, y,
+        order_based(
+            fill_first_occurring, preserve_elements, x,
+            order_based(
+                fill_first_occurring, preserve_elements, x,
+                order_based(
+                    fill_first_occurring, preserve_segments, x,
+                    order_based(
+                        fill_first_occurring, preserve_elements, x,
+                        move_right(
+                            order_based(
+                                fill_first_occurring, preserve_elements, x,
+                                map_list(
+                                    order_based(
+                                        fill_first_occurring, preserve_segments, y,
+                                        order_based(
+                                            fill_first_occurring, preserve_segments, y,
+                                            order_based(
+                                                fill_first_occurring, preserve_segments, x,
+                                                order_based(
+                                                    fill_first_occurring, preserve_segments, x,
+                                                    order_based(
+                                                        fill_first_occurring, preserve_elements, x,
+                                                        reverse(
+                                                            order_based(
+                                                                fill_first_occurring,
+                                                                preserve_segments, x,
+                                                                move_right(y),
+                                                            )
+                                                        ),
+                                                    ),
+                                                ),
+                                            ),
+                                        ),
+                                    ),
+                                    order_based(
+                                        fill_first_occurring, preserve_elements, x, x
+                                    ),
+                                ),
+                            )
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+```
+
+Módulo completo con las funciones auxiliares: [`operadores_ge1.py`](operadores_ge1.py).
+
 ## GE — Experiment_002
+
+### Fenotipo
 
 ```text
 order_based(fill_first_occurring,preserve_elements,x,order_based(fill_first_occurring,preserve_elements,y,order_based(fill_first_occurring,preserve_elements,y,alternate_elements(order_based(fill_first_occurring,preserve_segments,x,x),order_based(fill_first_occurring,preserve_elements,x,order_based(fill_first_occurring,preserve_segments,y,order_based(fill_first_occurring,preserve_elements,x,order_based(fill_first_occurring,preserve_segments,x,reverse(map_list(y,reverse(y)))))))))))
 ```
+
+### Operaciones
+
+| Operación | Significado |
+|---|---|
+| `order_based(fill, preserve, x, y)` | Aplica `preserve` a `x` e `y`; rellena cada parte preservada con el otro padre usando `fill`. Devuelve dos hijos. |
+| `preserve_elements(x)` | Elige `k` posiciones aleatorias y conserva sus valores; el resto queda a `-1`. |
+| `preserve_segments(x)` | Elige un segmento aleatorio `[i:j]` y lo conserva; el resto queda a `-1`. |
+| `fill_first_occurring(preserved, filler)` | Rellena cada `-1` con el primer elemento de `filler` que no esté ya presente. |
+| `move_right(x)` | Rotación a la derecha: el último elemento pasa al principio. |
+| `reverse(x)` | Invierte el orden de los elementos. |
+| `map_list(x, y)` | `new_x = x[y]`, `new_y = y[x]`; requiere índices válidos. |
+| `alternate_elements(x, y)` | Alterna elementos de `x` e `y` y elimina duplicados. |
+| `verify_inputs(z)` | Si `z` es una tupla, toma el primer elemento; normaliza la entrada. |
+
+### Python
+
+```python
+import numpy as np
+
+def crossover(x, y):
+    x = verify_inputs(x)
+    y = verify_inputs(y)
+    return order_based(
+        fill_first_occurring, preserve_elements, x,
+        order_based(
+            fill_first_occurring, preserve_elements, y,
+            order_based(
+                fill_first_occurring, preserve_elements, y,
+                alternate_elements(
+                    order_based(
+                        fill_first_occurring, preserve_segments, x, x
+                    ),
+                    order_based(
+                        fill_first_occurring, preserve_elements, x,
+                        order_based(
+                            fill_first_occurring, preserve_segments, y,
+                            order_based(
+                                fill_first_occurring, preserve_elements, x,
+                                order_based(
+                                    fill_first_occurring, preserve_segments, x,
+                                    reverse(map_list(y, reverse(y))),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+```
+
+Módulo completo con las funciones auxiliares: [`operadores_ge2.py`](operadores_ge2.py).
 
 ## LLaMEA — best_so_far.py
 
