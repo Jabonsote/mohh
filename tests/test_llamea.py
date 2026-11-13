@@ -569,7 +569,8 @@ def test_evaluator_scores_zero_when_operator_fails_on_instance():
     fitness = build_evaluator([INSTANCE], mo_generations=3, mo_population_size=10, seed=42)
     sol = fitness(_FakeSolution(code))
     assert sol.fitness == 0.0
-    assert "failed on an instance" in sol.feedback
+    assert ("failed on an instance" in sol.feedback
+            or "Invalid crossover operator" in sol.feedback)
 
 
 # --------------------------------------------------------------------------- #

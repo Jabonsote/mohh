@@ -372,27 +372,29 @@ def validate_operator_minimal(crossover_func):
     No comprueba mutacion de entradas (el adaptador pasa copias), ni varios
     tamanos, ni novedad, ni familia objetivo. La evaluacion decide.
     """
-    n = 11
-    rng = np.random.RandomState(0)
-    x = rng.permutation(n)
-    y = rng.permutation(n)
-    try:
-        child = _call_with_timeout(crossover_func, OPERATOR_CALL_TIMEOUT,
-                                   x.copy(), y.copy())
-    except Exception as error:  # noqa: BLE001
-        return False, f"crossover raised {type(error).__name__}: {error}"
-    if isinstance(child, tuple):
-        if len(child) != 2:
-            return False, "tuple must have two children"
-        child = child[0]
-    try:
-        child = np.asarray(child)
-    except Exception:  # noqa: BLE001
-        return False, "crossover did not return an array"
-    if child.shape != (n,):
-        return False, f"wrong child shape: {child.shape}"
-    if set(child.tolist()) != set(range(n)):
-        return False, "child is not a permutation of range(n)"
+    for n in (11, 17, 23):
+        x = np.arange(n)
+        y = x[::-1].copy()
+        try:
+            out = _call_with_timeout(crossover_func, OPERATOR_CALL_TIMEOUT,
+                                     x.copy(), y.copy())
+        except Exception as error:  # noqa: BLE001
+            return False, f"crossover raised {type(error).__name__}: {error}"
+        if isinstance(out, tuple):
+            if len(out) != 2:
+                return False, f"tuple of {len(out)} elements; expected two children"
+            children = out
+        else:
+            children = (out,)
+        for index, child in enumerate(children):
+            try:
+                child = np.asarray(child)
+            except Exception:  # noqa: BLE001
+                return False, f"child{index + 1} did not return an array"
+            if child.shape != (n,):
+                return False, f"child{index + 1} has shape {child.shape}; expected {(n,)}"
+            if set(child.tolist()) != set(range(n)):
+                return False, f"child{index + 1} is not a permutation of range({n})"
     return True, None
 
 
@@ -754,7 +756,8 @@ class OperatorEvaluator:
                  frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0,
                  diversity_feedback=True, diversity_log=None,
                  target_penalty=1.0, require_target_family=False,
-                 fitness_workers=1, model_names=None, mutations=None):
+                 fitness_workers=1, model_names=None, mutations=None,
+                 ranking=False):
         self.instance_paths = [str(p) for p in instance_paths]
         self.mo_generations = mo_generations
         self.mo_population_size = mo_population_size
@@ -782,6 +785,7 @@ class OperatorEvaluator:
         self.reference_operators = reference_operators
         self.archive = archive if archive is not None else HVArchive()
         self.frame = frame if normalize else "none"
+        self.ranking = bool(ranking)
         # Presion de diversidad: un candidato identico a uno ya evaluado recibe
         # su HV multiplicado por `repeat_penalty` **solo para el ranking** (el HV
         # crudo se conserva para el reporte). `1.0` desactiva la penalizacion.
@@ -1360,6 +1364,58 @@ class OperatorEvaluator:
                     f"(mejor={self._best_ranking:.6f})"
                 )
 
+    def _reference_hv_values(self):
+        """HV por instancia de cada operador del panel de referencia."""
+        from mohh.core.utilities.algorithm.MO import compute_hypervolume
+
+        if self._reference_fronts is None:
+            self.ensure_reference_bounds()
+        names = sorted({name for fronts in (self._reference_fronts or [])
+                        for name in fronts})
+        values = {name: [] for name in names}
+        for index, fronts in enumerate(self._reference_fronts or []):
+            frame = self._frame_points[index] if self._frame_points else None
+            for name in names:
+                front = fronts.get(name)
+                if frame is None or front is None or len(front) == 0:
+                    values[name].append(None)
+                    continue
+                vmin = frame.min(axis=0)
+                vmax = frame.max(axis=0)
+                if np.any(vmax == vmin):
+                    values[name].append(None)
+                    continue
+                normalized = normalize_front(front, (vmin, vmax))
+                normalized = clip_to_reference_box(normalized)
+                values[name].append(float(compute_hypervolume(
+                    np.full(normalized.shape[1], NADIR_FACTOR), normalized)))
+        return values
+
+    def _rank_score(self, fronts):
+        """Fitness GE: (K + 1 - rango medio) del candidato frente al panel."""
+        from scipy.stats import rankdata
+
+        if fronts is None:
+            return 0.0, None, 1
+        candidate_values = self._hv_values(fronts)
+        reference = self._reference_hv_values()
+        names = list(reference)
+        ranks = []
+        for index, candidate in enumerate(candidate_values):
+            if candidate is None:
+                continue
+            values = [candidate]
+            values.extend(reference[name][index] for name in names
+                          if reference[name][index] is not None)
+            if len(values) < 2:
+                continue
+            ranks.append(float(rankdata([-value for value in values])[0]))
+        if not ranks:
+            return 0.0, None, len(names) + 1
+        mean_rank = float(np.mean(ranks))
+        k = len(names) + 1
+        return float(k + 1) - mean_rank, mean_rank, k
+
     def __call__(self, solution, logger=None):
         from mohh.core.utilities.algorithm.MO import compute_hypervolume
 
@@ -1423,6 +1479,23 @@ class OperatorEvaluator:
                 error = ValueError(message)
             solution.set_scores(FALLBACK_SCORE, message, error)
             self._track_best(FALLBACK_SCORE, solution)
+            return solution
+
+        # Fitness por rango GE: positivo y con el mismo orden que GE
+        # (rank 1 = mejor). Se evalua el candidato contra el panel de referencia.
+        if self.ranking:
+            rank_score, mean_rank, k = self._rank_score(entry["fronts"])
+            self._valid_evaluations += 1
+            if mean_rank is None:
+                feedback = ("GE ranking: no valid fronts/panel; fitness 0.0.")
+            else:
+                feedback = (
+                    f"GE ranking: mean rank {mean_rank:.4f} of {k} "
+                    f"(1 = best; lower is better). "
+                    f"Fitness = (K + 1 - mean rank) = {rank_score:.4f}.")
+            solution.set_scores(rank_score, feedback)
+            self._track_best(rank_score, solution)
+            self.archive.update(key, rank_score)
             return solution
 
         # Marco GE: el candidato puede ampliar la envolvente de la instancia, en
@@ -1892,21 +1965,25 @@ class PopulationEvaluator(OperatorEvaluator):
             values = ranks_by_key.get(key) or []
             hvs = hv_by_key.get(key) or []
             if not values or not hvs:
-                # HV 0: peor valor posible, pero positivo. No se usa un
-                # ranking negativo.
+                # Peor rango posible, pero positivo.
                 score = 0.0
-                feedback = ("Mean hypervolume: 0.0 (no valid fronts on any "
-                            "instance).")
+                feedback = ("GE population ranking: no valid fronts on any "
+                            "instance; assigned the worst positive score.")
             else:
-                score = float(np.mean(hvs))
                 mean_rank = float(np.mean(values))
+                # GE usa rango (menor = mejor). Para LLaMEA, que maximiza,
+                # se invierte sin hacerlo negativo:
+                # score = (K + 1) - mean_rank.
+                k = len(unique)
+                score = float(k + 1) - mean_rank
                 best = min(values)
                 worst = max(values)
                 feedback = (
-                    f"Mean hypervolume: {score:.6f} (higher is better). "
-                    f"GE population rank: mean {mean_rank:.2f} "
-                    f"(1 = best; diagnostic only), best instance rank {best}, "
-                    f"worst {worst}, over {len(hvs)} instances."
+                    f"GE population ranking: mean rank {mean_rank:.4f} "
+                    f"(1 = best; lower is better). Fitness = "
+                    f"(K + 1 - mean rank) = {score:.4f} with K={k}. "
+                    f"Best instance rank {best}, worst {worst}, "
+                    f"over {len(values)} instances."
                 )
             solution.set_scores(score, feedback=feedback)
             self._track_best(score, solution)
@@ -1962,7 +2039,8 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
                     frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0,
                     diversity_feedback=True, diversity_log=None,
                     target_penalty=1.0, require_target_family=False,
-                    fitness_workers=1, model_names=None, mutations=None):
+                    fitness_workers=1, model_names=None, mutations=None,
+                    ranking=False):
     """Construye la funcion de fitness que consume LLaMEA.
 
     @param train_instances: lista de rutas de instancias (train o test).
@@ -2014,4 +2092,5 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
         fitness_workers=fitness_workers,
         model_names=model_names,
         mutations=mutations,
+        ranking=ranking,
     )

@@ -413,7 +413,6 @@ def load_evolution(log_dir):
 def tokens_summary(log_dir):
     """Suma de tokens por generacion, si `generation_summary.jsonl` los trae."""
     records = _read_jsonl(os.path.join(log_dir, "generation_summary.jsonl"))
-    keys = ("tokens_total", "tokens_prompt", "tokens_completion", "requests")
     if not records or not any("tokens_total" in record for record in records):
         return None
     last = next((r for r in reversed(records) if "tokens_total" in r), records[-1])

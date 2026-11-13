@@ -61,7 +61,7 @@ def generate_incremental_seeds(seeds_number: int, instance_name: str) -> list:
 
     seeds = [seed]  # Initialize the list with the first seed
 
-    for i in range(1, seeds_number):
+    for _ in range(1, seeds_number):
         # Add a random increment (e.g., between 1 and 1000) to the previous seed
         increment = random.randint(1, 1000)
         new_seed = seeds[-1] + increment

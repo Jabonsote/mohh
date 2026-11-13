@@ -151,5 +151,17 @@ def test_population_evaluator_returns_positive_hv(monkeypatch):
 
     assert first.fitness >= 0.0
     assert second.fitness >= 0.0
-    assert "Mean hypervolume" in first.feedback
-    assert "negative" not in first.feedback
+    assert "GE population ranking" in first.feedback
+    assert "Fitness" in first.feedback or "score" in first.feedback
+
+
+def test_build_population_evaluator_constructs():
+    from mohh.llamea.fitness import build_population_evaluator
+    evaluator = build_population_evaluator([], 1, 1)
+    assert evaluator is not None
+
+
+def test_build_evaluator_ranking_flag():
+    from mohh.llamea.fitness import build_evaluator
+    evaluator = build_evaluator([], 1, 1, ranking=True)
+    assert evaluator.ranking is True

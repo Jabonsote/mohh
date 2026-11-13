@@ -121,12 +121,13 @@ def test_minimal_compile_rejects_missing_crossover():
         simple.minimal_compile(MISSING_FUNCTION)
 
 
-def test_minimal_compile_accepts_tuple_with_first_valid_child():
+def test_minimal_compile_rejects_invalid_second_child():
     code = VALID.replace(
         "return child",
         "return (child, np.zeros(len(x), dtype=int))",
     )
-    simple.minimal_compile(code)
+    with pytest.raises(ValueError):
+        simple.minimal_compile(code)
 
 
 def test_compile_operator_only_checks_one_size():
@@ -202,3 +203,10 @@ def test_run_simple_prior_injection_changes_parent(tmp_path, monkeypatch):
     simple.run_simple(_args(budget=4, prior_every=2), str(tmp_path), logger, llm, [])
     # En la iteración 2 debe usar el prompt de un prior, no el del mejor.
     assert "REFERENCE CODE" in llm.prompts[1]
+
+
+def test_build_prompt_includes_previous_error():
+    prompt = simple.build_prompt(
+        VALID, "refine", "ValueError: not a permutation")
+    assert "PREVIOUS ATTEMPT FAILED" in prompt
+    assert "not a permutation" in prompt
