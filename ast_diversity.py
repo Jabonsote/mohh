@@ -45,6 +45,13 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 
+try:
+    from mohh.analysis.code_diversity import (
+        crystal_ignoring, crystalbleu_diversity)
+except Exception:  # crystalbleu/nltk no instalados
+    crystal_ignoring = None
+    crystalbleu_diversity = None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 SRC = os.path.join(ROOT, "src")
@@ -232,6 +239,7 @@ def _individuo(run_dir: str, nombre: str, cache: dict) -> dict:
 
     caracteristicas = caracterizar_ast(phenotype)
     caracteristicas["name"] = nombre
+    caracteristicas["phenotype"] = phenotype
     cache[nombre] = caracteristicas
     return caracteristicas
 
@@ -305,6 +313,16 @@ def analizar_run(run_dir: str, elite_size: int | None = None) -> pd.DataFrame:
         firmas_todas = [c["firma"] for c in caracteristicas]
         firmas_elite = [c["firma"] for c in elite_caracteristicas]
 
+        if crystalbleu_diversity is not None:
+            codigos = [c["phenotype"] for c in caracteristicas]
+            codigos_elite = [c["phenotype"] for c in elite_caracteristicas]
+            ignoring = crystal_ignoring(codigos)
+            crystal_all = crystalbleu_diversity(codigos, ignoring)
+            crystal_elite = crystalbleu_diversity(codigos_elite, ignoring)
+        else:
+            crystal_all = None
+            crystal_elite = None
+
         filas.append({
             "run": os.path.basename(run_dir),
             "generation": int(numero),
@@ -318,6 +336,8 @@ def analizar_run(run_dir: str, elite_size: int | None = None) -> pd.DataFrame:
                                    if firmas_elite else 0.0),
             "diversity_all": diversidad_media(caracteristicas),
             "diversity_elite": diversidad_media(elite_caracteristicas),
+            "crystalbleu_all": crystal_all,
+            "crystalbleu_elite": crystal_elite,
             "nodes_mean_all": float(np.mean([c["nodos"] for c in caracteristicas])),
             "nodes_mean_elite": float(np.mean([c["nodos"] for c in elite_caracteristicas])),
             "depth_mean_all": float(np.mean([c["profundidad"] for c in caracteristicas])),
@@ -348,7 +368,7 @@ def figura_diversidad(tabla: pd.DataFrame, etiqueta: str, ruta: str) -> str:
     runs = sorted(tabla["run"].unique())
     colores = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e"]
 
-    figura, ejes = plt.subplots(2, 1, figsize=(8.5, 7.0), sharex=True)
+    figura, ejes = plt.subplots(3, 1, figsize=(8.5, 9.5), sharex=True)
 
     for indice, run in enumerate(runs):
         datos = tabla[tabla["run"] == run].sort_values("generation")
@@ -375,9 +395,13 @@ def figura_diversidad(tabla: pd.DataFrame, etiqueta: str, ruta: str) -> str:
     ejes[0].grid(alpha=0.3)
 
     ejes[1].set_ylabel("AST únicos / individuos")
-    ejes[1].set_xlabel("generación")
     ejes[1].set_ylim(-0.02, 1.02)
     ejes[1].grid(alpha=0.3)
+
+    ejes[2].set_ylabel("diversidad CrystalBLEU\n(1 - similitud)")
+    ejes[2].set_xlabel("generación")
+    ejes[2].set_ylim(-0.02, 1.02)
+    ejes[2].grid(alpha=0.3)
 
     for eje in ejes:
         eje.legend(loc="best", fontsize=8)

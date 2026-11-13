@@ -12,7 +12,7 @@ authors = [
 requires-python = ">3.10"
 dependencies = [
     "numpy>=2.0",
-    "pymoo>=0.6.1",
+    "pymoo>=0.6.2",
     "matplotlib>=3.9",
     "pandas>=2.3",
     "tqdm>=4.67",
@@ -29,6 +29,11 @@ llamea = [
 # Servidor de inferencia en GPU (solo en la maquina/nodo con GPU). Pesado.
 vllm = [
     "vllm>=0.6.3",
+]
+# Analisis de diversidad de codigo (CrystalBLEU).
+analysis = [
+    "crystalbleu>=0.2",
+    "nltk>=3.9",
 ]
 # Servidor de desarrollo local sin GPU/vLLM (transformers + fastapi).
 local-server = [

@@ -222,9 +222,13 @@ def test_compile_operator_accepts_tuple_from_order_based():
 # --------------------------------------------------------------------------- #
 
 def _message_from(code):
-    with pytest.raises(ValueError) as excinfo:
-        compile_operator(code)
-    return str(excinfo.value)
+    from mohh.llamea.fitness import (
+        _compile_with_source, primitive_namespace, validate_operator)
+    namespace = primitive_namespace()
+    exec(_compile_with_source(code), namespace)
+    ok, reason = validate_operator(namespace["crossover"])
+    assert not ok
+    return reason
 
 
 def test_validation_feedback_points_at_unfilled_slots():
@@ -541,13 +545,14 @@ def test_recombination_novelty_accepts_real_crossover():
     assert 0.0 < novelty <= 1.0
 
 
-def test_evaluator_rejects_degenerate_operator_without_running_moea():
+def test_evaluator_allows_degenerate_operator_and_lets_fitness_decide():
+    """El filtro minimo no rechaza un operador degenerado: se evalua y puntua."""
     fitness = build_evaluator([INSTANCE], mo_generations=2,
                               mo_population_size=6, seed=42)
     code = "import numpy as np\n\ndef crossover(x, y):\n    return np.array(x, copy=False)\n"
     sol = fitness(_FakeSolution(code))
-    assert sol.fitness == 0.0
-    assert "view of a parent" in sol.feedback or "degenerate" in sol.feedback
+    assert sol.error is None
+    assert sol.fitness is not None
 
 
 def test_evaluator_scores_zero_when_operator_fails_on_instance():

@@ -347,6 +347,8 @@ def primitive_namespace() -> dict:
         "preserve_segments": hh.preserve_segments,
         "fill_first_occurring": hh.fill_first_occurring,
         "order_based": hh.order_based,
+        "collapse": hh.collapse,
+        "verify_inputs": hh.verify_inputs,
     }
 
 

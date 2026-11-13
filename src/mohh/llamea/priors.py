@@ -10,8 +10,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 
 _CANDIDATES = [
-    ("GE-Best-001", ROOT / "docs" / "operadores_ge1.py"),
-    ("GE-Best-002", ROOT / "docs" / "operadores_ge2.py"),
+    ("GE1-Best", ROOT / "docs" / "operadores_ge1.py"),
+    ("GE1-Middle", ROOT / "docs" / "operadores_ge1_middle.py"),
+    ("GE1-Worst", ROOT / "docs" / "operadores_ge1_worst.py"),
+    ("GE2-Best", ROOT / "docs" / "operadores_ge2.py"),
+    ("GE2-Middle", ROOT / "docs" / "operadores_ge2_middle.py"),
 ]
 
 _FALLBACK = """import numpy as np
@@ -39,6 +42,7 @@ def load_priors():
             continue
         if "def crossover" in code:
             priors.append((label, code))
-    if not priors:
-        priors.append(("order-based", _FALLBACK))
+    # Un prior simple ayuda a los modelos pequenos: el codigo de GE es muy
+    # profundo y a veces el LLM lo copia sin adaptarlo.
+    priors.append(("order-based", _FALLBACK))
     return priors

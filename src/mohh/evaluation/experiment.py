@@ -243,6 +243,16 @@ def normalize_values(data: np.ndarray, vmin: float, vmax: float):
     return (data - vmin) / (vmax - vmin)
 
 
+def boundaries_from_points(points):
+    """``vmin``/``vmax`` de todos los puntos evaluados de una instancia.
+
+    Usar todos los puntos (no solo el frente no dominado) evita que un frente
+    peor quede fuera de la caja de normalización y produzca HV = 0.
+    """
+    array = np.asarray(list(points), dtype=float)
+    return array.min(axis=0), array.max(axis=0)
+
+
 def write_front(front: np.ndarray, file_path: str):
     """
     Take a 2D numpy array and write it in disk
@@ -533,8 +543,7 @@ def run_experiments(experiment_path, results_paths, operators,
             # El marco se construye con TODOS los puntos evaluados, no solo
             # con el frente no dominado. Asi ningun frente queda fuera de la
             # caja [vmin, vmax] y el HV no se vuelve 0 artificialmente.
-            all_points = np.asarray(list(consolidated[label]), dtype=float)
-            min_val, max_val = np.min(all_points, axis=0), np.max(all_points, axis=0)
+            min_val, max_val = boundaries_from_points(consolidated[label])
             boundaries[label] = [min_val, max_val]
 
             best_fronts[label] = best_front

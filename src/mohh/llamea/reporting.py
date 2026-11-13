@@ -253,7 +253,7 @@ class ResultsExperimentLogger(ExperimentLogger):
             "valid_rate_gen": (len(valid) / len(population)) if population else None,
             "distinct_operators_so_far": len(seen),
             "evaluated_so_far": evaluated_so_far,
-            "best_so_far": best_so_far,
+            "best_so_far": best_fitness,
         })
 
         # Tokens acumulados y por generacion (si hay una fuente de usage).

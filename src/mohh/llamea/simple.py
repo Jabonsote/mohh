@@ -35,12 +35,13 @@ The child must be a permutation of 0..n-1.
 The operator must work for any n >= 2."""
 
 STRATEGY_REFINE = (
-    "Refine the reference operator. Keep its main mechanism and improve it. "
-    "Change only what is needed."
+    "Refine the strategy of the selected solution to improve it. "
+    "Keep its main mechanism and change only what is needed."
 )
 STRATEGY_CREATE = (
-    "Generate a new operator that is different from the reference. "
-    "Use a different combination of order, position, adjacency or cycle ideas."
+    "Generate a new algorithm that is different from the algorithms you have "
+    "tried before. Use a different combination of order, position, adjacency "
+    "or cycle ideas."
 )
 
 FORMAT = """Answer in exactly this format:
@@ -144,6 +145,16 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
     )
 
     priors = load_priors()
+    prior_queue = list(priors)
+    random.shuffle(prior_queue)
+
+    def next_prior():
+        # Muestreo sin reemplazo; al agotarse, se reinicia el conjunto.
+        if not prior_queue:
+            prior_queue.extend(priors)
+            random.shuffle(prior_queue)
+        return prior_queue.pop()
+
     best_code, best_fitness = None, float("-inf")
     for label, code in priors:
         fitness, error = _evaluate(evaluator, code)
@@ -166,7 +177,7 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
     started = time.time()
     for iteration in range(1, args.budget + 1):
         if iteration % args.prior_every == 0:
-            parent_label, parent_code = random.choice(priors)
+            parent_label, parent_code = next_prior()
             strategy = "refine"
         elif random.random() < 0.5:
             parent_label, parent_code = "current-best", best_code
@@ -213,10 +224,12 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
                 "seed": args.seed,
             })
 
+        finite = math.isfinite(fitness)
+        candidate_text = f"{fitness:.6f}" if finite else "worst"
         with open(progress_path, "a", encoding="utf-8") as handle:
             handle.write(
                 f"iter {iteration} best={best_fitness:.6f} "
-                f"candidate={fitness:.6f} valid=1 "
+                f"candidate={candidate_text} valid={1 if finite else 0} "
                 f"error={error or '-'} parent={parent_label} "
                 f"strategy={strategy} wall_s={time.time() - started:.1f}\n")
 
