@@ -1809,8 +1809,9 @@ class PopulationEvaluator(OperatorEvaluator):
 
     Para cada generacion se consolidan los frentes de **toda la poblacion**
     (padres + descendientes) por instancia, se calcula el nadir del frente no
-    dominado consolidado y se asigna el rango HV de cada individuo. El fitness
-    es el rango medio entre instancias (negado para que LLaMEA maximice).
+    dominado consolidado y se asigna el HV de cada individuo. El fitness es el
+    **HV medio** entre instancias (positivo: mayor es mejor). El rango GE se
+    conserva solo como diagnostico en el feedback.
 
     No acumula frentes de generaciones anteriores: el marco es el de la
     poblacion actual, igual que en la busqueda por evolucion gramatical.
@@ -1850,6 +1851,7 @@ class PopulationEvaluator(OperatorEvaluator):
                 self._save_candidate_fronts(key, entry, solution)
 
         ranks_by_key = {key: [] for key in unique}
+        hv_by_key = {key: [] for key in unique}
         for index in range(len(instances)):
             points = set()
             fronts = {}
@@ -1881,29 +1883,30 @@ class PopulationEvaluator(OperatorEvaluator):
                 except Exception:  # noqa: BLE001 - frente degenerado
                     hypervolumes.append(0.0)
             ranks = compute_rank(hypervolumes)
-            for key, rank in zip(keys, ranks):
+            for key, hv, rank in zip(keys, hypervolumes, ranks):
+                hv_by_key[key].append(float(hv))
                 ranks_by_key[key].append(rank)
 
         for solution in population:
             key = (solution.code or "").strip()
             values = ranks_by_key.get(key) or []
-            if not values:
-                # Un candidato sin frentes validos recibe el peor rango finito
-                # de la poblacion (no -1e9): asi la media de la generacion es
-                # interpretable y el orden relativo se conserva.
-                score = -float(len(unique) + 1)
-                feedback = ("GE population ranking: no valid fronts on any "
-                            "instance; assigned the worst finite rank.")
+            hvs = hv_by_key.get(key) or []
+            if not values or not hvs:
+                # HV 0: peor valor posible, pero positivo. No se usa un
+                # ranking negativo.
+                score = 0.0
+                feedback = ("Mean hypervolume: 0.0 (no valid fronts on any "
+                            "instance).")
             else:
+                score = float(np.mean(hvs))
                 mean_rank = float(np.mean(values))
-                score = -mean_rank
                 best = min(values)
                 worst = max(values)
                 feedback = (
-                    f"GE population ranking: mean rank {mean_rank:.4f} "
-                    f"(1 = best; lower is better), best instance rank {best}, "
-                    f"worst {worst}, over {len(values)} instances. "
-                    f"Higher fitness is better (fitness = -mean rank)."
+                    f"Mean hypervolume: {score:.6f} (higher is better). "
+                    f"GE population rank: mean {mean_rank:.2f} "
+                    f"(1 = best; diagnostic only), best instance rank {best}, "
+                    f"worst {worst}, over {len(hvs)} instances."
                 )
             solution.set_scores(score, feedback=feedback)
             self._track_best(score, solution)

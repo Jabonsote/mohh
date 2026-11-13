@@ -116,3 +116,40 @@ def test_compare_stats_pairs_by_experiment(tmp_path):
     assert table.iloc[0]["pairs"] == 5
     assert table.iloc[0]["wins"] == 5
     assert table.iloc[0]["median_difference"] == pytest.approx(0.1)
+
+
+def test_population_evaluator_returns_positive_hv(monkeypatch):
+    """El fitness de LLaMEA debe ser HV positivo, no un ranking negativo."""
+    from mohh.llamea.fitness import PopulationEvaluator
+
+    evaluator = PopulationEvaluator([], 1, 1, normalize=True)
+    monkeypatch.setattr(evaluator, "_ensure_instances", lambda: [None])
+    monkeypatch.setattr(
+        evaluator, "_evaluate_code",
+        lambda solution, compute_hypervolume: {
+            "fronts": [np.array([[0.0, 1.0], [1.0, 0.0]])],
+            "error": None,
+        })
+
+    class Solution:
+        def __init__(self, code):
+            self.code = code
+            self.fitness = None
+            self.feedback = ""
+            self.error = None
+            self.name = "x"
+            self.description = ""
+
+        def set_scores(self, fitness, feedback="", error=None):
+            self.fitness = fitness
+            self.feedback = feedback
+            self.error = error
+
+    first = Solution("first")
+    second = Solution("second")
+    evaluator._evaluate_batch([second], [first])
+
+    assert first.fitness >= 0.0
+    assert second.fitness >= 0.0
+    assert "Mean hypervolume" in first.feedback
+    assert "negative" not in first.feedback
