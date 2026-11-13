@@ -30,7 +30,6 @@ from functools import lru_cache
 
 import numpy as np
 
-from mohh.generation.utilities.algorithm.HH_auxiliars import is_permutation
 from mohh.llamea.diversity import (
     BehaviorTracker,
     behavior_descriptor,
@@ -254,15 +253,6 @@ def validate_operator(crossover_func):
                 return False, (f"for n={n}, the returned child is not a permutation "
                                f"of range({n}): {problem}")
     return True, None
-
-
-def _valid_operator(crossover_func) -> bool:
-    """True si `crossover(x, y)` devuelve permutacion(es) valida(s).
-
-    Acepta tanto una permutacion como una tupla `(child1, child2)`, igual que
-    los primitivos de la gramatica (`order_based`, `map_list`, ...).
-    """
-    return validate_operator(crossover_func)[0]
 
 
 

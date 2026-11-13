@@ -22,8 +22,6 @@ import inspect
 import json
 import os
 
-import numpy as np
-
 from mohh.core.utilities.instance_utils import instance_paths
 from mohh.llamea.fitness import build_evaluator, init_params
 from mohh.llamea.reference import REFERENCE_OPERATORS

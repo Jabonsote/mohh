@@ -20,10 +20,13 @@ DataFrames de `instancia x indicador`. Ninguna genera datos.
 import numpy as np
 import pandas as pd
 
+from mohh.core.indicators.directions import (
+    MINIMIZATION_METRICS,
+    indicator_minimization as _indicator_minimization,
+)
 from mohh.core.indicators.reference_sets import load_reference_sets
 from mohh.core.utilities.algorithm.MO import compute_hypervolume
-from mohh.generation.utilities.algorithm.reference_fitness import (
-    REFERENCE_METRICS, ReferenceFitness)
+from mohh.generation.utilities.algorithm.reference_fitness import ReferenceFitness
 
 __all__ = [
     "INDICATORS",
@@ -33,6 +36,7 @@ __all__ = [
     "IndicatorsError",
     "compute_indicators",
     "fit_hv_contexts",
+    "indicator_minimization",
     "load_references",
 ]
 
@@ -47,8 +51,11 @@ METRIC_LABELS = {
     "R2": "R2",
 }
 
-#: Indicadores de minimizacion (menor es mejor).
-_MINIMIZATION = ("IGD+", "DELTA_P", "R2")
+#: Indicadores de minimizacion (menor es mejor). La verdad del proyecto vive en
+#: `mohh.core.indicators.directions`; aqui se deriva para no duplicarla.
+_MINIMIZATION = tuple(
+    metrica for metrica in ("IGD+", "DELTA_P", "R2")
+    if metrica in MINIMIZATION_METRICS)
 
 DEFAULT_HV_REF_POINT = 1.1
 
@@ -132,10 +139,6 @@ class HypervolumeContext:
         apilado = np.vstack(bloques)
         vmin = np.min(apilado, axis=0)
         vmax = np.max(apilado, axis=0)
-
-        # Un objetivo constante da vmax - vmin == 0 y produciria NaN; se deja
-        # con span 1 para que la normalizacion sea la identidad en ese eje.
-        span = np.where(vmax > vmin, vmax - vmin, 1.0)
 
         self.vmin = vmin
         self.vmax = vmax
@@ -368,4 +371,4 @@ def indicators_long(frame: pd.DataFrame, individual=None, extra=None) -> pd.Data
 
 def indicator_minimization(metric: str) -> bool:
     """True si el indicador es de minimizacion (menor es mejor)."""
-    return metric in _MINIMIZATION
+    return _indicator_minimization(metric)
