@@ -624,7 +624,7 @@ def run_llamea(args):
 
     if getattr(args, "simple", True):
         from mohh.llamea.simple import run_simple
-        return run_simple(args, exp_dir, logger, llm, train_paths)
+        return run_simple(args, exp_dir, logger, llm, train_paths, bounds=bounds)
 
     # Diversidad conductual por generacion (mecanismos distintos, entropia,
     # novedad y cobertura del archivo). El evaluador ya la acumula.

@@ -124,7 +124,7 @@ def _evaluate(evaluator, code):
     return fitness, None
 
 
-def run_simple(args, exp_dir, logger, llm, train_paths):
+def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
     """Bucle (1+1) con strong priors. Devuelve el mejor código."""
     llm.operator_memory = 0
     evaluator = build_evaluator(
@@ -135,6 +135,7 @@ def run_simple(args, exp_dir, logger, llm, train_paths):
         model_name=args.solver,
         mutation=args.mutation,
         normalize=True,
+        bounds=bounds,
         frame="stationary",
         diversity_feedback=False,
         repeat_penalty=1.0,
