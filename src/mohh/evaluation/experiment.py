@@ -530,9 +530,11 @@ def run_experiments(experiment_path, results_paths, operators,
             best_front = comprobate(best_front, consolidated[label])
             metrics.stop("metrics_nds")
 
-            # Note: If vmax - vmin is zero, a degenerate front or column front was reached.
-            # The front and dataframe will be invalidated due to NaNs.
-            min_val, max_val = np.min(best_front, axis=0), np.max(best_front, axis=0)
+            # El marco se construye con TODOS los puntos evaluados, no solo
+            # con el frente no dominado. Asi ningun frente queda fuera de la
+            # caja [vmin, vmax] y el HV no se vuelve 0 artificialmente.
+            all_points = np.asarray(list(consolidated[label]), dtype=float)
+            min_val, max_val = np.min(all_points, axis=0), np.max(all_points, axis=0)
             boundaries[label] = [min_val, max_val]
 
             best_fronts[label] = best_front

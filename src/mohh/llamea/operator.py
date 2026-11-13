@@ -41,8 +41,10 @@ class LLMOperator(Crossover):
         Y = np.full_like(X, None, dtype=object)
 
         for k in range(n_matings):
-            x = X[0, k]
-            y = X[1, k] if X.shape[0] > 1 else X[0, k]
+            # Copias: un operador no debe corromper la poblacion si modifica
+            # x/y in-place. La validacion minima no lo penaliza.
+            x = np.array(X[0, k], copy=True)
+            y = np.array(X[1, k], copy=True) if X.shape[0] > 1 else np.array(X[0, k], copy=True)
 
             # Namespace limpio por mating: x, y explicitos. Evita fugas entre
             # llamadas y da al codigo del LLM el mismo contrato que HH_Operator.

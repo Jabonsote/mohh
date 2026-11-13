@@ -621,6 +621,11 @@ def run_llamea(args):
         },
     )
     ResultsExperimentLogger.token_source = llm
+
+    if getattr(args, "simple", True):
+        from mohh.llamea.simple import run_simple
+        return run_simple(args, exp_dir, logger, llm, train_paths)
+
     # Diversidad conductual por generacion (mecanismos distintos, entropia,
     # novedad y cobertura del archivo). El evaluador ya la acumula.
     ResultsExperimentLogger.diversity_source = fitness
@@ -1207,6 +1212,16 @@ def main(argv=None):
     parser.add_argument("--wait-server", action="store_true",
                         help="Esperar a que el servidor responda antes de arrancar.")
     parser.add_argument("--server-timeout", type=float, default=1800)
+    parser.add_argument("--simple", dest="simple", action="store_true",
+                        default=True,
+                        help="LLaMEA (1+1) original con strong priors "
+                             "(predeterminado).")
+    parser.add_argument("--legacy", dest="simple", action="store_false",
+                        help="Usar el bucle LLaMEA antiguo con combine, "
+                             "target, novedad, etc.")
+    parser.add_argument("--prior-every", type=int, default=10,
+                        help="Cada cuantas iteraciones se refina un prior "
+                             "aleatorio (default 10).")
     parser.add_argument("--eval-test", action="store_true",
                         help="Evaluar el mejor operador en el conjunto de test al final.")
     parser.add_argument("--no-download", action="store_true",

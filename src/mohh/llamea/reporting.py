@@ -200,7 +200,7 @@ class ResultsExperimentLogger(ExperimentLogger):
         # separa: "validos" son los que tienen fitness finito y sin error.
         valid = [float(p.fitness) for p in population
                  if p.fitness is not None and np.isfinite(p.fitness) and not p.error]
-        best = max(
+        current_best = max(
             population,
             key=lambda p: (p.fitness if p.fitness is not None else -np.inf),
         )
@@ -217,8 +217,8 @@ class ResultsExperimentLogger(ExperimentLogger):
             "evaluated": len(valid),
             "best_fitness": float(np.max(valid)) if valid else None,
             "mean_fitness": float(np.mean(valid)) if valid else None,
-            "best_name": best.name,
-            "best_description": best.description,
+            "best_name": current_best.name,
+            "best_description": current_best.description,
             "errors": sum(1 for p in population if p.error),
             # Tiempos de pared: de la generacion y acumulado de la corrida.
             "wall_seconds_gen": round((now - previous_time).total_seconds(), 3),
@@ -229,13 +229,21 @@ class ResultsExperimentLogger(ExperimentLogger):
         # validas y mejor HV historico (para ver la curva de mejora sin post-proceso).
         seen = getattr(self, "_seen_hashes", None) or set()
         evaluated_so_far = getattr(self, "_evaluated_so_far", 0) + len(valid)
-        best_so_far = getattr(self, "_best_so_far", None)
+        best_fitness = getattr(self, "_best_fitness", None)
+        best_solution = getattr(self, "_best_solution", None)
         if valid:
-            current_best = float(np.max(valid))
-            best_so_far = (current_best if best_so_far is None
-                           else max(best_so_far, current_best))
+            current_value = float(np.max(valid))
+            if best_fitness is None or current_value > best_fitness:
+                best_fitness = current_value
+                best_solution = current_best
         self._evaluated_so_far = evaluated_so_far
-        self._best_so_far = best_so_far
+        self._best_so_far = best_fitness
+        self._best_fitness = best_fitness
+        self._best_solution = best_solution
+        record["best_fitness"] = best_fitness
+        record["best_name"] = best_solution.name if best_solution else None
+        record["best_description"] = (best_solution.description
+                                      if best_solution else None)
         record.update({
             "seed": type(self).seed,
             "solver": type(self).solver,
@@ -322,7 +330,7 @@ class ResultsExperimentLogger(ExperimentLogger):
 
         # Checkpoint durable para el cluster (ver `_write_checkpoint`).
         try:
-            self._write_checkpoint(best, record)
+            self._write_checkpoint(self._best_solution, record)
         except Exception:  # noqa: BLE001 - el checkpoint nunca debe tumbar la corrida
             pass
 

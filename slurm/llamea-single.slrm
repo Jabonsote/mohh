@@ -202,10 +202,21 @@ trap cleanup EXIT TERM INT
 # 5 padres / 2 hijos: el presupuesto se deriva para que GENERATIONS=1000 sea
 # realmente 1000 iteraciones, no 1000 evaluaciones (cada iteracion evalua 2).
 GENERATIONS="${GENERATIONS:-1000}"
-NPARENTS="${NPARENTS:-5}"
-NOFFSPRING="${NOFFSPRING:-2}"
-BUDGET="${BUDGET:-$((GENERATIONS * NOFFSPRING + NPARENTS))}"
-COMBINE="${COMBINE:-1}"
+SIMPLE="${SIMPLE:-1}"
+if [ "$SIMPLE" = "1" ]; then
+    # LLaMEA (1+1) + strong priors: una consulta/evaluacion por iteracion.
+    NPARENTS="${NPARENTS:-1}"
+    NOFFSPRING="${NOFFSPRING:-1}"
+    BUDGET="${BUDGET:-$GENERATIONS}"
+    COMBINE=0
+    EVAL_TEST="${EVAL_TEST:-0}"
+    STALL_TIMEOUT="${STALL_TIMEOUT:-0}"
+else
+    NPARENTS="${NPARENTS:-5}"
+    NOFFSPRING="${NOFFSPRING:-2}"
+    BUDGET="${BUDGET:-$((GENERATIONS * NOFFSPRING + NPARENTS))}"
+    COMBINE="${COMBINE:-1}"
+fi
 # `REFINE_ONLY` busca solo refinamiento; el combine de dos padres no aplica.
 if [ "${REFINE_ONLY:-0}" = "1" ]; then
     COMBINE=0
@@ -218,6 +229,7 @@ ARGS=(
     --wait-server
     --server-timeout "${SERVER_TIMEOUT:-1800}"
     --budget "$BUDGET"
+    $(if [ "$SIMPLE" = "1" ]; then echo "--simple"; else echo "--legacy"; fi)
     --n-parents "$NPARENTS"
     --n-offspring "$NOFFSPRING"
     --max-workers "${MAX_WORKERS:-1}"

@@ -364,6 +364,36 @@ def _compile_with_source(code: str):
     return compile(code, OPERATOR_FILENAME, "exec")
 
 
+def validate_operator_minimal(crossover_func):
+    """Filtro minimo: una sola talla y una permutacion.
+
+    No comprueba mutacion de entradas (el adaptador pasa copias), ni varios
+    tamanos, ni novedad, ni familia objetivo. La evaluacion decide.
+    """
+    n = 11
+    rng = np.random.RandomState(0)
+    x = rng.permutation(n)
+    y = rng.permutation(n)
+    try:
+        child = _call_with_timeout(crossover_func, OPERATOR_CALL_TIMEOUT,
+                                   x.copy(), y.copy())
+    except Exception as error:  # noqa: BLE001
+        return False, f"crossover raised {type(error).__name__}: {error}"
+    if isinstance(child, tuple):
+        if len(child) != 2:
+            return False, "tuple must have two children"
+        child = child[0]
+    try:
+        child = np.asarray(child)
+    except Exception:  # noqa: BLE001
+        return False, "crossover did not return an array"
+    if child.shape != (n,):
+        return False, f"wrong child shape: {child.shape}"
+    if set(child.tolist()) != set(range(n)):
+        return False, "child is not a permutation of range(n)"
+    return True, None
+
+
 def compile_operator(code: str, timeout=COMPILE_TIMEOUT) -> dict:
     """`exec` del codigo del LLM; devuelve el namespace o lanza ValueError.
 
@@ -403,7 +433,7 @@ def compile_operator(code: str, timeout=COMPILE_TIMEOUT) -> dict:
     if not callable(crossover):
         raise ValueError("Code must define a callable 'crossover(x, y)' function.")
 
-    ok, reason = validate_operator(crossover)
+    ok, reason = validate_operator_minimal(crossover)
     if not ok:
         raise ValueError(f"Invalid crossover operator: {reason}.")
 
@@ -1599,11 +1629,9 @@ class OperatorEvaluator:
 
         # Chequeo barato de degeneracion ANTES del MOEA: si el operador solo
         # copia a un padre no vale la pena correr las instancias.
-        ok, novelty, reason = recombination_novelty(namespace["crossover"])
-        if not ok:
-            return {"fronts": None, "per_instance": [], "score": None,
-                    "error": reason, "exception": ValueError(reason), "novelty": 0.0,
-                    "fingerprint": None}
+        # La novedad se registra como diagnostico, pero no se rechaza el
+        # candidato: el fitness decide.
+        _ok, novelty, _reason = recombination_novelty(namespace["crossover"])
 
         # Huella conductual sobre pares de padres fijos. Es independiente del
         # MOEA y se reutiliza si el LLM repite el codigo. Si el operador falla
