@@ -33,7 +33,13 @@ def crossover(x, y):
 """
 
 
-def load_priors():
+def load_ge_priors():
+    """Priors de GE (codigo profundo); utiles como referencia, no como inicio.
+
+    Un prior de GE suele obtener el maximo del panel clasico (6.0). Si se usa
+    como mejor inicial, el bucle (1+1) queda congelado: ningun candidato puede
+    superar el techo. Por eso la busqueda arranca con los clasicos simples.
+    """
     priors = []
     for label, path in _CANDIDATES:
         try:
@@ -42,7 +48,20 @@ def load_priors():
             continue
         if "def crossover" in code:
             priors.append((label, code))
-    # Un prior simple ayuda a los modelos pequenos: el codigo de GE es muy
-    # profundo y a veces el LLM lo copia sin adaptarlo.
     priors.append(("order-based", _FALLBACK))
     return priors
+
+
+def load_priors():
+    """Priors de arranque: cruces clasicos simples y validados.
+
+    BAG inyecta algoritmos fuertes de un conjunto de referencia. Para modelos
+    pequenos, OX/PMX/CX/PBX/ERX son priors fuertes y cortos; el codigo de GE
+    se reserva para el panel de comparacion.
+    """
+    from mohh.llamea.simple_priors import load_simple_priors
+
+    priors = load_simple_priors()
+    if priors:
+        return priors
+    return load_ge_priors()

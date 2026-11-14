@@ -1485,14 +1485,23 @@ class OperatorEvaluator:
         # (rank 1 = mejor). Se evalua el candidato contra el panel de referencia.
         if self.ranking:
             rank_score, mean_rank, k = self._rank_score(entry["fronts"])
+            # HV solo como desempate cuando dos codigos empatan en rango.
+            # No es el fitness principal: el orden GE sigue mandando.
+            hv_values = self._hv_values(entry["fronts"])
+            hv_mean = self._mean_hv(hv_values)
+            solution.hv = hv_mean
+            solution.hv_values = hv_values
             self._valid_evaluations += 1
             if mean_rank is None:
                 feedback = ("GE ranking: no valid fronts/panel; fitness 0.0.")
             else:
+                hv_text = (f" HV tie-break {hv_mean:.6f}." if hv_mean is not None
+                           else "")
                 feedback = (
                     f"GE ranking: mean rank {mean_rank:.4f} of {k} "
                     f"(1 = best; lower is better). "
-                    f"Fitness = (K + 1 - mean rank) = {rank_score:.4f}.")
+                    f"Fitness = (K + 1 - mean rank) = {rank_score:.4f}."
+                    f"{hv_text}")
             solution.set_scores(rank_score, feedback)
             self._track_best(rank_score, solution)
             self.archive.update(key, rank_score)

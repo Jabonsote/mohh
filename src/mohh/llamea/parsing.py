@@ -1,4 +1,5 @@
 
+import ast
 import re
 
 THINK_RE = re.compile(r"<(think|thinking|reasoning)>.*?</\1>",
@@ -13,6 +14,13 @@ MAIN_GUARD_RE = re.compile(
 
 OPENERS = {"(": ")", "[": "]", "{": "}"}
 CLOSERS = {")", "]", "}"}
+
+#: Errores de Python que los modelos pequenos repiten y se pueden reparar sin
+#: cambiar la idea del operador. Se aplican solo a `x`/`y` para no tocar otros
+#: arrays con semantica distinta.
+_RANGE_SUM_RE = re.compile(
+    r"range\(((?:[^()]|\([^()]*\))*)\)\s*\+\s*range\(((?:[^()]|\([^()]*\))*)\)")
+_ARRAY_METHOD_RE = re.compile(r"(?<!list\()\b([xy])\.(index|pop)\(")
 
 
 def strip_thinking(text: str) -> str:
@@ -74,6 +82,10 @@ def repair_code(code: str) -> str:
     # Balancear brackets sin cerrar (generacion truncada).
     code = close_unbalanced(code)
 
+    # Reparaciones seguras de errores tipicos del modelo.
+    code = _RANGE_SUM_RE.sub(r"list(range(\1)) + list(range(\2))", code)
+    code = _ARRAY_METHOD_RE.sub(r"list(\1).\2(", code)
+
     return code
 
 
@@ -117,15 +129,61 @@ def close_unbalanced(code: str) -> str:
     return code + closers if closers else code
 
 
-def looks_like_operator(code: str) -> bool:
-    """True si el codigo compila y define una funcion crossover."""
-    if "def crossover" not in code:
-        return False
+def _top_level_functions(code: str) -> list:
+    """Funciones de modulo (no metodos) definidas en el codigo."""
+    tree = ast.parse(code)
+    return [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+
+
+def _is_crossover_name(name: str) -> bool:
+    return "cross" in name.lower() or "recomb" in name.lower()
+
+
+def normalize_crossover_name(code: str) -> str:
+    """Garantiza que exista ``crossover``, aunque el LLM la haya renombrado.
+
+    Los modelos pequenos suelen devolver ``custom_crossover``,
+    ``order_based_crossover`` o ``pmx_crossover``. El algoritmo puede ser
+    correcto; rechazarlo solo por el nombre es un falso negativo del filtro.
+    Se anade un alias de modulo (no se reescribe el codigo) para conservar la
+    funcion original y sus ayudantes.
+    """
     try:
-        compile(code, "<llm-response>", "exec")
-        return True
+        functions = _top_level_functions(code)
     except SyntaxError:
+        return code
+    names = {node.name for node in functions}
+    if "crossover" in names:
+        return code
+
+    candidates = [node for node in functions if _is_crossover_name(node.name)]
+    if not candidates:
+        candidates = [
+            node for node in functions
+            if len(node.args.args) == 2 and not node.name.startswith("_")
+        ]
+    if len(candidates) != 1:
+        return code
+
+    alias = candidates[0].name
+    return code.rstrip() + f"\n\n# Alias generado por el filtro LLaMEA\ncrossover = {alias}\n"
+
+
+def looks_like_operator(code: str) -> bool:
+    """True si el codigo compila y expone una funcion/alias ``crossover``."""
+    try:
+        tree = ast.parse(code)
+        compile(tree, "<llm-response>", "exec")
+    except (SyntaxError, ValueError):
         return False
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "crossover":
+            return True
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "crossover":
+                    return True
+    return False
 
 
 def parse_llm_response(text: str) -> str:
@@ -136,8 +194,18 @@ def parse_llm_response(text: str) -> str:
     """
     code = extract_code_block(text)
     code = repair_code(code)
+    code = normalize_crossover_name(code)
+    try:
+        compile(code, "<llm-response>", "exec")
+    except SyntaxError as error:
+        raise ValueError(
+            f"SyntaxError on line {error.lineno}: {error.msg}"
+        ) from error
     if not looks_like_operator(code):
-        raise ValueError("LLM response has no valid 'def crossover' code")
+        raise ValueError(
+            "LLM response has no callable crossover(x, y) or a single "
+            "two-argument function that can be used as crossover"
+        )
     return code
 
 

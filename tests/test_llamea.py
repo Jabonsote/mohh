@@ -973,3 +973,31 @@ def test_llamea_scripts_exist_and_are_valid():
     assert os.path.isfile(chain)
     result = subprocess.run(["bash", "-n", chain], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
+
+
+def test_parse_llm_response_aliases_renamed_crossover():
+    from mohh.llamea.parsing import parse_llm_response
+    raw = (
+        "# Description: custom\n# Code:\n```python\n"
+        "import numpy as np\n"
+        "def custom_crossover(x, y):\n"
+        "    return np.array(x, copy=True)\n"
+        "```\n"
+    )
+    code = parse_llm_response(raw)
+    assert "crossover = custom_crossover" in code
+    from mohh.llamea.fitness import compile_operator
+    compile_operator(code)
+
+
+def test_repair_common_python_errors():
+    from mohh.llamea.parsing import repair_code
+    code = (
+        "import numpy as np\n"
+        "def crossover(x, y):\n"
+        "    pos = np.random.permutation(range(1, len(x)) + range(0, 1))\n"
+        "    return x.index(0)\n"
+    )
+    fixed = repair_code(code)
+    assert "list(range(1, len(x))) + list(range(0, 1))" in fixed
+    assert "list(x).index(0)" in fixed

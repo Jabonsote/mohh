@@ -10,9 +10,7 @@ import os
 import random
 import time
 
-import numpy as np
-
-from mohh.llamea.fitness import build_evaluator, primitive_namespace
+from mohh.llamea.fitness import build_evaluator, compile_operator
 from mohh.llamea.parsing import parse_llm_response
 from mohh.llamea.priors import load_priors
 from mohh.llamea.vllm import extract_description
@@ -25,15 +23,22 @@ ROLE = (
 
 TASK = """Design a crossover (recombination) operator.
 
-Write a module-level Python function:
+Write a module-level Python function named EXACTLY:
 
     def crossover(x, y):
 
-`x` and `y` are permutations of 0..n-1.
+`x` and `y` are numpy arrays that are permutations of 0..n-1.
 Return one child permutation, or a tuple (child1, child2).
 Do not modify `x` or `y`.
 The child must be a permutation of 0..n-1.
-The operator must work for any n >= 2."""
+The operator must work for any n >= 2.
+
+Do NOT call `.pop()` or `.index()` on a numpy array; convert with
+`list(x)` first if needed. Ensure `len(child) == n`, every value appears
+exactly once, and there are no -1 entries. It must also work when `x` is
+`[0, 1, ..., n-1]` and `y` is `[n-1, ..., 1, 0]`."""
+
+TASK_ONE = TASK + "\nReturn exactly one child permutation (not a tuple)."
 
 STRATEGY_REFINE = (
     "Refine the strategy of the selected solution to improve it. "
@@ -50,8 +55,11 @@ FORMAT = """Answer in exactly this format:
 # Description: <one line>
 # Code:
 ```python
-<complete code with `import numpy as np` and `def crossover(x, y):`>
-```"""
+def crossover(x, y):
+    ...
+```
+
+The function must be named exactly `crossover`."""
 
 
 class Candidate:
@@ -60,6 +68,8 @@ class Candidate:
         self.fitness = float("nan")
         self.feedback = ""
         self.error = None
+        self.hv = None
+        self.hv_values = None
 
     def set_scores(self, fitness, feedback="", error=None):
         self.fitness = fitness
@@ -67,13 +77,33 @@ class Candidate:
         self.error = error
 
 
-def build_prompt(parent_code, strategy, last_error=""):
+def build_prompt(parent_code, strategy, last_error="", score=None,
+                 description="", one_child=True, history=()):
+    """Plantilla BAG: rol, tarea, historial, codigo, estrategia y formato."""
+    task = TASK_ONE if one_child else TASK
     if strategy == "refine":
         strategy_text = STRATEGY_REFINE
     else:
         strategy_text = STRATEGY_CREATE
+    history_text = ""
+    if score is not None:
+        rows = []
+        for item in list(history)[-6:]:
+            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                rows.append(f"- {item[0]} (Score: {item[1]:.4f})")
+            else:
+                rows.append(f"- {item}")
+        listed = "\n".join(rows)
+        history_text = (
+            "The current population of algorithms already evaluated "
+            "(name, description, score) is:\n"
+            f"{listed or '- current best (Score: %.4f)' % score}\n\n"
+            "The selected solution to update is:\n"
+            f"{description or 'current best'} (Score: {score:.4f}; "
+            "1 is best, 6 is worst)\n\n"
+            "Do not repeat an operator already evaluated; change its mechanism.\n\n")
     prompt = (
-        f"{ROLE}\n\nTASK\n{TASK}\n\n"
+        f"{ROLE}\n\nTASK\n{task}\n\n{history_text}"
         f"REFERENCE CODE\n```python\n{parent_code}\n```\n\n"
         f"STRATEGY\n{strategy_text}\n\n{FORMAT}"
     )
@@ -81,39 +111,18 @@ def build_prompt(parent_code, strategy, last_error=""):
         prompt += (
             "\n\nPREVIOUS ATTEMPT FAILED:\n"
             f"{last_error}\n"
-            "Fix that error. Do not repeat the same invalid mechanism."
-        )
+            "Fix that exact error. Return a complete, runnable operator.")
     return prompt
 
 
 def minimal_compile(code):
-    """Filtro mínimo: compila, define crossover y devuelve permutaciones.
+    """Filtro minimo con timeout y validacion de ambos hijos.
 
-    Prueba tres tamaños y **ambos** hijos. No es el validador estricto de GE:
-    solo comprueba el contrato mínimo antes de gastar el MOEA.
+    Delega en ``compile_operator`` (el mismo camino que usa el evaluador):
+    compila con limite de tiempo, comprueba que exista ``crossover`` y prueba
+    tres tamanos. Asi un operador con ``while True`` no cuelga la busqueda.
     """
-    namespace = primitive_namespace()
-    exec(compile(code, "<candidate>", "exec"), namespace)
-    crossover = namespace.get("crossover")
-    if not callable(crossover):
-        raise ValueError("missing callable crossover(x, y)")
-
-    for n in (11, 17, 23):
-        x = np.arange(n)
-        y = x[::-1].copy()
-        out = crossover(x.copy(), y.copy())
-        children = out if isinstance(out, tuple) else (out,)
-        if isinstance(out, tuple) and len(out) != 2:
-            raise ValueError(f"tuple must have two children, got {len(out)}")
-        for index, child in enumerate(children):
-            child = np.asarray(child)
-            if child.shape != (n,):
-                raise ValueError(
-                    f"child{index + 1} has shape {child.shape}, expected {(n,)}")
-            if set(child.tolist()) != set(range(n)):
-                raise ValueError(
-                    f"child{index + 1} is not a permutation of range({n})")
-    return namespace
+    return compile_operator(code)
 
 
 def _write_text(path, text):
@@ -139,13 +148,14 @@ def _evaluate(evaluator, code):
     try:
         result = evaluator(candidate)
     except Exception as error:  # noqa: BLE001
-        return float("-inf"), f"{type(error).__name__}: {error}"
+        return float("-inf"), None, f"{type(error).__name__}: {error}"
     if result is None or result.error is not None:
-        return float("-inf"), getattr(result, "error", "evaluation failed")
+        return float("-inf"), None, getattr(result, "error", "evaluation failed")
     fitness = float(result.fitness)
     if not math.isfinite(fitness):
-        return float("-inf"), "fitness is not finite"
-    return fitness, None
+        return float("-inf"), None, "fitness is not finite"
+    hv = getattr(result, "hv", None)
+    return fitness, hv, None
 
 
 def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
@@ -179,12 +189,13 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
             random.shuffle(prior_queue)
         return prior_queue.pop()
 
-    best_code, best_fitness = None, float("-inf")
+    best_code, best_fitness, best_hv = None, float("-inf"), None
     for label, code in priors:
-        fitness, error = _evaluate(evaluator, code)
-        logger.info("Prior %s: fitness=%s error=%s", label, fitness, error)
+        fitness, hv, error = _evaluate(evaluator, code)
+        logger.info("Prior %s: fitness=%s hv=%s error=%s",
+                    label, fitness, hv, error)
         if fitness > best_fitness:
-            best_code, best_fitness = code, fitness
+            best_code, best_fitness, best_hv = code, fitness, hv
     if best_code is None:
         raise RuntimeError("ningun prior pudo evaluarse")
 
@@ -193,6 +204,7 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
     _write_json(os.path.join(exp_dir, "best_so_far.json"), {
         "generation": 0,
         "fitness": best_fitness,
+        "hv": best_hv,
         "name": "prior",
         "seed": args.seed,
     })
@@ -201,6 +213,7 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
     candidates_path = os.path.join(exp_dir, "candidates.jsonl")
     started = time.time()
     last_error = ""
+    history = []
     for iteration in range(1, args.budget + 1):
         if iteration % args.prior_every == 0:
             parent_label, parent_code = next_prior()
@@ -212,7 +225,10 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
             parent_label, parent_code = "current-best", best_code
             strategy = "create"
 
-        prompt = build_prompt(parent_code, strategy, last_error=last_error)
+        prompt = build_prompt(
+            parent_code, strategy, last_error=last_error,
+            score=best_fitness, description=parent_label, one_child=True,
+            history=history)
         try:
             response = llm.query([{"role": "user", "content": prompt}])
             code = parse_llm_response(response or "")
@@ -227,7 +243,8 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
             })
             with open(progress_path, "a", encoding="utf-8") as handle:
                 handle.write(
-                    f"iter {iteration} best={best_fitness:.6f} candidate=worst "
+                    f"iter {iteration} best={best_fitness:.6f} "
+                    f"best_hv={best_hv} candidate=worst "
                     f"valid=0 error={type(error).__name__} "
                     f"parent={parent_label} strategy={strategy}\n")
             continue
@@ -246,26 +263,36 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
             })
             with open(progress_path, "a", encoding="utf-8") as handle:
                 handle.write(
-                    f"iter {iteration} best={best_fitness:.6f} candidate=worst "
+                    f"iter {iteration} best={best_fitness:.6f} "
+                    f"best_hv={best_hv} candidate=worst "
                     f"valid=0 error={type(error).__name__} "
                     f"parent={parent_label} strategy={strategy}\n")
             continue
 
-        fitness, error = _evaluate(evaluator, code)
+        fitness, hv, error = _evaluate(evaluator, code)
         last_error = (str(error) if error else "")
-        improved = fitness > best_fitness
+        # El rango GE manda. Solo si hay empate exacto se usa HV como desempate:
+        # un candidato con el mismo rango pero mejor HV si avanza.
+        improved = fitness > best_fitness or (
+            fitness == best_fitness and hv is not None and best_hv is not None
+            and hv > best_hv + 1e-12)
         if improved:
-            best_code, best_fitness, best_generation = code, fitness, iteration
+            best_code, best_fitness, best_hv = code, fitness, hv
+            best_generation = iteration
             _write_text(os.path.join(exp_dir, "best_so_far.py"), best_code + "\n")
             _write_text(os.path.join(exp_dir, "llamea_best_operator.py"),
                         best_code + "\n")
             _write_json(os.path.join(exp_dir, "best_so_far.json"), {
                 "generation": iteration,
                 "fitness": best_fitness,
+                "hv": best_hv,
                 "name": "crossover",
                 "seed": args.seed,
             })
 
+        description = extract_description(response or "")
+        if description:
+            history.append((description, fitness))
         _append_jsonl(candidates_path, {
             "iteration": iteration, "valid": bool(math.isfinite(fitness)),
             "fitness": fitness, "error": (str(error) if error else None),
@@ -278,12 +305,13 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
         with open(progress_path, "a", encoding="utf-8") as handle:
             handle.write(
                 f"iter {iteration} best={best_fitness:.6f} "
-                f"candidate={candidate_text} valid={1 if finite else 0} "
-                f"error={error or '-'} parent={parent_label} "
+                f"best_hv={best_hv} candidate={candidate_text} hv={hv} "
+                f"valid={1 if finite else 0} error={error or '-'} parent={parent_label} "
                 f"strategy={strategy} wall_s={time.time() - started:.1f}\n")
 
     _write_json(os.path.join(exp_dir, "llamea_best_info.json"), {
         "train_fitness": best_fitness,
+        "train_hv": best_hv,
         "best_generation": best_generation,
         "budget": args.budget,
         "solver": args.solver,

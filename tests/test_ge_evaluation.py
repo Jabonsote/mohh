@@ -165,3 +165,23 @@ def test_build_evaluator_ranking_flag():
     from mohh.llamea.fitness import build_evaluator
     evaluator = build_evaluator([], 1, 1, ranking=True)
     assert evaluator.ranking is True
+
+
+def test_rank_score_is_positive_and_rank1_is_best(monkeypatch):
+    from mohh.llamea.fitness import build_evaluator
+
+    evaluator = build_evaluator([], 1, 1, ranking=True)
+    monkeypatch.setattr(evaluator, "_hv_values", lambda fronts: [1.0])
+    monkeypatch.setattr(
+        evaluator, "_reference_hv_values",
+        lambda: {"a": [0.5], "b": [0.2]},
+    )
+    score, mean_rank, k = evaluator._rank_score([np.array([[0.0, 1.0]])])
+    assert k == 3
+    assert mean_rank == pytest.approx(1.0)
+    assert score == pytest.approx(3.0)
+
+    monkeypatch.setattr(evaluator, "_hv_values", lambda fronts: [0.1])
+    score, mean_rank, k = evaluator._rank_score([np.array([[0.0, 1.0]])])
+    assert mean_rank == pytest.approx(3.0)
+    assert score == pytest.approx(1.0)

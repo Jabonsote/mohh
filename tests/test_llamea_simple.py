@@ -210,3 +210,49 @@ def test_build_prompt_includes_previous_error():
         VALID, "refine", "ValueError: not a permutation")
     assert "PREVIOUS ATTEMPT FAILED" in prompt
     assert "not a permutation" in prompt
+
+
+def test_run_simple_uses_hv_only_as_tiebreak(tmp_path, monkeypatch):
+    def builder(*args, **kwargs):
+        def evaluate(candidate):
+            code = candidate.code or ""
+            hv = 2.0 if "BEST" in code else 1.0
+            return SimpleNamespace(fitness=1.0, error=None, hv=hv)
+        return evaluate
+
+    monkeypatch.setattr(simple, "build_evaluator", builder)
+    monkeypatch.setattr(simple, "load_priors", lambda: [("prior", VALID)])
+    llm = FakeLLM([BEST])
+    logger = logging.getLogger("test-simple-tiebreak")
+    simple.run_simple(_args(budget=1), str(tmp_path), logger, llm, [])
+    assert "BEST" in (tmp_path / "best_so_far.py").read_text()
+    info = json.loads((tmp_path / "best_so_far.json").read_text())
+    assert info["fitness"] == 1.0
+    assert info["hv"] == 2.0
+
+
+def test_simple_priors_are_valid_for_random_permutations():
+    from mohh.llamea.fitness import compile_operator
+    from mohh.llamea.simple_priors import load_simple_priors
+
+    priors = load_simple_priors()
+    assert len(priors) >= 5
+    for _, code in priors:
+        namespace = compile_operator(code)
+        crossover = namespace["crossover"]
+        for _ in range(10):
+            n = int(np.random.randint(2, 30))
+            x = np.random.permutation(n)
+            y = np.random.permutation(n)
+            child = np.asarray(crossover(x.copy(), y.copy()))
+            assert child.shape == (n,)
+            assert set(child.tolist()) == set(range(n))
+
+
+def test_build_prompt_includes_history():
+    prompt = simple.build_prompt(
+        VALID, "refine", score=4.0, description="best",
+        history=[("order crossover", 3.5), ("cycle crossover", 2.0)])
+    assert "order crossover" in prompt
+    assert "cycle crossover" in prompt
+    assert "Do not repeat" in prompt
