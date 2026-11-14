@@ -49,10 +49,21 @@ srun --jobid=<JOBID> --overlap bash -lc '
 '
 ```
 
-Si el job solo ve una GPU y `CUDA_VISIBLE_DEVICES` es distinto de `0`,
-prueba `CUDA_VISIBLE_DEVICES=0`; en A100 `graphos1` Slurm puede asignar la GPU
-1 y vLLM 0.32 falla al mapear ese índice físico. Para evitarlo, usa una A10
-(`qwen3-8b-awq`) o normaliza la variable en el job.
+En `graphos1`, Slurm puede asignar la GPU 1 y exportar
+`CUDA_VISIBLE_DEVICES=1`; si el cgroup solo expone esa GPU, el ordinal visible
+es `0` y vLLM 0.32 falla al mapear el índice físico. `llamea-single.slrm` y
+`llamea-vllm-server.slrm` ya lo detectan: si `torch` no ve ninguna GPU con el
+valor heredado, prueban `CUDA_VISIBLE_DEVICES=0` antes de arrancar vLLM.
+
+Para forzar A100 (aunque solo esté libre una de sus dos GPU):
+
+```bash
+CONSTRAINT=A100 PROFILE=qwen3-8b-awq GENERATIONS=1000 EVAL_TEST=1 \
+  bash slurm/llamea-all.sh
+```
+
+Si ambas A100 están ocupadas, el job queda en `PD` y arranca cuando se libere
+cualquiera; no hay que reenviarlo.
 
 | Variable | Uso |
 |---|---|

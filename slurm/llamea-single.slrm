@@ -110,6 +110,35 @@ module load python/miniforge
 eval "$(conda shell.bash hook)"
 conda activate "$SLURM_SUBMIT_DIR/.conda-env"
 
+# vLLM 0.32 usa NVML con el indice fisico de CUDA_VISIBLE_DEVICES. En ixachi,
+# Slurm puede asignar la GPU 1 y exportar CUDA_VISIBLE_DEVICES=1; si el cgroup
+# solo expone esa GPU, el ordinal visible es 0 y vLLM falla con
+# NVMLError_InvalidArgument. Si torch no ve ninguna GPU con el valor heredado,
+# se prueba el ordinal 0 (solo cuando se pide una GPU).
+normalize_cuda_visible_devices() {
+    local old count
+    old="${CUDA_VISIBLE_DEVICES:-<unset>}"
+    count="$(python -c 'import torch; print(torch.cuda.device_count())' 2>/dev/null || echo 0)"
+    count="${count:-0}"
+    if [ "${TENSOR_PARALLEL:-1}" = "1" ] \
+        && [ "$count" -eq 0 ] \
+        && [[ "$old" =~ ^[1-9][0-9]*$ ]]; then
+        export CUDA_VISIBLE_DEVICES=0
+        count="$(python -c 'import torch; print(torch.cuda.device_count())' 2>/dev/null || echo 0)"
+        count="${count:-0}"
+        echo "CUDA_VISIBLE_DEVICES: $old -> 0 (GPU unica visible)."
+    fi
+    if [ "$count" -eq 0 ]; then
+        echo "ERROR: no hay GPU visible (CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>})." >&2
+        nvidia-smi -L >&2 || true
+        return 1
+    fi
+    echo "GPU visible: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>} count=$count"
+    return 0
+}
+normalize_cuda_visible_devices
+nvidia-smi -L || true
+
 mkdir -p results "$EXP_DIR"
 MODEL_ROOT="$(python scripts/mohh_models.py root | head -1)"
 # vLLM y huggingface no deben escribir nada en $HOME (se borra y no lo ven los
