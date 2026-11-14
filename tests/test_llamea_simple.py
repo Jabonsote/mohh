@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 import mohh.llamea.simple as simple
-from mohh.llamea.fitness import compile_operator, validate_operator
+from mohh.llamea.fitness import compile_operator
 from mohh.llamea.operator import LLMOperator
 
 VALID = """import numpy as np
@@ -130,8 +130,8 @@ def test_minimal_compile_rejects_invalid_second_child():
         simple.minimal_compile(code)
 
 
-def test_compile_operator_only_checks_one_size():
-    """Un operador que falla en n=100 pero funciona en n=11 ya no se rechaza."""
+def test_compile_operator_checks_larger_sizes():
+    """Un operador que falla en n>=24 ya no pasa el filtro minimo."""
     code = """import numpy as np
 
 def crossover(x, y):
@@ -139,10 +139,8 @@ def crossover(x, y):
         raise ValueError('small model operator')
     return np.array(x, copy=True)
 """
-    namespace = compile_operator(code)
-    assert callable(namespace["crossover"])
-    ok, _ = validate_operator(namespace["crossover"])
-    assert not ok
+    with pytest.raises(ValueError):
+        compile_operator(code)
 
 
 def test_llm_operator_copies_inputs():

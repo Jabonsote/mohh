@@ -1001,3 +1001,23 @@ def test_repair_common_python_errors():
     fixed = repair_code(code)
     assert "list(range(1, len(x))) + list(range(0, 1))" in fixed
     assert "list(x).index(0)" in fixed
+
+
+def test_llm_operator_falls_back_to_parent_for_invalid_child():
+    from mohh.llamea.operator import LLMOperator
+
+    namespace = {}
+    exec("import numpy as np\n"
+         "def crossover(x, y):\n"
+         "    return np.zeros(len(x), dtype=int)\n", namespace)
+
+    class FakeProblem:
+        n_var = 6
+        n_obj = 2
+        n_constr = 0
+
+    op = LLMOperator(namespace, prob=1.0)
+    X = np.array([[[0, 1, 2, 3, 4, 5]], [[5, 4, 3, 2, 1, 0]]])
+    Y = op._do(FakeProblem(), X)
+    assert set(Y[0, 0]) == set(range(6))
+    assert set(Y[1, 0]) == set(range(6))

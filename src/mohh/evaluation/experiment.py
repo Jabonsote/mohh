@@ -253,6 +253,17 @@ def boundaries_from_points(points):
     return array.min(axis=0), array.max(axis=0)
 
 
+def clip_to_nadir(front, nadir_point):
+    """Acota un frente normalizado a ``[0, nadir]`` antes del HV.
+
+    Un operador LLaMEA puede devolver un hijo invalido para un par concreto y
+    producir objetivos fuera de la caja (p. ej. ceros o valores enormes). Sin
+    este clip, pymoo puede devolver HV gigantes (se observo 94132 en KC18).
+    El clip no cambia los HV normales: solo corrige puntos fuera de [0, 1.1].
+    """
+    return np.clip(np.asarray(front, dtype=float), 0.0, nadir_point)
+
+
 def write_front(front: np.ndarray, file_path: str):
     """
     Take a 2D numpy array and write it in disk
@@ -547,7 +558,8 @@ def run_experiments(experiment_path, results_paths, operators,
             boundaries[label] = [min_val, max_val]
 
             best_fronts[label] = best_front
-            best_fronts_norm[label] = normalize_values(best_front, min_val, max_val)
+            best_fronts_norm[label] = clip_to_nadir(
+                normalize_values(best_front, min_val, max_val), nadir_point)
 
             metrics.record("best_fronts", {
                 "instance": instance_name,
@@ -580,6 +592,7 @@ def run_experiments(experiment_path, results_paths, operators,
                     front = fronts_model_level[evals][model_operators][experiment]
 
                     front = normalize_values(front, boundaries[evals][0], boundaries[evals][1])
+                    front = clip_to_nadir(front, nadir_point)
 
                     hv = compute_hypervolume(nadir_point, front)
 
@@ -602,7 +615,9 @@ def run_experiments(experiment_path, results_paths, operators,
                 # which then wouldn't match any actual column_data entry.
                 median_indx = int(np.argsort(column_data)[len(column_data) // 2]) + 1
                 median_front = fronts_model_level[evals][model_operators][f"Experiment {median_indx:03d}"]
-                median_front_norm = normalize_values(median_front, boundaries[evals][0], boundaries[evals][1])
+                median_front_norm = clip_to_nadir(
+                    normalize_values(median_front, boundaries[evals][0], boundaries[evals][1]),
+                    nadir_point)
 
                 metrics.record("median_fronts", {
                     "instance": instance_name,

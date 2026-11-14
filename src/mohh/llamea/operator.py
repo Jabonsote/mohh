@@ -54,9 +54,30 @@ class LLMOperator(Crossover):
 
             child = eval(self.expression, eval_ns)
 
-            if isinstance(child, tuple):
-                Y[0, k], Y[1, k] = child[0], child[1]
+            if isinstance(child, tuple) and len(child) == 2:
+                first, second = child
             else:
-                Y[0, k], Y[1, k] = child, child[::-1]
+                first, second = child, child[::-1]
+
+            # Un operador valido en el filtro puede fallar en un par concreto
+            # (p.ej. deja -1 o duplica valores). Nunca se inyecta un hijo
+            # invalido al MOEA: se usa el padre como fallback y el algoritmo
+            # sigue siendo comparable. Esto evita frentes con objetivos 0 y
+            # HV absurdos en la evaluacion final.
+            first = self._valid_child(first, n_var, x)
+            second = self._valid_child(second, n_var, y)
+            Y[0, k], Y[1, k] = first, second
 
         return Y
+
+    @staticmethod
+    def _valid_child(child, n_var, fallback):
+        try:
+            array = np.asarray(child)
+        except Exception:  # noqa: BLE001
+            return np.asarray(fallback, copy=True)
+        if array.shape != (n_var,):
+            return np.asarray(fallback, copy=True)
+        if set(array.tolist()) != set(range(n_var)):
+            return np.asarray(fallback, copy=True)
+        return array

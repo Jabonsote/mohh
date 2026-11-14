@@ -372,29 +372,35 @@ def validate_operator_minimal(crossover_func):
     No comprueba mutacion de entradas (el adaptador pasa copias), ni varios
     tamanos, ni novedad, ni familia objetivo. La evaluacion decide.
     """
-    for n in (11, 17, 23):
-        x = np.arange(n)
-        y = x[::-1].copy()
-        try:
-            out = _call_with_timeout(crossover_func, OPERATOR_CALL_TIMEOUT,
-                                     x.copy(), y.copy())
-        except Exception as error:  # noqa: BLE001
-            return False, f"crossover raised {type(error).__name__}: {error}"
-        if isinstance(out, tuple):
-            if len(out) != 2:
-                return False, f"tuple of {len(out)} elements; expected two children"
-            children = out
-        else:
-            children = (out,)
-        for index, child in enumerate(children):
+    rng = np.random.RandomState(0)
+    for n in (11, 17, 23, 50):
+        pairs = [(np.arange(n), np.arange(n)[::-1].copy())]
+        pairs.extend(
+            (rng.permutation(n), rng.permutation(n)) for _ in range(3)
+        )
+        for x, y in pairs:
             try:
-                child = np.asarray(child)
-            except Exception:  # noqa: BLE001
-                return False, f"child{index + 1} did not return an array"
-            if child.shape != (n,):
-                return False, f"child{index + 1} has shape {child.shape}; expected {(n,)}"
-            if set(child.tolist()) != set(range(n)):
-                return False, f"child{index + 1} is not a permutation of range({n})"
+                out = _call_with_timeout(crossover_func, OPERATOR_CALL_TIMEOUT,
+                                         x.copy(), y.copy())
+            except Exception as error:  # noqa: BLE001
+                return False, f"crossover raised {type(error).__name__} at n={n}: {error}"
+            if isinstance(out, tuple):
+                if len(out) != 2:
+                    return False, f"tuple of {len(out)} elements; expected two children"
+                children = out
+            else:
+                children = (out,)
+            for index, child in enumerate(children):
+                try:
+                    child = np.asarray(child)
+                except Exception:  # noqa: BLE001
+                    return False, f"child{index + 1} did not return an array at n={n}"
+                if child.shape != (n,):
+                    return False, (
+                        f"child{index + 1} has shape {child.shape}; expected {(n,)} at n={n}")
+                if set(child.tolist()) != set(range(n)):
+                    return False, (
+                        f"child{index + 1} is not a permutation of range({n}) at n={n}")
     return True, None
 
 

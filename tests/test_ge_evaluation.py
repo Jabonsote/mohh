@@ -185,3 +185,15 @@ def test_rank_score_is_positive_and_rank1_is_best(monkeypatch):
     score, mean_rank, k = evaluator._rank_score([np.array([[0.0, 1.0]])])
     assert mean_rank == pytest.approx(3.0)
     assert score == pytest.approx(1.0)
+
+
+def test_clip_to_nadir_bounds_hv_after_operator_failure():
+    from mohh.evaluation.experiment import clip_to_nadir
+
+    nadir = np.array([1.1, 1.1, 1.1, 1.1])
+    front = np.array([[-17.0, -16.0, -17.0, -14.0], [0.5, 0.5, 0.5, 0.5]])
+    clipped = clip_to_nadir(front, nadir)
+    assert clipped.min() >= 0.0
+    assert clipped.max() <= 1.1
+    hv = compute_hypervolume(nadir, clipped)
+    assert hv <= 1.1 ** 4 + 1e-9
