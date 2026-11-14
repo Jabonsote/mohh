@@ -502,6 +502,20 @@ class VLLM_LLM(OpenAI_LLM):
         cleaned = strip_thinking(raw)
         # Algunos servidores devuelven el codigo solo en reasoning_content y
         # dejan content vacio. Se usa como fallback solo si no hay respuesta.
+        # Con modelos con thinking (Qwen3), el content puede contener prosa y
+        # el codigo real estar en reasoning_content; se intenta ese camino si
+        # el content no tiene bloque de codigo util.
+        try:
+            extract_code_block(cleaned)
+        except ValueError:
+            reasoning = self._response_reasoning()
+            if reasoning:
+                reasoning_cleaned = strip_thinking(reasoning)
+                try:
+                    extract_code_block(reasoning_cleaned)
+                    cleaned = reasoning_cleaned
+                except ValueError:
+                    pass
         if not cleaned.strip():
             reasoning = self._response_reasoning()
             if reasoning:
