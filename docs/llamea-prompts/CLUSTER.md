@@ -55,6 +55,12 @@ es `0` y vLLM 0.32 falla al mapear el índice físico. `llamea-single.slrm` y
 `llamea-vllm-server.slrm` ya lo detectan: si `torch` no ve ninguna GPU con el
 valor heredado, prueban `CUDA_VISIBLE_DEVICES=0` antes de arrancar vLLM.
 
+La A100 de `graphos1` está particionada en MIG (slices de ~20 GB). El job
+puede caer en un slice ocupado (~6 GB libres) y vLLM falla por falta de
+memoria. La normalización (`slurm/llamea-cuda-env.sh`) enumera los slices MIG
+y elige el de mayor memoria libre que cumpla `GPU_MEM_UTIL * total`; si ninguno
+cumple, elige el mejor disponible y deja que vLLM reporte el error.
+
 Para forzar A100 (aunque solo esté libre una de sus dos GPU):
 
 ```bash
