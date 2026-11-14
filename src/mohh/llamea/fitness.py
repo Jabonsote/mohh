@@ -96,7 +96,7 @@ def _call_with_timeout(func, timeout, *args, **kwargs):
     if not usable:
         return func(*args, **kwargs)
 
-    def _on_alarm(signum, frame):  # pragma: no cover - depende del reloj
+    def _on_alarm(_signum, _frame):  # pragma: no cover - depende del reloj
         raise _TimeoutError(f"exceeded {timeout} seconds")
 
     previous = signal.signal(signal.SIGALRM, _on_alarm)
@@ -1895,20 +1895,36 @@ class OperatorEvaluator:
 class PopulationEvaluator(OperatorEvaluator):
     """Fitness por poblacion, replicando `HyperHeuristic.compute_metrics` de GE.
 
-    Para cada generacion se consolidan los frentes de **toda la poblacion**
+    Para cada evaluacion se consolidan los frentes de **toda la poblacion**
     (padres + descendientes) por instancia, se calcula el nadir del frente no
     dominado consolidado y se asigna el HV de cada individuo. El fitness es el
-    **HV medio** entre instancias (positivo: mayor es mejor). El rango GE se
-    conserva solo como diagnostico en el feedback.
+    **rango medio GE** entre instancias: 1 es el mejor y, con `raw_rank=True`,
+    menor es mejor (el mismo valor que usa GE). Con `raw_rank=False` se invierte
+    a `(K + 1) - rango_medio` para clientes que maximizan.
 
-    No acumula frentes de generaciones anteriores: el marco es el de la
-    poblacion actual, igual que en la busqueda por evolucion gramatical.
+    No acumula frentes de generaciones anteriores: el punto de referencia es el
+    nadir de la poblacion actual, igual que en GE. El HV se recalcula en cada
+    evaluacion, porque el nadir puede cambiar al entrar el nuevo individuo.
     """
 
+    def __init__(self, *args, raw_rank=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.raw_rank = bool(raw_rank)
+
+    def evaluate_population(self, population, parent_population=None,
+                            logger=None):
+        if parent_population is None:
+            parents = []
+        elif isinstance(parent_population, (list, tuple)):
+            parents = list(parent_population)
+        else:
+            parents = [parent_population]
+        return self._evaluate_batch(list(population), parents, logger)
+
     def __call__(self, new_population, parent_population=None, logger=None):
-        if parent_population is None or not isinstance(new_population, (list, tuple)):
-            return super().__call__(new_population, logger=logger)
-        return self._evaluate_batch(new_population, parent_population, logger)
+        if isinstance(new_population, (list, tuple)):
+            return self.evaluate_population(new_population, parent_population, logger)
+        return super().__call__(new_population, logger=logger)
 
     def _evaluate_batch(self, new_population, parent_population, logger=None):
         from mohh.core.utilities.algorithm.MO import (
@@ -1977,32 +1993,54 @@ class PopulationEvaluator(OperatorEvaluator):
 
         for solution in population:
             key = (solution.code or "").strip()
+            entry = self._cache.get(key) or {}
             values = ranks_by_key.get(key) or []
             hvs = hv_by_key.get(key) or []
-            if not values or not hvs:
-                # Peor rango posible, pero positivo.
-                score = 0.0
-                feedback = ("GE population ranking: no valid fronts on any "
-                            "instance; assigned the worst positive score.")
+            if entry.get("error") is not None or not values or not hvs:
+                reason = entry.get("error") or (
+                    "no valid fronts on any instance")
+                # En modo GE el peor valor es +inf; en modo maximizador, 0.
+                score = float("inf") if self.raw_rank else 0.0
+                error = entry.get("exception") or ValueError(reason)
+                solution.set_scores(
+                    score,
+                    f"GE population ranking: {reason}; assigned the worst score.",
+                    error=error,
+                )
+                continue
+
+            mean_rank = float(np.mean(values))
+            mean_hv = float(np.mean(hvs))
+            k = len(unique)
+            solution.hv = mean_hv
+            solution.hv_values = hvs
+            best = min(values)
+            worst = max(values)
+            if self.raw_rank:
+                # Valor exacto de GE: rango medio, 1 = mejor.
+                score = mean_rank
+                feedback = (
+                    f"GE population ranking: mean rank {mean_rank:.4f} "
+                    f"(1 = best; lower is better) over {len(values)} instances. "
+                    f"Best instance rank {best}, worst {worst}, K={k}. "
+                    f"Reference point: population nadir, recomputed for this "
+                    f"evaluation."
+                )
             else:
-                mean_rank = float(np.mean(values))
-                # GE usa rango (menor = mejor). Para LLaMEA, que maximiza,
-                # se invierte sin hacerlo negativo:
-                # score = (K + 1) - mean_rank.
-                k = len(unique)
+                # Inversion solo para clientes que maximizan; mismo orden.
                 score = float(k + 1) - mean_rank
-                best = min(values)
-                worst = max(values)
                 feedback = (
                     f"GE population ranking: mean rank {mean_rank:.4f} "
                     f"(1 = best; lower is better). Fitness = "
                     f"(K + 1 - mean rank) = {score:.4f} with K={k}. "
                     f"Best instance rank {best}, worst {worst}, "
-                    f"over {len(values)} instances."
+                    f"over {len(values)} instances. Reference point: "
+                    f"population nadir, recomputed for this evaluation."
                 )
             solution.set_scores(score, feedback=feedback)
-            self._track_best(score, solution)
-            self.archive.update(key, score)
+            if not self.raw_rank:
+                self._track_best(score, solution)
+                self.archive.update(key, score)
 
         return new_population, parent_population
 
@@ -2019,8 +2057,12 @@ def build_population_evaluator(train_instances, mo_generations,
                                target_penalty=1.0,
                                require_target_family=False,
                                fitness_workers=1, model_names=None,
-                               mutations=None):
-    """Construye el evaluador batch con el fitness de la busqueda GE."""
+                               mutations=None, raw_rank=False):
+    """Construye el evaluador batch con el fitness de la busqueda GE.
+
+    `raw_rank=True` devuelve el rango medio GE sin invertir (1 = mejor, menor
+    es mejor). Es el modo que usa el bucle simple para comparar candidatos.
+    """
     return PopulationEvaluator(
         train_instances,
         mo_generations=mo_generations,
@@ -2044,6 +2086,7 @@ def build_population_evaluator(train_instances, mo_generations,
         fitness_workers=fitness_workers,
         model_names=model_names,
         mutations=mutations,
+        raw_rank=raw_rank,
     )
 
 

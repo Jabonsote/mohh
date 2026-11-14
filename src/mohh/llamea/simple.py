@@ -1,8 +1,9 @@
 """LLaMEA (1+1) con strong priors, siguiendo BAG (Huang et al., 2026).
 
-Un candidato por iteración, evaluación con el fitness de GE y reemplazo elitista.
-El prompt se apoya en el código de un prior fuerte y en una estrategia
-(refinar/crear); cada ``--prior-every`` iteraciones se refina un prior aleatorio.
+Un candidato por iteración, evaluación con el fitness exacto de GE (rango medio
+por población, 1 = mejor) y reemplazo elitista. El prompt se apoya en el código
+de un prior fuerte y en una estrategia (refinar/crear); cada
+``--prior-every`` iteraciones se refina un prior aleatorio.
 """
 import json
 import math
@@ -10,7 +11,7 @@ import os
 import random
 import time
 
-from mohh.llamea.fitness import build_evaluator, compile_operator
+from mohh.llamea.fitness import build_population_evaluator, compile_operator
 from mohh.llamea.parsing import parse_llm_response
 from mohh.llamea.priors import load_priors
 from mohh.llamea.vllm import extract_description
@@ -95,12 +96,12 @@ def build_prompt(parent_code, strategy, last_error="", score=None,
                 rows.append(f"- {item}")
         listed = "\n".join(rows)
         history_text = (
-            "The current population of algorithms already evaluated "
-            "(name, description, score) is:\n"
+            "The algorithms already evaluated "
+            "(name, description, score) are:\n"
             f"{listed or '- current best (Score: %.4f)' % score}\n\n"
             "The selected solution to update is:\n"
             f"{description or 'current best'} (Score: {score:.4f}; "
-            "1 is best, 6 is worst)\n\n"
+            "1 is best; lower is better)\n\n"
             "Do not repeat an operator already evaluated; change its mechanism.\n\n")
     prompt = (
         f"{ROLE}\n\nTASK\n{task}\n\n{history_text}"
@@ -143,25 +144,10 @@ def _write_json(path, data):
         json.dump(data, handle, indent=2, ensure_ascii=False)
 
 
-def _evaluate(evaluator, code):
-    candidate = Candidate(code)
-    try:
-        result = evaluator(candidate)
-    except Exception as error:  # noqa: BLE001
-        return float("-inf"), None, f"{type(error).__name__}: {error}"
-    if result is None or result.error is not None:
-        return float("-inf"), None, getattr(result, "error", "evaluation failed")
-    fitness = float(result.fitness)
-    if not math.isfinite(fitness):
-        return float("-inf"), None, "fitness is not finite"
-    hv = getattr(result, "hv", None)
-    return fitness, hv, None
-
-
 def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
     """Bucle (1+1) con strong priors. Devuelve el mejor código."""
     llm.operator_memory = 0
-    evaluator = build_evaluator(
+    evaluator = build_population_evaluator(
         train_paths,
         mo_generations=args.mo_generations,
         mo_population_size=args.mo_population_size,
@@ -169,9 +155,9 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
         model_name=args.solver,
         mutation=args.mutation,
         normalize=True,
-        bounds=bounds,
-        frame="stationary",
-        ranking=True,
+        bounds=None,
+        frame="ge",
+        raw_rank=True,
         diversity_feedback=False,
         repeat_penalty=1.0,
         patience=0,
@@ -189,15 +175,28 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
             random.shuffle(prior_queue)
         return prior_queue.pop()
 
-    best_code, best_fitness, best_hv = None, float("-inf"), None
-    for label, code in priors:
-        fitness, hv, error = _evaluate(evaluator, code)
-        logger.info("Prior %s: fitness=%s hv=%s error=%s",
-                    label, fitness, hv, error)
-        if fitness > best_fitness:
-            best_code, best_fitness, best_hv = code, fitness, hv
-    if best_code is None:
+    prior_solutions = [Candidate(code) for _, code in priors]
+    evaluator.evaluate_population(prior_solutions)
+    valid_priors = [
+        candidate for candidate in prior_solutions
+        if candidate.error is None and math.isfinite(float(candidate.fitness))
+    ]
+    if not valid_priors:
         raise RuntimeError("ningun prior pudo evaluarse")
+    best_solution = min(
+        valid_priors,
+        key=lambda candidate: (
+            candidate.fitness,
+            -(candidate.hv if candidate.hv is not None else float("-inf")),
+        ),
+    )
+    for (label, _), candidate in zip(priors, prior_solutions):
+        logger.info("Prior %s: rank=%s hv=%s error=%s",
+                    label, candidate.fitness, candidate.hv, candidate.error)
+
+    best_code = best_solution.code
+    best_fitness = float(best_solution.fitness)
+    best_hv = best_solution.hv
 
     best_generation = 0
     _write_text(os.path.join(exp_dir, "best_so_far.py"), best_code + "\n")
@@ -269,29 +268,56 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
                     f"parent={parent_label} strategy={strategy}\n")
             continue
 
-        fitness, hv, error = _evaluate(evaluator, code)
+        candidate_solution = Candidate(code)
+        try:
+            evaluator.evaluate_population([candidate_solution], [best_solution])
+        except Exception as error:  # noqa: BLE001
+            candidate_solution.set_scores(
+                float("inf"), f"{type(error).__name__}: {error}", error)
+
+        if candidate_solution.error is not None:
+            fitness = float("inf")
+            hv = None
+            error = candidate_solution.error
+        else:
+            fitness = float(candidate_solution.fitness)
+            hv = candidate_solution.hv
+            error = None
         last_error = (str(error) if error else "")
-        # El rango GE manda. Solo si hay empate exacto se usa HV como desempate:
-        # un candidato con el mismo rango pero mejor HV si avanza.
-        improved = fitness > best_fitness or (
-            fitness == best_fitness and hv is not None and best_hv is not None
-            and hv > best_hv + 1e-12)
+
+        # GE: menor rango es mejor. Solo si hay empate exacto se usa HV.
+        improved = (
+            error is None
+            and math.isfinite(fitness)
+            and (
+                fitness < best_solution.fitness
+                or (
+                    fitness == best_solution.fitness
+                    and hv is not None
+                    and best_solution.hv is not None
+                    and hv > best_solution.hv + 1e-12
+                )
+            )
+        )
         if improved:
-            best_code, best_fitness, best_hv = code, fitness, hv
+            best_solution = candidate_solution
             best_generation = iteration
-            _write_text(os.path.join(exp_dir, "best_so_far.py"), best_code + "\n")
+            _write_text(os.path.join(exp_dir, "best_so_far.py"), best_solution.code + "\n")
             _write_text(os.path.join(exp_dir, "llamea_best_operator.py"),
-                        best_code + "\n")
+                        best_solution.code + "\n")
             _write_json(os.path.join(exp_dir, "best_so_far.json"), {
                 "generation": iteration,
-                "fitness": best_fitness,
-                "hv": best_hv,
+                "fitness": best_solution.fitness,
+                "hv": best_solution.hv,
                 "name": "crossover",
                 "seed": args.seed,
             })
+        best_code = best_solution.code
+        best_fitness = float(best_solution.fitness)
+        best_hv = best_solution.hv
 
         description = extract_description(response or "")
-        if description:
+        if description and math.isfinite(fitness):
             history.append((description, fitness))
         _append_jsonl(candidates_path, {
             "iteration": iteration, "valid": bool(math.isfinite(fitness)),
@@ -311,6 +337,8 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
 
     _write_json(os.path.join(exp_dir, "llamea_best_info.json"), {
         "train_fitness": best_fitness,
+        "train_fitness_metric": "GE population mean rank",
+        "train_fitness_direction": "lower is better",
         "train_hv": best_hv,
         "best_generation": best_generation,
         "budget": args.budget,

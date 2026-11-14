@@ -264,20 +264,21 @@ mohh-run --full --models MOEAD --population-size 8 --generations 2 \
 
 ## LLaMEA search (LLM-guided operators)
 
-`mohh-llamea` reuses the **exact fitness of the GE search** (same instances,
-same inner MOEA, same normalized-hypervolume frame from
-`mohh/evaluation/experiment.py`, nadir fixed at `[1.1] * K`) but replaces the
-grammar with a local LLM. [LLaMEA](https://github.com/XAI-liacs/LLaMEA) prompts
-the model to write a Python `crossover(x, y)` operator, evaluates it as a pymoo
-`Crossover`, and feeds the hypervolume ranking back to refine the next prompt.
-The GE core is **not modified**: the LLM is injected through `solver.crossover`
-(`src/mohh/llamea/`).
+`mohh-llamea` reuses the **exact fitness of the GE search**: for each instance
+it consolidates the nondominated front of the current population, computes the
+population nadir, assigns each operator its hypervolume, and ranks those
+hypervolumes with `compute_rank`. The fitness is the mean GE rank across
+instances (1 = best), exactly as in `HyperHeuristic.compute_metrics`. The
+reference point is the population nadir and is recomputed on every evaluation;
+no fixed reference panel or mean HV is used.
 
-Because the HV is measured in the same consolidated frame (reference panel plus
-every evaluated candidate), the numbers are **comparable with the GE table**.
+[LLaMEA](https://github.com/XAI-liacs/LLaMEA) prompts the model to write a
+Python `crossover(x, y)` operator, evaluates it as a pymoo `Crossover`, and
+feeds that rank back to refine the next prompt. The GE core is **not modified**:
+the LLM is injected through `solver.crossover` (`src/mohh/llamea/`).
 
-Full background and design notes: [`docs/llamea-prompts/`](docs/llamea-prompts/)
-(`comparacion-justa.md`, `areas-de-mejora.md`, `pruebas-locales.md`).
+Cluster quick start: [`docs/llamea-prompts/CLUSTER.md`](docs/llamea-prompts/CLUSTER.md).
+Full background and design notes: [`docs/llamea-prompts/`](docs/llamea-prompts/).
 
 ### Install
 
@@ -372,343 +373,53 @@ python -m mohh.llamea.run --model <model> --base-url <url> --dry-run
 
 ### B. Cluster (ixachi) — one command
 
-Same Modules + local-conda methodology as the GE stage. Everything lives in
-LUSTRE; `$HOME` is wiped, compute nodes cannot see it and have **no internet**.
-
-The recommended path is a **single SLURM job** that serves the model with vLLM
-on `127.0.0.1` and runs the search against it, so there is nothing to
-coordinate. A login wrapper downloads the weights (the login has internet) and
-submits that job.
+The cluster path is one SLURM job: the login wrapper downloads/verifies the
+model, then submits a GPU job that serves vLLM on localhost and runs LLaMEA.
+Compute nodes have no internet and do not see `$HOME`; everything stays in the
+LUSTRE checkout and the persistent model root.
 
 ```bash
-# 0. Ya estas en el checkout del cluster (los nodos ven LUSTRE; $HOME no).
-cd /LUSTRE/mohh
+cd /LUSTRE/$USER/MOOHH-R
 git pull origin cluster
+WITH_VLLM=1 bash slurm/ixachi-setup-env.sh   # once, login node
 
-# 1. UNA VEZ: entorno local con vLLM (login, con internet).
-WITH_VLLM=1 bash slurm/ixachi-setup-env.sh
+PROFILE=list bash slurm/llamea-all.sh         # available profiles
+DRY_RUN=1 PROFILE=coder30b-awq bash slurm/llamea-all.sh
 
-# 2. UNA VEZ: catalogo de perfiles y comprobacion sin gastar GPU.
-PROFILE=list bash slurm/llamea-all.sh
-DRY_RUN=1 PROFILE=coder30b-awq-a10 bash slurm/llamea-all.sh
+# Smoke test: 20 queries, minimal test evaluation.
+PROFILE=smoke BUDGET=20 EVAL_TEST=1 TEST_INSTANCES=2 EVAL_REPEATS=1 \
+  WAIT=1 bash slurm/llamea-all.sh
 
-# 3. Busqueda (UN job GPU: vLLM + LLaMEA). A10 primero; ver mas abajo.
-PROFILE=coder30b-awq-a10 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-
-# Alias corto, mismo comportamiento.
-PROFILE=coder30b-awq-a10 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea.sh
-
-# Pipeline completo en el MISMO job: busqueda + test + comparacion pareada
-# contra OX/PBX/PMX/CX/ERX (11 repeticiones, mismo marco).
-PROFILE=coder30b-awq-a10 GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 \
-  bash slurm/llamea-all.sh
-
-# Ablacion: refine/redesign original sin el combine conductual.
-COMBINE=0 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-
-# Opcional: esperar en el login y ver el final del log.
-WAIT=1 PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh
-
-# 4. Monitor (el comando anterior ya imprime el JobID).
-squeue --user=javier.ramirez
-tail -f logs/llamea-single-*.out        # servidor + busqueda por generacion
-cat logs/llamea-single-*.err            # vacio = limpio
-tail -f results/searches/<EXPERIMENT_NAME>/progress.txt   # mejor hasta ahora
-```
-
-If the model is missing, the login wrapper downloads it **before** submitting.
-The GPU job never downloads: it fails fast with the exact command to run on the
-login. This avoids spending a GPU allocation (and queue time) on a node that has
-no internet. `DRY_RUN=1` prints the `sbatch` command without submitting.
-
-#### Desde `/LUSTRE/mohh`: puesta a punto y ejemplos por GPU (A10 primero)
-
-Todo lo de abajo asume que ya estas en el checkout del cluster:
-
-```bash
-cd /LUSTRE/mohh
-git pull origin cluster
-```
-
-**Puesta a punto (una sola vez, en el nodo de login).** El login tiene internet;
-los nodos de computo no. `llamea-all.sh` crea `./.conda-env` si falta,
-verifica/descarga el modelo en la raiz persistente y envia **un solo** job GPU:
-
-```bash
-module load python/miniforge
-WITH_VLLM=1 bash slurm/ixachi-setup-env.sh   # crea .conda-env con vLLM
-PROFILE=list bash slurm/llamea-all.sh        # catalogo de perfiles
-python scripts/mohh_models.py root           # raiz persistente de pesos
-```
-
-**Comprobacion sin gastar GPU.** `DRY_RUN=1` imprime el `sbatch` exacto
-(constraint, CPUs, memoria) sin enviar nada:
-
-```bash
-DRY_RUN=1 PROFILE=coder30b-awq-a10 bash slurm/llamea-all.sh
-# -> sbatch ... --constraint="A10" --cpus-per-task=16 --mem=64G ...
-```
-
-`slurm/llamea-single.slrm` trae `#SBATCH --constraint="A100|H100"`, pero
-`llamea-all.sh` **siempre** pasa `--constraint="$CONSTRAINT"`; la opcion de
-linea de comandos gana, asi que los perfiles A10 se programan en A10.
-
-**A10 24 GB (lo mas probable).** Tres opciones, de mas segura a mas ambiciosa:
-
-| Perfil | Modelo | VRAM | Contexto | Cuando usarlo |
-|---|---|---:|---:|---|
-| `a10-quant` | Qwen2.5-Coder-14B-AWQ | ~10 GB | 8k | Opcion segura; deja KV de sobra |
-| `coder8b` | Seed-Coder-8B-Instruct | ~16 GB | 8k | Mejor BigCodeBench entre los ~8B |
-| `coder30b-awq-a10` | Qwen3-Coder-30B-A3B-AWQ | ~18 GB | 8k | Mas capacidad; justo de VRAM |
-
-```bash
-# A10: la opcion segura
-PROFILE=a10-quant GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-
-# A10: mejor 8B
-PROFILE=coder8b GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-
-# A10: 30B/3B (si hay OOM, baja el contexto)
-PROFILE=coder30b-awq-a10 MAX_MODEL_LEN=4096 GENERATIONS=1000 EVAL_TEST=1 \
+# Normal search.
+PROFILE=coder30b-awq GENERATIONS=1000 EVAL_TEST=1 \
   bash slurm/llamea-all.sh
 ```
 
-`coder30b-awq-a10` ocupa ~18 GB de 24 GB. Si vLLM falla al arrancar por KV
-cache/OOM, baja `MAX_MODEL_LEN` (8192 → 4096) o `GPU_MEM_UTIL` (0.90 → 0.85);
-si sigue, usa `a10-quant` o `coder8b`.
+The validated path is `SIMPLE=1`: `NPARENTS=1`, `NOFFSPRING=1`,
+`BUDGET=GENERATIONS`, `COMBINE=0`. The job defaults to `MO_GENERATIONS=300`,
+`MO_POPULATION_SIZE=105`, `CPUS=32`, `MEM=96G`, and
+`FITNESS_WORKERS=CPUS-1`. `COMPARE=1` adds the paired classical comparison in
+the same job and is expensive; use it for the final table.
 
-**A100 40 GB.**
-
-```bash
-PROFILE=coder30b-awq   GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh  # recomendado
-PROFILE=glm47-flash-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh # razonamiento/matematicas
-PROFILE=a100-fp16      GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh  # 14B fp16
-PROFILE=big-quant      GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh  # fallback probado
-```
-
-**H100 80 GB.**
+Profiles: `coder30b-awq` (A100/H100), `glm47-flash-awq` (A100/H100,
+reasoning/code), `big-quant` (proven fallback), `coder30b-fp8` and
+`coder-next-awq` (H100), `coder30b-awq-a10`, `a10-quant`, `coder8b` (A10), and
+`smoke` (pipeline test). Use an explicit profile; do not rely on the default.
 
 ```bash
-PROFILE=coder30b-fp8  GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh   # FP8 nativo
-PROFILE=coder-next-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh  # 80B/3B
-PROFILE=h100-fp16     GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh   # 32B fp16
+squeue --user=$USER
+tail -f logs/llamea-single-*.out
+tail -f logs/llamea-single-*.err
+tail -f results/searches/<EXPERIMENT_NAME>/progress.txt
 ```
 
-**Cualquier GPU (prueba de humo).**
+Results go to `results/searches/<EXPERIMENT_NAME>/` (`progress.txt`,
+`llamea_best_operator.py`, `llamea_best_info.json`, `candidates.jsonl`,
+`llm_requests.jsonl`, logs). `COMPARE=1` writes to `results/evaluations/`.
+`results/*` is git-ignored.
 
-```bash
-PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh
-# y esperar el final en el login:
-WAIT=1 PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh
-```
-
-**Como saber que funciona.**
-
-1. `squeue --user=javier.ramirez` muestra el job en `gpu` (primero `PD`, luego `R`).
-2. `logs/llamea-single-<job>.err` debe quedar vacio; ahi aparecen los fallos.
-3. `logs/llamea-single-<job>.out` debe mostrar `Uvicorn running on http://127.0.0.1:8000`
-   y luego `[gen N] best=... valid=...`.
-4. `results/searches/<EXPERIMENT_NAME>/progress.txt` avanza por generacion.
-5. Al terminar: `llamea_best_operator.py`, `llamea_best_info.json`,
-   `report.md`, `evolution.png`, `generations.csv` y `fronts/`.
-
-**Problemas tipicos.**
-
-| Sintoma | Causa / solucion |
-|---|---|
-| `no hay 'module' ni .conda-env/` | Lo enviaste desde un nodo de computo. Ejecuta el wrapper en el **login**. |
-| `'...' no esta en la raiz persistente` | El modelo no se bajo. En el login: `python scripts/mohh_models.py download <modelo>` o usa `llamea-all.sh` (lo baja solo). |
-| Job en `PD` eternamente | El `constraint` no tiene nodos libres. Prueba `PROFILE=a10-quant` (A10) o `PROFILE=smoke` (`A100|A10|H100`). |
-| OOM / KV cache en A10 | `MAX_MODEL_LEN=4096` o `GPU_MEM_UTIL=0.85`; si no, `a10-quant`. |
-| vLLM no carga el AWQ | Cuantizacion de comunidad: verifica con `python scripts/mohh_models.py verify <modelo>` y cae a `big-quant`/`a10-quant`. |
-| Nada en `$HOME` | Correcto: `$HOME` se borra y los nodos no lo ven. Todo va a LUSTRE. |
-
-
-#### Defaults and sizing for a 1000-generation run
-
-`GENERATIONS` is **1000**; the wrapper derives
-`BUDGET = GENERATIONS * NOFFSPRING + NPARENTS` (2005 with the defaults), so the
-job really runs 1000 LLaMEA iterations rather than 1000 candidate evaluations.
-The single job requests one GPU and **16 CPUs** (not 24): inference is GPU-bound
-and the internal MOEA is sequential, so extra CPUs only make the queue wait longer.
-It keeps 4 OpenMP threads for vLLM/tokenization and one BLAS thread for the
-search.
-
-| Parameter | Cluster default | Why |
-|---|---|---|
-| `GENERATIONS` | `1000` | Real LLaMEA iterations |
-| `NPARENTS` / `NOFFSPRING` | `5` / `2` | Population large enough for behavioral combine; two children per generation |
-| `BUDGET` | `2005` (derived) | Evaluation budget; `BUDGET` overrides the derivation |
-| `COMBINE` | `1` | Own behavioral two-parent recombination (see below) |
-| `BEHAVIORAL_PARENTS` / `NOVELTY_WEIGHT` | `1` / `0.5` | Focal parent chosen by HV + behavioral novelty |
-| `TARGET_PENALTY` / `REQUIRE_TARGET_FAMILY` | `1.0` / `0` | Validate child against target family; `1.0` is feedback-only |
-| `PROFILE` | `big-quant` (Qwen2.5-Coder-32B-AWQ) | Proven fallback; on A100/H100 prefer `glm47-flash-awq` for reasoning/math/code or `coder30b-awq` / `coder30b-fp8`; `coder-next-awq` for the 80B/3B on H100 |
-| `CPUS` / `MEM` | `16` / `64G` | GPU-bound job; enough for vLLM and the sequential MOEA |
-| `TEMPERATURE` / `TOP_P` / `TOP_K` | `0.7` / `0.8` / `20` | Exploration without chaotic sampling |
-| `SAMPLING_REPETITION_PENALTY` | `1.05` | Mild anti-anchoring |
-| `MAX_TOKENS` / `OPERATOR_MEMORY` | `4096` / `12` | Full operator code; bounded recent-mechanism memory |
-| `MAX_MODEL_LEN` / `GPU_MEM_UTIL` | `16384` / `0.90–0.92` | Prompt + 4k response with KV headroom |
-| `MO_GENERATIONS` / `MO_POPULATION_SIZE` | `30` / `30` | Internal MOEA effort per candidate |
-| `TRAIN_INSTANCES` | `8` | Training set used by every candidate |
-| `PATIENCE` | `0` | Keep running all 1000 generations |
-| `EVAL_TEST` / `COMPARE` | off / off | Add them for the final held-out evaluation and paired baselines |
-
-#### Behavioral combine (own extension, not original LLaMEA)
-
-LLaMEA 1.4 lets an `Operator` declare two parents, but it selects both by
-fitness. That tends to combine similar individuals. When `COMBINE=1`, this
-repository adds three things without modifying LLaMEA or the GE core:
-
-1. the focal parent is chosen by a tournament on HV **plus behavioral
-   novelty**, not fitness alone;
-2. the second parent is the most behaviorally distant one (and, if available,
-   from the target family), so the pair actually carries different mechanisms;
-3. the child is measured on fixed parent pairs and checked against the target
-   family (the least-represented family). The result is logged as
-   `target_family_hit`; `TARGET_PENALTY=0.9` applies a ranking-only penalty and
-   `REQUIRE_TARGET_FAMILY=1` rejects a miss before spending the internal MOEA.
-
-The raw HV is never modified by this check. The target-family evidence is in
-`diversity.jsonl` and `diversity.json`; the aggregate hit rate is in
-`llamea_best_info.json`. Use `COMBINE=0` for the original refine/redesign
-baseline, or `BEHAVIORAL_PARENTS=0` to isolate the target-family check.
-
-The server adds `--max-num-seqs 4`, `--enable-prefix-caching` and disables
-vLLM request logs (`--no-enable-log-requests` in vLLM 0.32; the old
-`--disable-log-requests` is used only if that version supports it): LLaMEA sends
-one request at a time, prompts share a long preamble, and the full prompts are
-already saved under `prompts/`.
-
-For a 1000-generation run with the final evidence, use one of:
-
-```bash
-# A100 40 GB
-PROFILE=coder30b-awq GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
-
-# A100 40 GB / H100 80 GB: GLM-4.7-Flash, reasoning + math + code
-PROFILE=glm47-flash-awq GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
-
-# H100 80 GB: the larger 80B/3B coder
-PROFILE=coder-next-awq GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
-
-# H100 80 GB
-PROFILE=coder30b-fp8 GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
-
-# Fallback known-good on A100/H100
-PROFILE=big-quant GENERATIONS=1000 EVAL_TEST=1 COMPARE=1 bash slurm/llamea-all.sh
-```
-
-`COMPARE=1` runs 11 paired repetitions against OX/PBX/PMX/CX/ERX in the same
-job. If you only want the search, omit it. `CPUS=24` and `MEM=...` remain
-available as overrides, but are not needed.
-
-#### GPU/model profiles (big models)
-
-`slurm/llamea-gpu-profile.sh` picks the model and, for some profiles, its vLLM
-arguments (`coder30b-awq` forces `awq_marlin`; `coder30b-fp8` uses
-`--kv-cache-dtype fp8`; `glm47-flash-awq` adds
-`--reasoning-parser glm45`). Override with
-`MODEL=...`, `CONSTRAINT=...`, `MAX_MODEL_LEN=...`, `GPU_MEM_UTIL=...`,
-`VLLM_ARGS=...`; `PROFILE=list` prints the catalog.
-
-Si lo mas probable es una **A10 24 GB**, usa la tabla de arriba (seccion
-"Desde `/LUSTRE/mohh`"): `a10-quant` (segura), `coder8b` (mejor 8B) o
-`coder30b-awq-a10` (30B/3B, justo de VRAM). La tabla completa:
-
-| `PROFILE` | Model | VRAM | GPU / contexto |
-|---|---|---|---|
-| `coder30b-awq-a10` | `QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ` | ~18 GB | **A10** 24 GB, 8k |
-| `coder8b` | `ByteDance-Seed/Seed-Coder-8B-Instruct` | ~16 GB | **A10** 24 GB, 8k |
-| `a10-quant` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | ~10 GB | **A10** 24 GB, 8k |
-| `big-quant` (default) | `Qwen/Qwen2.5-Coder-32B-Instruct-AWQ` | ~19–21 GB | A100 40 GB, H100 80 GB |
-| `coder30b-awq` | `QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ` | ~18 GB | A100 40 GB, H100 80 GB |
-| `coder30b-fp8` | `Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8` | ~31 GB | H100 80 GB |
-| `glm47-flash-awq` | `QuantTrio/GLM-4.7-Flash-AWQ` | ~20 GB | A100 40 GB, H100 80 GB (30B/3B; vLLM main) |
-| `coder-next-awq` | `qtum/Qwen3-Coder-Next-AWQ` | ~42 GB | H100 80 GB (80B/3B; ~30 GB KV) |
-| `h100-fp16` | `Qwen/Qwen2.5-Coder-32B-Instruct` | ~65 GB | H100 80 GB |
-| `a100-fp16` | `Qwen/Qwen2.5-Coder-14B-Instruct` | ~29 GB | A100 40 GB |
-| `smoke` | `Qwen/Qwen2.5-1.5B-Instruct` | ~3 GB | any (smoke tests only) |
-
-Evidence for the choice (HumanEval+/BigCodeBench and quantization studies) and
-the per-GPU recommendation are in [`modelos.md`](modelos.md) §1. In short:
-Qwen3-Coder-30B-A3B has 32B-class HumanEval+ (89.0) with only 3.3B active
-parameters, so it is much faster for 1000-generation runs; `big-quant` remains
-the proven fallback. `glm47-flash-awq` is the reasoning/math/code option:
-GLM-4.7-Flash reports AIME25 91.6, GPQA 75.2, LiveCodeBench v6 64.0 and
-SWE-bench Verified 59.2 with only 3B active parameters. It needs a recent vLLM
-(`glm4_moe_lite` support; the AWQ card was tested with `vllm==0.14.0rc2`) and
-the profile passes `--reasoning-parser glm45`, so the thinking is stored in
-`llm_requests.jsonl`. For the local RTX 3060 12 GB, use
-`unsloth/GLM-Z1-9B-0414-GGUF` Q4_K_M (~6.2 GB) with llama.cpp/Ollama; it is a
-9B reasoning model, not a replacement for the cluster model.
-`coder30b-awq` is a community AWQ — verify it before a long run and fall back to
-`big-quant` if vLLM fails to load it. `coder-next-awq` is
-the larger 80B/3B option (LiveCodeBench v6 58.9, EvalPlus 86.6): its W4A16 AWQ
-is ~42 GB and only fits an H100 80 GB; it is a candidate to test, not the
-default, because quantization raises its wikitext-2 perplexity from 7.74 to
-12.53.
-
-Examples:
-
-```bash
-# A10 24 GB (lo mas probable)
-PROFILE=a10-quant GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh      # segura
-PROFILE=coder8b GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh        # mejor 8B
-PROFILE=coder30b-awq-a10 MAX_MODEL_LEN=4096 GENERATIONS=1000 EVAL_TEST=1 \
-  bash slurm/llamea-all.sh                                                   # 30B/3B, justo
-
-# A100 40 GB
-PROFILE=coder30b-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-PROFILE=glm47-flash-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh # reasoning
-PROFILE=a100-fp16 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-
-# H100 80 GB
-PROFILE=coder30b-fp8 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-PROFILE=coder-next-awq GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh # 80B/3B
-PROFILE=h100-fp16 GENERATIONS=1000 EVAL_TEST=1 bash slurm/llamea-all.sh
-
-# Cualquier GPU / sanity
-PROFILE=smoke BUDGET=20 EVAL_TEST=1 bash slurm/llamea-all.sh
-PROFILE=list bash slurm/llamea-all.sh                                        # catalog
-```
-
-#### Alternative (advanced): a persistent server + separate searches
-
-The normal path is the single GPU job above. Only use two jobs when you will
-run **many** searches against the same loaded model (avoids reloading the 32B
-weights for every run). It requires two queue waits, so it is not the default.
-
-```bash
-# Server (long-lived GPU job).
-sbatch slurm/llamea-vllm-server.slrm
-tail -f llamea-vllm-*.out               # wait for "Uvicorn running on ...:8000"
-
-# Each search points at the server node (it can autodetect it by JobID).
-BUDGET=1000 EVAL_TEST=1 LLAMEA_SERVER_JOBID=<jobid-vllm> \
-  sbatch slurm/llamea-generate.slrm
-```
-
-`slurm/llamea-full-chain.sh` now redirects to the single-job command unless you
-set `ALLOW_TWO_JOBS=1`; this prevents accidentally submitting two chained jobs
-and waiting twice in the queue.
-
-Extra environment knobs for the search jobs: `SOLVER`, `MO_GENERATIONS`,
-`MO_POPULATION_SIZE`, `TEMPERATURE` (0.7 in the single job), `TOP_P` (0.8),
-`TOP_K` (20), `SAMPLING_REPETITION_PENALTY` (1.05), `MAX_TOKENS` (4096),
-`OPERATOR_MEMORY` (12), `MUTATION=1`, `COMMA=1`, `REFINE_ONLY=1`,
-`NO_SAVE_FRONTS=1`, `REPEAT_PENALTY`, `PATIENCE`, `PARENT_SELECTION`,
-`NICHING`, `EVAL_REPEATS` (11), `CATEGORY`, `EXPERIMENT_NAME`, `SEED`. Add
-`COMPARE=1` to run the paired comparison against the classics in the same job
-(`COMPARE_REPEATS=11`, `COMPARE_SPLIT=test`). The comparison includes
-one-child and two-child classic variants and treats a failed operator/instance
-as HV 0; use `COMPARE_FAIL_POLICY=exclude|abort` to change that. For the full GE
-protocol (3 solvers × 2 mutation modes × 300/105), set
-`COMPARE_GE_PROTOCOL=1`; this is expensive and intended for the final table.
-
-`--operator-memory N` appends the last `N` generated mechanisms to the prompt
-and asks the model not to repeat them; `--repeat-penalty` still penalizes
-repeated code in the ranking. `--sampling-repetition-penalty` is the vLLM
-sampler's `repetition_penalty`, a different knob.
+Minimal runbook, profile table and troubleshooting:
+[`docs/llamea-prompts/CLUSTER.md`](docs/llamea-prompts/CLUSTER.md).
 
 ### C. Compare discovered operators against the classics
 

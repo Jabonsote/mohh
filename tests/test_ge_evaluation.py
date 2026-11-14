@@ -155,6 +155,53 @@ def test_population_evaluator_returns_positive_hv(monkeypatch):
     assert "Fitness" in first.feedback or "score" in first.feedback
 
 
+def test_population_evaluator_raw_rank_matches_ge(monkeypatch):
+    """`raw_rank=True` devuelve rango 1 = mejor, sin invertir ni promediar HV."""
+    import mohh.core.utilities.algorithm.MO as mo
+    from mohh.llamea.fitness import PopulationEvaluator
+
+    evaluator = PopulationEvaluator([], 1, 1, normalize=True, raw_rank=True)
+    monkeypatch.setattr(evaluator, "_ensure_instances", lambda: [None])
+
+    def fake_evaluate(solution, compute_hypervolume):
+        first = 1.0 if solution.code == "better" else 0.0
+        return {
+            "fronts": [np.array([[first, 1.0 - first], [1.0 - first, first]])],
+            "error": None,
+        }
+
+    # HV ficticio: "better" tiene mas HV; el nadir se calcula igual.
+    monkeypatch.setattr(evaluator, "_evaluate_code", fake_evaluate)
+    monkeypatch.setattr(
+        mo, "compute_hypervolume",
+        lambda ref, front: 2.0 if front[0, 0] == 1.0 else 1.0,
+    )
+
+    class Solution:
+        def __init__(self, code):
+            self.code = code
+            self.fitness = None
+            self.feedback = ""
+            self.error = None
+            self.hv = None
+            self.hv_values = None
+
+        def set_scores(self, fitness, feedback="", error=None):
+            self.fitness = fitness
+            self.feedback = feedback
+            self.error = error
+
+    better = Solution("better")
+    worse = Solution("worse")
+    evaluator.evaluate_population([better, worse])
+
+    assert better.fitness == pytest.approx(1.0)
+    assert worse.fitness == pytest.approx(2.0)
+    assert better.hv == pytest.approx(2.0)
+    assert worse.hv == pytest.approx(1.0)
+    assert "lower is better" in better.feedback
+
+
 def test_build_population_evaluator_constructs():
     from mohh.llamea.fitness import build_population_evaluator
     evaluator = build_population_evaluator([], 1, 1)

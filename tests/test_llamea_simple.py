@@ -69,17 +69,21 @@ class FakeLLM:
         return self.responses.pop(0)
 
 
+class _FakeEvaluator:
+    def evaluate_population(self, population, parent_population=None, **kwargs):
+        for candidate in list(population) + list(parent_population or []):
+            code = candidate.code or ""
+            if "BEST" in code:
+                fitness = 1.0
+            elif "BAD" in code:
+                fitness = 3.0
+            else:
+                fitness = 2.0
+            candidate.set_scores(fitness)
+
+
 def _fake_builder(*args, **kwargs):
-    def evaluate(candidate):
-        code = candidate.code or ""
-        if "BEST" in code:
-            fitness = 1.0
-        elif "BAD" in code:
-            fitness = 0.1
-        else:
-            fitness = 0.5
-        return SimpleNamespace(fitness=fitness, error=None)
-    return evaluate
+    return _FakeEvaluator()
 
 
 def test_load_priors_returns_code():
@@ -158,8 +162,26 @@ def crossover(x, y):
     np.testing.assert_array_equal(X, before)
 
 
+def test_run_simple_uses_ge_population_rank(tmp_path, monkeypatch):
+    captured = {}
+
+    def builder(*args, **kwargs):
+        captured.update(kwargs)
+        return _FakeEvaluator()
+
+    monkeypatch.setattr(simple, "build_population_evaluator", builder)
+    monkeypatch.setattr(simple, "load_priors", lambda: [("prior", VALID)])
+    simple.run_simple(
+        _args(budget=0), str(tmp_path), logging.getLogger("test-ge-rank"),
+        FakeLLM([]), [],
+    )
+    assert captured["raw_rank"] is True
+    assert captured["frame"] == "ge"
+    assert captured["bounds"] is None
+
+
 def test_run_simple_small_model_failures_and_best(tmp_path, monkeypatch):
-    monkeypatch.setattr(simple, "build_evaluator", _fake_builder)
+    monkeypatch.setattr(simple, "build_population_evaluator", _fake_builder)
     monkeypatch.setattr(simple, "load_priors", lambda: [("prior", VALID)])
     llm = FakeLLM([
         NOT_PERMUTATION,       # filtro mínimo: inválido
@@ -183,7 +205,7 @@ def test_run_simple_small_model_failures_and_best(tmp_path, monkeypatch):
 
 
 def test_run_simple_keeps_global_best(tmp_path, monkeypatch):
-    monkeypatch.setattr(simple, "build_evaluator", _fake_builder)
+    monkeypatch.setattr(simple, "build_population_evaluator", _fake_builder)
     monkeypatch.setattr(simple, "load_priors", lambda: [("prior", VALID)])
     llm = FakeLLM([BEST, BAD, BAD])
     logger = logging.getLogger("test-simple-keep")
@@ -193,7 +215,7 @@ def test_run_simple_keeps_global_best(tmp_path, monkeypatch):
 
 
 def test_run_simple_prior_injection_changes_parent(tmp_path, monkeypatch):
-    monkeypatch.setattr(simple, "build_evaluator", _fake_builder)
+    monkeypatch.setattr(simple, "build_population_evaluator", _fake_builder)
     priors = [("p1", VALID), ("p2", BEST)]
     monkeypatch.setattr(simple, "load_priors", lambda: priors)
     llm = FakeLLM([VALID, VALID])
@@ -211,14 +233,13 @@ def test_build_prompt_includes_previous_error():
 
 
 def test_run_simple_uses_hv_only_as_tiebreak(tmp_path, monkeypatch):
-    def builder(*args, **kwargs):
-        def evaluate(candidate):
-            code = candidate.code or ""
-            hv = 2.0 if "BEST" in code else 1.0
-            return SimpleNamespace(fitness=1.0, error=None, hv=hv)
-        return evaluate
+    class TieEvaluator:
+        def evaluate_population(self, population, parent_population=None, **kwargs):
+            for candidate in list(population) + list(parent_population or []):
+                candidate.set_scores(1.0)
+                candidate.hv = 2.0 if "BEST" in (candidate.code or "") else 1.0
 
-    monkeypatch.setattr(simple, "build_evaluator", builder)
+    monkeypatch.setattr(simple, "build_population_evaluator", lambda *a, **k: TieEvaluator())
     monkeypatch.setattr(simple, "load_priors", lambda: [("prior", VALID)])
     llm = FakeLLM([BEST])
     logger = logging.getLogger("test-simple-tiebreak")
