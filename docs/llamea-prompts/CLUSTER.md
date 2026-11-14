@@ -21,6 +21,18 @@ Perfiles:
 PROFILE=list bash slurm/llamea-all.sh
 ```
 
+GPU libres por nodo:
+
+```bash
+for n in $(sinfo -p gpu -h -N -o "%N"); do
+  echo "== $n"
+  scontrol show node "$n" | grep -E "State=|Gres=|AllocTRES="
+done
+```
+
+`Gres` es el total del nodo; `AllocTRES` lo ocupado. `MIXED` puede tener GPU
+libre; `IDLE` está libre; `DOWN` no se puede usar.
+
 A100/H100: `coder30b-awq`, `glm47-flash-awq`, `big-quant`.
 H100: `coder30b-fp8`, `coder-next-awq`.
 A10: `coder30b-awq-a10`, `a10-quant`, `coder8b`.
