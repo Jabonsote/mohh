@@ -35,8 +35,24 @@ libre; `IDLE` está libre; `DOWN` no se puede usar.
 
 A100/H100: `coder30b-awq`, `glm47-flash-awq`, `big-quant`.
 H100: `coder30b-fp8`, `coder-next-awq`.
-A10: `coder30b-awq-a10`, `a10-quant`, `coder8b`.
+A10: `coder30b-awq-a10`, `qwen3-8b-awq`, `a10-quant`, `coder8b`.
 Pasa `PROFILE` explícito.
+
+Si vLLM muere al arrancar con `NVMLError_InvalidArgument` o `No CUDA
+runtime is found`, revisa el mapeo de GPU dentro del job:
+
+```bash
+srun --jobid=<JOBID> --overlap bash -lc '
+  echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}";
+  nvidia-smi -L;
+  .conda-env/bin/python -c "import torch; print(torch.cuda.is_available(), torch.cuda.device_count())"
+'
+```
+
+Si el job solo ve una GPU y `CUDA_VISIBLE_DEVICES` es distinto de `0`,
+prueba `CUDA_VISIBLE_DEVICES=0`; en A100 `graphos1` Slurm puede asignar la GPU
+1 y vLLM 0.32 falla al mapear ese índice físico. Para evitarlo, usa una A10
+(`qwen3-8b-awq`) o normaliza la variable en el job.
 
 | Variable | Uso |
 |---|---|
@@ -51,7 +67,8 @@ Pasa `PROFILE` explícito.
 
 `SIMPLE=1` es el modo actual: `BUDGET=GENERATIONS`, 1+1 y fitness de GE (rango
 medio por población, 1 = mejor). `COMPARE=1` añade la comparación en el mismo
-job.
+job. En `SIMPLE=1`, `EVAL_TEST=1` no llega a ejecutar la evaluación final:
+`run_simple` retorna antes; el job solo entrena.
 
 Resultados: `results/searches/<EXPERIMENT_NAME>/`. Ahí están `progress.txt`,
 `llamea_best_operator.py`, `candidates.jsonl` y `llm_requests.jsonl`.
