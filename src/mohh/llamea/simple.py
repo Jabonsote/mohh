@@ -629,6 +629,9 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
     })
     if hasattr(llm, "usage_snapshot"):
         _write_json(os.path.join(exp_dir, "tokens.json"), llm.usage_snapshot())
+    # El CrystalBLEU se mide en segundo plano: se espera al hilo para que el
+    # resumen final tenga el valor (si no, sale `null`).
+    diversity_pool.shutdown(wait=True)
     # Resumen consolidado final (tokens, exitosos/fallos, diversidad, mejor).
     _write_json(summary_path, _summary(args, exp_dir, evaluator, llm, state))
     logger.info("Fin: best fitness=%s en iteracion %s", best_fitness, best_generation)
