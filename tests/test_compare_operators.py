@@ -19,7 +19,7 @@ def _frame():
 
 
 def _operators():
-    return [("a", None, "discovered"), ("b", None, "classic")]
+    return [("a", None, "discovered", "code"), ("b", None, "classic", "ox")]
 
 
 def test_failed_front_counts_as_zero_or_is_excluded():

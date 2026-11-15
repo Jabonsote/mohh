@@ -37,8 +37,10 @@ Salida: `results/evaluations/<name>/evaluation.json` y `report.md`.
 
 import argparse
 import json
+import multiprocessing
 import os
 import time
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 
@@ -47,6 +49,7 @@ from mohh.core.utilities.instance_utils import instance_paths
 from mohh.llamea.fitness import (
     NADIR_FACTOR,
     _consolidated_frame,
+    _solve_front_namespace,
     build_evaluator,
     clip_to_reference_box,
     compile_operator,
@@ -65,6 +68,11 @@ from mohh.llamea.statistics import (
 def load_operator(spec):
     """`nombre=ruta.py`, `nombre=classic:ox` o `nombre=classic2:ox`.
 
+    Devuelve `(nombre, namespace, kind, source)` donde `source` es lo necesario
+    para reconstruir el namespace en un worker de otro proceso (la clave del
+    clasico o el codigo del operador descubierto); el namespace en si no es
+    picklable (contiene `np` y funciones de `exec`).
+
     `classic2:ox` es el clasico devolviendo **dos** hijos, `(ox(x, y), ox(y, x))`:
     el mismo contrato que un operador que devuelve una tupla. Comparar un
     operador de dos hijos contra clasicos de un solo hijo no es justo, porque el
@@ -78,7 +86,7 @@ def load_operator(spec):
         key = source.split(":", 1)[1].strip()
         if key not in REFERENCE_OPERATORS:
             raise SystemExit(f"operador clasico desconocido: {key!r}")
-        return name, namespace_for(REFERENCE_OPERATORS[key]), "classic"
+        return name, namespace_for(REFERENCE_OPERATORS[key]), "classic", key
     if source.startswith("classic2:"):
         key = source.split(":", 1)[1].strip()
         if key not in REFERENCE_OPERATORS:
@@ -88,9 +96,42 @@ def load_operator(spec):
         def two_children(x, y):
             return single(x, y), single(y, x)
 
-        return name, namespace_for(two_children), "classic"
+        return name, namespace_for(two_children), "classic2", key
     with open(source) as handle:
-        return name, compile_operator(handle.read()), "discovered"
+        code = handle.read()
+    return name, compile_operator(code), "discovered", code
+
+
+def _solve_task(task):
+    """Worker picklable: evalua una instancia con un operador.
+
+    Reconstruye el namespace a partir de `source`/`kind` (el namespace no es
+    picklable) y corre el MOEA con la semilla/solver/mutacion dados. Devuelve
+    `(key, front, error)`; `error` es `None` si todo salio bien.
+    """
+    (key, source, kind, instance, seed, model_name, mutation,
+     instance_timeout) = task
+    try:
+        if kind == "classic":
+            ns = namespace_for(REFERENCE_OPERATORS[source])
+        elif kind == "classic2":
+            single = REFERENCE_OPERATORS[source]
+
+            def two_children(x, y):
+                return single(x, y), single(y, x)
+
+            ns = namespace_for(two_children)
+        else:
+            ns = compile_operator(source)
+        front = _solve_front_namespace(
+            instance, ns, seed=seed, model_name=model_name,
+            mutation=mutation, instance_timeout=instance_timeout,
+        )
+        if front is None:
+            raise RuntimeError("el MOEA no devolvio un frente")
+        return key, front, None
+    except Exception as error:  # noqa: BLE001 - se reporta y sigue
+        return key, np.empty((0, 0), dtype=float), f"{type(error).__name__}: {error}"
 
 
 def build_protocols(args):
@@ -126,57 +167,73 @@ def collect_fronts(operators, paths, args, protocols, existing=None):
     silenciosamente la instancia, que sesgaria la comparacion a favor del
     operador que falla.
 
+    Paraleliza sobre instancias con ``FITNESS_WORKERS`` procesos (default 1).
     Devuelve ``(fronts, failures)``; ``failures`` mapea la clave a un mensaje.
     """
     fronts = dict(existing or {})
     failures = {
         key: "fallo recuperado de fronts.npz"
         for key, front in fronts.items()
-        if front is not None and len(front) == 0
+        if front is None or len(front) == 0
     }
-    total = args.repeats * len(protocols) * len(operators) * len(paths)
-    done = len(fronts)
+    workers = max(1, int(os.environ.get("FITNESS_WORKERS", "1") or 1))
+
+    # Instancias por repeticion: dependen solo de la semilla (args.seed + rep),
+    # asi que son identicas en todos los protocolos de esa repeticion. Se
+    # construyen una vez para no repetir la carga en cada protocolo.
+    instances_by_rep = {}
+    instance_timeout = None
     for rep in range(args.repeats):
+        evaluator = build_evaluator(
+            paths,
+            mo_generations=args.mo_generations,
+            mo_population_size=args.mo_population_size,
+            seed=args.seed + rep,
+            model_name=protocols[0][0],
+            mutation=protocols[0][1],
+            normalize=False,
+        )
+        instances_by_rep[rep] = evaluator._ensure_instances()
+        instance_timeout = evaluator.instance_timeout
+
+    # Tareas pendientes (sin frentes ya calculados).
+    tasks = []
+    for rep in range(args.repeats):
+        instances = instances_by_rep[rep]
         for solver, mutation in protocols:
             protocol = protocol_name(solver, mutation)
-            # Una instancia (y una poblacion inicial) por repeticion,
-            # compartida por todos los operadores y protocolos: asi la
-            # comparacion es pareada de verdad.
-            evaluator = build_evaluator(
-                paths,
-                mo_generations=args.mo_generations,
-                mo_population_size=args.mo_population_size,
-                seed=args.seed + rep,
-                model_name=solver,
-                mutation=mutation,
-                normalize=False,
-            )
-            instances = evaluator._ensure_instances()
-            for name, namespace, _kind in operators:
-                reused = 0
+            for name, _ns, kind, source in operators:
                 for index, instance in enumerate(instances):
                     key = (protocol, name, rep, index)
                     if key in fronts:
-                        reused += 1
                         continue
-                    try:
-                        front = evaluator._solve_front(instance, namespace)
-                        if front is None:
-                            raise RuntimeError("el MOEA no devolvio un frente")
-                    except Exception as error:  # noqa: BLE001 - se reporta y sigue
-                        print(f"  AVISO rep={rep} {protocol} {name} "
-                              f"inst={index}: {error}")
-                        front = np.empty((0, 0), dtype=float)
-                        failures[key] = f"{type(error).__name__}: {error}"
-                    fronts[key] = front
-                    done += 1
-                if reused:
-                    print(f"  rep {rep + 1}/{args.repeats} [{protocol}]: "
-                          f"{name} reutilizado ({reused}/{len(instances)})",
-                          flush=True)
-                else:
-                    print(f"  rep {rep + 1}/{args.repeats} [{protocol}]: "
-                          f"{name} listo ({done}/{total})", flush=True)
+                    tasks.append((
+                        key, source, kind, instance,
+                        args.seed + rep, solver, mutation, instance_timeout,
+                    ))
+
+    if not tasks:
+        return fronts, failures
+
+    print(f"  Evaluando {len(tasks)} tareas con {workers} worker(s)...",
+          flush=True)
+    if workers > 1 and len(tasks) > 1:
+        try:
+            context = multiprocessing.get_context("forkserver")
+        except ValueError:  # pragma: no cover - plataformas sin forkserver
+            context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=min(workers, len(tasks)), mp_context=context
+        ) as pool:
+            results = list(pool.map(_solve_task, tasks))
+    else:
+        results = [_solve_task(task) for task in tasks]
+
+    for key, front, error in results:
+        fronts[key] = front
+        if error:
+            failures[key] = error
+            print(f"  AVISO {key}: {error}", flush=True)
     return fronts, failures
 
 
@@ -186,7 +243,7 @@ def shared_frame(fronts, operators, protocols, n_instances, repeats):
     for index in range(n_instances):
         pieces = [fronts.get((protocol_name(solver, mutation), name, rep, index))
                   for solver, mutation in protocols
-                  for name, _ns, _kind in operators
+                  for name, _ns, _kind, _src in operators
                   for rep in range(repeats)]
         pieces = [p for p in pieces if p is not None and len(p)]
         frames.append(_consolidated_frame(*pieces) if pieces else None)
@@ -207,7 +264,7 @@ def hv_values(fronts, operators, protocols, frames, repeats, failures=None,
     values = {}
     for solver, mutation in protocols:
         protocol = protocol_name(solver, mutation)
-        for name, _ns, _kind in operators:
+        for name, _ns, _kind, _src in operators:
             for rep in range(repeats):
                 row = []
                 for index, frame in enumerate(frames):
@@ -247,7 +304,7 @@ def hv_values(fronts, operators, protocols, frames, repeats, failures=None,
 def per_run_scores(values, operators, protocols, repeats):
     """HV medio por repeticion, promediando instancias y protocolos."""
     scores = {}
-    for name, _ns, _kind in operators:
+    for name, _ns, _kind, _src in operators:
         scores[name] = []
         for rep in range(repeats):
             cells = [value
@@ -322,7 +379,7 @@ def pairwise_design(fronts, rows, protocols, n_instances, repeats, failures=None
 
 def summarize(scores, operators):
     rows = []
-    for name, _ns, kind in operators:
+    for name, _ns, kind, _src in operators:
         values = [v for v in scores[name] if v is not None]
         if not values:
             rows.append({"operator": name, "kind": kind, "runs": 0})
@@ -363,7 +420,7 @@ def rank_stability(scores, operators):
     instancias): si el primero cambia mucho de una repeticion a otra, el ruido
     domina la senal y ninguna mejora por debajo de `mdd_top_two` es creible.
     """
-    names = [name for name, _ns, _kind in operators
+    names = [name for name, _ns, _kind, _src in operators
              if any(v is not None for v in scores.get(name, []))]
     if len(names) < 2:
         return None
@@ -494,7 +551,7 @@ def write_report(path, name, args, rows, comparisons, frames, scores, values,
                   "El test principal promedia los protocolos; esta tabla muestra si "
                   "la conclusion depende de un solver o de la mutacion.", "",
                   "| Operador | Protocolo | Media |", "|---|---|---:|"]
-        for name, _ns, _kind in operators:
+        for name, _ns, _kind, _src in operators:
             for solver, mutation in protocols:
                 protocol = protocol_name(solver, mutation)
                 cells = [value
@@ -550,11 +607,11 @@ def write_report(path, name, args, rows, comparisons, frames, scores, values,
                   f"{2 / 2 ** args.repeats:.4f}.", ""]
 
     lines += ["## HV por instancia (media de protocolos y repeticiones)", ""]
-    header = "| Instancia | " + " | ".join(name for name, _n, _k in operators) + " |"
+    header = "| Instancia | " + " | ".join(name for name, _n, _k, _src in operators) + " |"
     lines += [header, "|---|" + "---:|" * len(operators)]
     for index in range(len(args.paths)):
         cells = []
-        for name, _ns, _kind in operators:
+        for name, _ns, _kind, _src in operators:
             vals = [values[(protocol_name(solver, mutation), name, rep)][index]
                     for solver, mutation in protocols
                     for rep in range(args.repeats)
@@ -627,16 +684,16 @@ def main():
     all_paths = instance_paths(train=args.split == "train")
     args.paths = _select_instances(all_paths, args.instances, args.seed)
     operators = [load_operator(spec) for spec in args.operator]
-    names = [name for name, _ns, _kind in operators]
+    names = [name for name, _ns, _kind, _src in operators]
     duplicated = {name for name in names if names.count(name) > 1}
     if duplicated:
         raise SystemExit(f"nombres de operador repetidos: {sorted(duplicated)}")
 
-    name = args.name or "vs_".join(n for n, _ns, _k in operators)
+    name = args.name or "vs_".join(n for n, _ns, _k, _src in operators)
     out_dir = os.path.join(args.out, name)
     os.makedirs(out_dir, exist_ok=True)
 
-    print(f"Operadores: {', '.join(n for n, _a, _b in operators)}")
+    print(f"Operadores: {', '.join(n for n, _a, _b, _src in operators)}")
     print(f"Instancias: {args.split} ({len(args.paths)}), repeticiones: {args.repeats}")
     print("Protocolos: " + ", ".join(
         protocol_name(solver, mutation) for solver, mutation in protocols))
@@ -734,7 +791,7 @@ def main():
                 ]
                 for solver, mutation in protocols
             }
-            for name, _ns, _k in operators
+            for name, _ns, _k, _src in operators
         },
         "per_instance_hv": {
             name: {
@@ -744,7 +801,7 @@ def main():
                 ]
                 for solver, mutation in protocols
             }
-            for name, _ns, _k in operators
+            for name, _ns, _k, _src in operators
         },
         "failures": [
             {"protocol": protocol, "operator": operator, "repeat": rep,
@@ -754,7 +811,7 @@ def main():
         # Semilla efectiva de cada corrida del MOEA interno (operador x repeticion).
         "run_seeds": [
             {"operator": name, "repeat": rep, "seed": args.seed + rep}
-            for name, _ns, _k in operators
+            for name, _ns, _k, _src in operators
             for rep in range(args.repeats)
         ],
     }
