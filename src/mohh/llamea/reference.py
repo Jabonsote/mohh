@@ -131,7 +131,8 @@ def pmx_canonical(x, y):
     valores ``x[start+i] -> y[start+i]``; cada posicion fuera del segmento
     toma el valor de `y` aplicando ese mapeo hasta salir del segmento. Es la
     variante que LLaMEA rediscoverio (ver el operador encontrado en
-    `results/searches/glm-gptoss/llamea_best_operator.py`).
+    `results/searches/glm-gptoss/llamea_best_operator.py`). **No forma parte
+    del panel** de comparacion: el panel es solo los cinco clasicos.
     """
     n = len(x)
     start = int(np.random.randint(0, n - 1))
@@ -152,46 +153,15 @@ def pmx_canonical(x, y):
     return child
 
 
-def ux(x, y):
-    """Uniform Crossover (Reed, De Jong & Geyer 2003).
-
-    Cada posicion hereda de `x` o de `y` con probabilidad 1/2; las colisiones
-    se resuelven rellenando con los valores que faltan, en orden aleatorio.
-    Es la familia que encontro LLaMEA en `results/searches/glm-gptoss2`
-    (con una reparacion mas elaborada: buscar en el padre opuesto con offset
-    aleatorio en vez de rellenar al azar).
-    """
-    n = len(x)
-    child = np.full(n, -1, dtype=x.dtype)
-    used = np.zeros(n, dtype=bool)
-    source = np.random.randint(0, 2, size=n)
-    missing = []
-    for position in range(n):
-        gene = x[position] if source[position] == 0 else y[position]
-        if not used[gene]:
-            child[position] = gene
-            used[gene] = True
-        else:
-            missing.append(position)
-    remaining = [v for v in range(n) if not used[v]]
-    np.random.shuffle(remaining)
-    for position, value in zip(missing, remaining):
-        child[position] = value
-    return child
-
-
-# Panel por defecto: cubre orden (OX), posicion (PBX), mapeo (PMX),
-# ciclos (CX) y adyacencia (ERX). `pmx_canonical` es la variante de mapeo
-# por valores (Deb), distinta del `pmx` del panel, y `ux` el cruce uniforme,
-# que no estaba en el panel y que LLaMEA rediscoverio.
+# Panel por defecto: los cinco cruces clasicos (orden OX, posicion PBX,
+# mapeo PMX, ciclos CX y adyacencia ERX). Es el unico conjunto contra el que
+# se compara: no se anaden variantes.
 REFERENCE_OPERATORS = {
     "ox": ox,
     "pbx": pbx,
     "pmx": pmx,
-    "pmx_canonical": pmx_canonical,
     "cx": cx,
     "erx": erx,
-    "ux": ux,
 }
 
 
