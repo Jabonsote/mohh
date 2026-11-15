@@ -306,7 +306,7 @@ def test_run_simple_counts_truncated_responses(tmp_path, monkeypatch):
     reasons = summary["failures"]["by_reason"]
     assert any("truncada" in key for key in reasons), reasons
     progress = (tmp_path / "progress.txt").read_text()
-    assert "respuesta truncada" in progress
+    assert "respuesta_truncada" in progress
 
 
 def test_build_prompt_includes_previous_error():

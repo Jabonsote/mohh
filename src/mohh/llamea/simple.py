@@ -548,7 +548,7 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
                 # Se agotaron los tokens: el modelo no llego a escribir el
                 # codigo. Es un fallo del presupuesto, no del operador, asi
                 # que se cuenta aparte y el feedback pide una respuesta corta.
-                stage = "respuesta truncada"
+                stage = "respuesta_truncada"
                 reason = "max_tokens agotado"
                 last_error = (
                     "the previous answer was cut off because it ran out of "
@@ -558,7 +558,7 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
                 logger.warning("iter %d: respuesta truncada (max_tokens)",
                                iteration)
             else:
-                stage = "respuesta invalida"
+                stage = "respuesta_invalida"
                 reason = type(error).__name__
                 last_error = f"{type(error).__name__}: {error}"
                 logger.warning("iter %d: respuesta invalida: %s", iteration, error)
@@ -608,7 +608,7 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
                     f"best_hv={best_hv} candidate=worst "
                     f"valid=0 error={type(error).__name__} "
                     f"parent={parent_label} strategy={strategy}\n")
-            _count_failure(state, "filtro minimo", type(error).__name__)
+            _count_failure(state, "filtro_minimo", type(error).__name__)
             state["timeline"].append({
                 "iteration": iteration, "valid": False,
                 "fitness": None, "hv": None,
@@ -684,16 +684,20 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
         })
         finite = math.isfinite(fitness)
         candidate_text = f"{fitness:.6f}" if finite else "worst"
+        # `progress.txt` es `clave=valor` separado por espacios: el motivo va
+        # como tipo de excepcion (sin espacios). El mensaje completo queda en
+        # `candidates.jsonl`.
+        error_label = type(error).__name__ if error is not None else "-"
         with open(progress_path, "a", encoding="utf-8") as handle:
             handle.write(
                 f"iter {iteration} best={best_fitness:.6f} "
                 f"best_hv={best_hv} candidate={candidate_text} hv={hv} "
-                f"valid={1 if finite else 0} error={error or '-'} parent={parent_label} "
+                f"valid={1 if finite else 0} error={error_label} parent={parent_label} "
                 f"strategy={strategy} wall_s={time.time() - started:.1f}\n")
         if finite:
             state["valid"] += 1
         else:
-            _count_failure(state, "evaluacion", "sin frente valido")
+            _count_failure(state, "evaluacion", "sin_frente_valido")
         if improved:
             state["improvements"] += 1
         state["timeline"].append({
