@@ -112,8 +112,18 @@ Resultados: `results/searches/<EXPERIMENT_NAME>/`. Ahí están `progress.txt`,
 El operador encontrado debe ser **reproducible**: la búsqueda rechaza los
 operadores que crean su propio generador sin semilla (`np.random.default_rng()`),
 porque el arnés siembra `np.random.seed(...)` y ese generador lo ignora. Para
-comparar un operador antiguo que use esa API, `compare_operators.py` lo carga
-igualmente pero avisa por stderr.
+comparar un operador antiguo que use esa API, se siembra antes:
+
+```bash
+python scripts/seed_operator.py \
+  results/searches/<EXPERIMENT_NAME>/llamea_best_operator.py \
+  results/searches/<EXPERIMENT_NAME>/llamea_best_operator_seeded.py
+```
+
+El script sustituye el generador por el RNG global (`np.random.*`), verifica
+que el operador sigue siendo válido y avisa si hay algo que no pueda
+convertir solo. `compare_operators.py` carga el operador sin sembrar (para
+poder compararlo) pero avisa por stderr.
 `COMPARE=1` escribe en `results/evaluations/`.
 
 ```bash
