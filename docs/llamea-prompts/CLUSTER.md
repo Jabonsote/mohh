@@ -99,3 +99,54 @@ tail -f results/searches/<EXPERIMENT_NAME>/progress.txt
 Modelo ausente: `python scripts/mohh_models.py download <modelo>`.
 OOM: baja `MAX_MODEL_LEN` o `GPU_MEM_UTIL`.
 El wrapper se ejecuta en el login, no dentro de SLURM.
+
+## Comparar GE vs LLaMEA (prueba estadistica)
+
+`scripts/compare_operators.py` corre el mismo arnés para los tres tipos de
+operador y contrasta sus HV de forma pareada (misma semilla, misma población
+inicial, mismo marco), como la evaluación gramatical:
+
+- **GE**: los operadores que la GE escribió, `<experimento>/<MODELO>_operators.txt`
+  (`Best:`, `Middle:`, `Worst:` con el fenotipo de la gramática).
+- **LLaMEA**: el `.py` con `def crossover(x, y)` que exporta la búsqueda
+  (`llamea_best_operator.py`).
+- **Clásicos**: el panel de `mohh.llamea.reference` (`ox`, `pbx`, `pmx`, `cx`,
+  `erx`).
+
+```bash
+OPERATORS="ox=classic:ox pmx=classic:pmx"
+GE_EXP=/LUSTRE/$USER/ge/Experiment_001
+LLAM=/LUSTRE/$USER/mohh/results/searches/<EXP>/llamea_best_operator.py
+
+FITNESS_WORKERS=16 python scripts/compare_operators.py \
+  --operator "$OPERATORS" \
+  --operator "llamea=$LLAM" \
+  --ge-operators "$GE_EXP" \
+  --group "base=ox,pmx" --group "ge=MOEAD_Best,MOEAD_Middle,MOEAD_Worst" \
+  --group "llamea=llamea" \
+  --contrast "base:ge" --contrast "llamea:base" \
+  --split test --instances all --repeats 31 --ge-protocol \
+  --name ge_vs_llamea
+```
+
+Los grupos (`--group`) y sus contrastes (`--contrast`) son modulares: cada
+contraste es un test de Wilcoxon pareado (con Holm sobre la familia) entre dos
+grupos, usando el marco consolidado de los dos.
+
+Se guarda todo para no repetir el MOEA: `fronts.npz` (frentes crudos),
+`failures.json` (motivo de cada fallo), `hv_por_instancia/<instancia>.csv`
+(filas = repetición, columnas = operador, como el CSV del original),
+`hv_por_instancia.csv`, `resumen_operadores.csv`, `contrastes.csv`,
+`fronts/<instancia>/*.pof` (mediana y consolidado, mismo formato que el
+original) y `evaluation.json`.
+
+Para reanalizar sin volver a correr el MOEA:
+
+```bash
+python scripts/compare_operators.py --operator ... --load-fronts --name ge_vs_llamea
+```
+
+Con `--ge-protocol` se replica el protocolo GE: 3 solvers, ambas mutaciones,
+300 generaciones, población 105 y 31 repeticiones (`N_EXPERIMENTS` del
+original). Con menos objetivos, baja `--mo-population-size`: pymoo necesita una
+población mínima válida para el número de objetivos.

@@ -627,6 +627,92 @@ def _consolidated_frame(*point_sets):
     return front
 
 
+def _nondominated(points):
+    """Filtra los puntos no dominados (misma regla que `MO.py`, vectorizada).
+
+    `MO.non_dominated_sorting_vectorized` recorre la matriz en Python; con el
+    marco consolidado de una busqueda larga eso es demasiado lento. Aqui se
+    resuelve con broadcasting de numpy, con la misma semantica: `q` esta
+    dominado si existe `p` con `p >= q` en todos los objetivos y `p > q` en
+    alguno.
+    """
+    from mohh.core.utilities.algorithm.MO import sign
+
+    array = np.asarray(points, dtype=float)
+    if len(array) <= 1:
+        return array
+    adjusted = array * sign
+    dominates = (
+        np.all(adjusted[:, None, :] >= adjusted[None, :, :], axis=2)
+        & np.any(adjusted[:, None, :] > adjusted[None, :, :], axis=2)
+    )
+    np.fill_diagonal(dominates, False)
+    return array[~dominates.any(axis=0)]
+
+
+def comprobate_frame(points):
+    """`comprobate` del original (`mohh/evaluation/experiment.py`).
+
+    "Ensure nadir is not computed from a best_front that dominates every
+    other point. Stop peeling once there's nothing left beyond the current
+    front (tiny consolidated sets).": si el frente no dominado del consolidado
+    tiene 2 puntos o menos, se peelan y se recalcula.
+    """
+    if points is None:
+        return None
+    array = np.asarray(points, dtype=float)
+    if len(array) == 0:
+        return array
+    remaining = {tuple(point) for point in array}
+    front = _nondominated(array)
+    while len(front) <= 2 and len(remaining) > len(front):
+        for point in front:
+            remaining.discard(tuple(point))
+        if not remaining:
+            break
+        front = _nondominated(np.asarray(sorted(remaining), dtype=float))
+    return front
+
+
+def _nd_merge(left, right):
+    """No dominados de `left` ∪ `right`, con `left` ya no dominado.
+
+    Es el paso incremental de `experiment.py`: el frente no dominado del
+    consolidado crece con cada operador evaluado, sin rehacer el filtro
+    sobre todo el historico. `O(|left| * |right|)` en vez de `O(n^2)`.
+    """
+    from mohh.core.utilities.algorithm.MO import sign
+
+    if left is None:
+        return _nondominated(right) if right is not None else None
+    left = np.asarray(left, dtype=float)
+    right = np.asarray(right, dtype=float)
+    if len(left) == 0:
+        return _nondominated(right)
+    if len(right) == 0:
+        return left
+    adj_left = left * sign
+    adj_right = right * sign
+    # `dom_lr[i, j]`: el punto `i` de la izquierda domina al `j` de la derecha.
+    dom_lr = (
+        np.all(adj_left[:, None, :] >= adj_right[None, :, :], axis=2)
+        & np.any(adj_left[:, None, :] > adj_right[None, :, :], axis=2)
+    )
+    # `dom_rl[j, i]`: el punto `j` de la derecha domina al `i` de la izquierda.
+    dom_rl = (
+        np.all(adj_right[:, None, :] >= adj_left[None, :, :], axis=2)
+        & np.any(adj_right[:, None, :] > adj_left[None, :, :], axis=2)
+    )
+    dom_rr = (
+        np.all(adj_right[:, None, :] >= adj_right[None, :, :], axis=2)
+        & np.any(adj_right[:, None, :] > adj_right[None, :, :], axis=2)
+    )
+    np.fill_diagonal(dom_rr, False)
+    keep_left = ~dom_rl.any(axis=0)                          # (|left|,)
+    keep_right = ~dom_lr.any(axis=0) & ~dom_rr.any(axis=0)  # (|right|,)
+    return np.vstack([left[keep_left], right[keep_right]])
+
+
 def _same_points(left, right):
     """True si dos conjuntos de puntos coinciden (independiente del orden)."""
     if left is None or right is None:
@@ -1893,23 +1979,36 @@ class OperatorEvaluator:
 
 
 class PopulationEvaluator(OperatorEvaluator):
-    """Fitness por poblacion, replicando `HyperHeuristic.compute_metrics` de GE.
+    """Fitness por poblacion, con el HV de la evaluacion gramatical (GE).
 
-    Para cada evaluacion se consolidan los frentes de **toda la poblacion**
-    (padres + descendientes) por instancia, se calcula el nadir del frente no
-    dominado consolidado y se asigna el HV de cada individuo. El fitness es el
-    **rango medio GE** entre instancias: 1 es el mejor y, con `raw_rank=True`,
-    menor es mejor (el mismo valor que usa GE). Con `raw_rank=False` se invierte
-    a `(K + 1) - rango_medio` para clientes que maximizan.
+    El hipervolumen se calcula **igual que en `mohh/evaluation/experiment.py`**:
+    por instancia se consolida **todo lo evaluado** (los priors de arranque y
+    cada candidato ya evaluado), de ahi sale el frente no dominado consolidado
+    (con su `comprobate`), ese frente da los limites (min/max por objetivo) con
+    los que se normaliza cada frente, y el frente normalizado se integra hasta
+    el nadir fijo ``[1.1] * K``. Ese frente consolidado es el mismo marco que
+    usa la tabla final de GE, asi que el valor que ve el LLM durante la
+    busqueda es comparable con el que se reporta al final.
 
-    No acumula frentes de generaciones anteriores: el punto de referencia es el
-    nadir de la poblacion actual, igual que en GE. El HV se recalcula en cada
-    evaluacion, porque el nadir puede cambiar al entrar el nuevo individuo.
+    Sobre esos HV se aplica el rango de GE (`compute_rank`): el fitness es el
+    **rango medio** entre instancias, 1 es el mejor y, con `raw_rank=True`,
+    menor es mejor (el mismo valor que usa GE). Con `raw_rank=False` se
+    invierte a `(K + 1) - rango_medio` para clientes que maximizan.
+
+    El marco crece con cada operador evaluado, asi que los HV se recalculan en
+    cada evaluacion (los frentes estan cacheados: no se vuelve a correr el
+    MOEA). En una evaluacion dada, padres y descendientes comparten marco, de
+    modo que la comparacion entre ellos es justa.
     """
 
     def __init__(self, *args, raw_rank=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.raw_rank = bool(raw_rank)
+        # Marco consolidado (como `experiment.py`): frente no dominado de todo
+        # lo evaluado, por instancia. `_ge_folded` marca los codigos ya
+        # incorporados.
+        self._ge_frame = None
+        self._ge_folded = set()
 
     def evaluate_population(self, population, parent_population=None,
                             logger=None):
@@ -1926,12 +2025,73 @@ class PopulationEvaluator(OperatorEvaluator):
             return self.evaluate_population(new_population, parent_population, logger)
         return super().__call__(new_population, logger=logger)
 
+    def _fold_ge_frame(self, instances):
+        """Incorpora al frente consolidado los frentes de todo lo evaluado.
+
+        `experiment.py` consolida por instancia los puntos de todos los
+        operadores evaluados y saca de ahi el frente no dominado (el marco) y
+        sus limites. Aqui el consolidado crece de forma incremental: cada
+        frente nuevo se fusiona con el marco vigente mediante `_nd_merge`, que
+        es equivalente a recalcular el filtro no dominado sobre todo el
+        historico pero en `O(|marco| * |nuevo|)`.
+        """
+        if self._ge_frame is None:
+            self._ge_frame = [None] * len(instances)
+        for key, entry in self._cache.items():
+            if key in self._ge_folded:
+                continue
+            fronts = entry.get("fronts") if entry else None
+            if fronts:
+                for index, front in enumerate(fronts):
+                    if front is None or len(front) == 0:
+                        continue
+                    if index >= len(self._ge_frame):
+                        continue
+                    self._ge_frame[index] = _nd_merge(self._ge_frame[index],
+                                                        front)
+            self._ge_folded.add(key)
+
+    def _ge_consolidated(self, index):
+        """Union de los puntos evaluados en la instancia `index`."""
+        pieces = []
+        for entry in self._cache.values():
+            fronts = entry.get("fronts") if entry else None
+            if not fronts or index >= len(fronts):
+                continue
+            front = fronts[index]
+            if front is None or len(front) == 0:
+                continue
+            pieces.append(np.asarray(front, dtype=float))
+        if not pieces:
+            return None
+        return np.unique(np.vstack(pieces), axis=0)
+
+    def _ge_comprobate(self, index):
+        """Aplica el `comprobate` del original a la instancia `index`."""
+        return comprobate_frame(self._ge_consolidated(index))
+
+    def _ge_bounds(self, index):
+        """`vmin`/`vmax` del marco consolidado de la instancia.
+
+        Como en `experiment.py`: los limites salen del frente no dominado
+        consolidado (`np.min(best_front)`, `np.max(best_front)`), no de todos
+        los puntos. Devuelve `None` si la instancia no tiene escala.
+        """
+        frame = self._ge_frame[index] if self._ge_frame else None
+        if frame is None or len(frame) == 0:
+            return None
+        if len(frame) <= 2:
+            frame = self._ge_comprobate(index)
+            if frame is None or len(frame) == 0:
+                return None
+        vmin = frame.min(axis=0)
+        vmax = frame.max(axis=0)
+        if np.any(vmax == vmin):
+            return None
+        return vmin, vmax
+
     def _evaluate_batch(self, new_population, parent_population, logger=None):
-        from mohh.core.utilities.algorithm.MO import (
-            compute_hypervolume,
-            compute_nadir_point,
-            non_dominated_sorting_vectorized,
-        )
+        from mohh.core.utilities.algorithm.MO import compute_hypervolume
         from mohh.generation.utilities.algorithm.HH_auxiliars import compute_rank
 
         population = list(parent_population) + list(new_population)
@@ -1942,8 +2102,9 @@ class PopulationEvaluator(OperatorEvaluator):
 
         instances = self._ensure_instances()
         if self.normalize and self.bounds is None:
-            # El ranking por poblacion no necesita el marco de referencia:
-            # se usan los frentes crudos y el nadir consolidado de la poblacion.
+            # El marco se construye con todo lo evaluado (`_fold_ge_limits`),
+            # no con el panel de referencia: asi no hace falta evaluar los
+            # clasicos aparte y el marco coincide con el de la tabla GE.
             self.bounds = [None] * len(instances)
         for key, solution in unique.items():
             if key not in self._cache:
@@ -1954,11 +2115,20 @@ class PopulationEvaluator(OperatorEvaluator):
                     self._valid_evaluations += 1
                 self._save_candidate_fronts(key, entry, solution)
 
+        # Marco consolidado con todo lo evaluado (priors + candidatos).
+        self._fold_ge_frame(instances)
+
         ranks_by_key = {key: [] for key in unique}
         hv_by_key = {key: [] for key in unique}
         for index in range(len(instances)):
-            points = set()
-            fronts = {}
+            bounds = self._ge_bounds(index)
+            if bounds is None:
+                # Instancia sin escala: se excluye del promedio, como en
+                # `experiment.py` (que la invalida con NaN).
+                continue
+            vmin, vmax = bounds
+            hypervolumes = []
+            keys = []
             for key in unique:
                 entry = self._cache.get(key)
                 if entry is None or entry.get("fronts") is None:
@@ -1966,26 +2136,15 @@ class PopulationEvaluator(OperatorEvaluator):
                 front = entry["fronts"][index]
                 if front is None or len(front) == 0:
                     continue
-                array = np.asarray(front, dtype=float)
-                fronts[key] = array
-                for row in array:
-                    points.add(tuple(row.tolist()))
-            if not points:
+                normalized = normalize_front(front, (vmin, vmax))
+                if not np.all(np.isfinite(normalized)):
+                    continue
+                normalized = clip_to_reference_box(normalized)
+                hypervolumes.append(float(compute_hypervolume(
+                    np.full(normalized.shape[1], NADIR_FACTOR), normalized)))
+                keys.append(key)
+            if not hypervolumes:
                 continue
-            consolidated = np.asarray(sorted(points), dtype=float)
-            fronts_sorted = non_dominated_sorting_vectorized(consolidated)
-            if not fronts_sorted:
-                continue
-            ndf = np.asarray(fronts_sorted[0], dtype=float)
-            nadir = compute_nadir_point(set(map(tuple, ndf.tolist())))
-            keys = list(fronts)
-            hypervolumes = []
-            for key in keys:
-                try:
-                    hypervolumes.append(float(compute_hypervolume(
-                        np.asarray(nadir, dtype=float), fronts[key])))
-                except Exception:  # noqa: BLE001 - frente degenerado
-                    hypervolumes.append(0.0)
             ranks = compute_rank(hypervolumes)
             for key, hv, rank in zip(keys, hypervolumes, ranks):
                 hv_by_key[key].append(float(hv))
@@ -2023,8 +2182,8 @@ class PopulationEvaluator(OperatorEvaluator):
                     f"GE population ranking: mean rank {mean_rank:.4f} "
                     f"(1 = best; lower is better) over {len(values)} instances. "
                     f"Best instance rank {best}, worst {worst}, K={k}. "
-                    f"Reference point: population nadir, recomputed for this "
-                    f"evaluation."
+                    f"Reference point: fixed nadir [1.1]*K over the "
+                    f"consolidated frame of everything evaluated so far."
                 )
             else:
                 # Inversion solo para clientes que maximizan; mismo orden.
@@ -2034,8 +2193,9 @@ class PopulationEvaluator(OperatorEvaluator):
                     f"(1 = best; lower is better). Fitness = "
                     f"(K + 1 - mean rank) = {score:.4f} with K={k}. "
                     f"Best instance rank {best}, worst {worst}, "
-                    f"over {len(values)} instances. Reference point: "
-                    f"population nadir, recomputed for this evaluation."
+                    f"over {len(values)} instances. Reference point: fixed "
+                    f"nadir [1.1]*K over the consolidated frame of "
+                    f"everything evaluated so far."
                 )
             solution.set_scores(score, feedback=feedback)
             if not self.raw_rank:

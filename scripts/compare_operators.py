@@ -12,27 +12,47 @@ valida:
     *todas* las configuraciones (todos los operadores x todas las repeticiones),
     normalizado con `(f - vmin) / (vmax - vmin)` y nadir fijo `[1.1] * K`, igual
     que `experiment.py`. Si una instancia no tiene escala se excluye y se reporta;
-  * **N repeticiones independientes** (por defecto 11) para estimar el ruido y
-    hacer una prueba no parametrica pareada (Wilcoxon), con intervalo de
-    confianza de la diferencia y ajuste de Holm por comparaciones multiples;
+  * **N repeticiones independientes** (por defecto 31, como `N_EXPERIMENTS` de
+    la evaluacion GE) para estimar el ruido y hacer una prueba no parametrica
+    pareada (Wilcoxon), con intervalo de confianza de la diferencia y ajuste
+    de Holm por comparaciones multiples;
+  * **tres tipos de operador en el mismo arnes**: LLaMEA (un `.py` con
+    `def crossover(x, y)`), GE (los operadores que escribio la evolucion
+    gramatical, `<experimento>/<MODELO>_operators.txt`) y el panel clasico
+    (`ox`, `pbx`, `pmx`, `cx`, `erx`);
+  * **contrastes modulares entre grupos** (`--group` / `--contrast`): cada grupo
+    promedia sus operadores por repeticion y se contrasta contra otro grupo con
+    el mismo test pareado (p. ej. "OX,PMX vs GE" y "LLaMEA vs OX,PMX");
   * **protocolo configurable**: `--solver` acepta varios solvers y
     `--mutation-both` evalua con y sin `Swap_Mutation`. `--ge-protocol` activa
     el protocolo de la evaluacion GE (MOEAD, NSGAII y SMSEMOA; ambas mutaciones;
-    300/105; 11 repeticiones);
+    300/105; 31 repeticiones);
   * un fallo de evaluacion (operador que lanza una excepcion en una instancia)
     se cuenta como HV 0, no se descarta del par: descartarlo haria que un
     operador roto pareciera mejor. ``--fail-policy`` permite abortar o excluir.
+  * **todo se guarda** para no repetir el MOEA: `fronts.npz`, `failures.json`,
+    CSV por instancia y por operador, contrastes, frentes `.pof` (formato del
+    original) y `evaluation.json`. Con `--load-fronts` se reanaliza sin MOEA.
 
 Uso:
     python scripts/compare_operators.py \
         --operator descubierto=results/examples/llamea_found_operators/qwen25coder7b_moead_b100_ge.py \
         --operator ox=classic:ox --operator pbx=classic:pbx \
-        --split test --repeats 11 --name b100_vs_clasicos
+        --split test --repeats 31 --name b100_vs_clasicos
+
+    # GE vs LLaMEA vs clasicos, con contrastes entre grupos:
+    python scripts/compare_operators.py \
+        --operator ox=classic:ox --operator pmx=classic:pmx \
+        --operator llamea=results/searches/<exp>/llamea_best_operator.py \
+        --ge-operators /ruta/Experiment_001 \
+        --group base=ox,pmx --group llamea=llamea \
+        --contrast llamea:base --ge-protocol
 
     # Tabla final con el protocolo GE completo (caro):
     python scripts/compare_operators.py ... --ge-protocol
 
-Salida: `results/evaluations/<name>/evaluation.json` y `report.md`.
+Salida: `results/evaluations/<name>/` con `evaluation.json`, `report.md`,
+`hv_por_instancia/`, `fronts/`, `fronts.npz`, `failures.json` y los CSV.
 """
 
 import argparse
@@ -52,10 +72,12 @@ from mohh.llamea.fitness import (
     _solve_front_namespace,
     build_evaluator,
     clip_to_reference_box,
+    comprobate_frame,
     compile_operator,
     init_params,
     normalize_front,
 )
+from mohh.llamea.ge_operators import ge_namespace, load_ge_operators
 from mohh.llamea.reference import REFERENCE_OPERATORS, namespace_for
 from mohh.llamea.run import _select_instances
 from mohh.llamea.statistics import (
@@ -66,17 +88,22 @@ from mohh.llamea.statistics import (
 
 
 def load_operator(spec):
-    """`nombre=ruta.py`, `nombre=classic:ox` o `nombre=classic2:ox`.
+    """`nombre=ruta.py`, `nombre=classic:ox`, `nombre=ge:Best@archivo`.
 
     Devuelve `(nombre, namespace, kind, source)` donde `source` es lo necesario
     para reconstruir el namespace en un worker de otro proceso (la clave del
-    clasico o el codigo del operador descubierto); el namespace en si no es
-    picklable (contiene `np` y funciones de `exec`).
+    clasico, la expresion GE o el codigo del operador descubierto); el
+    namespace en si no es picklable (contiene `np` y funciones de `exec`).
 
     `classic2:ox` es el clasico devolviendo **dos** hijos, `(ox(x, y), ox(y, x))`:
     el mismo contrato que un operador que devuelve una tupla. Comparar un
     operador de dos hijos contra clasicos de un solo hijo no es justo, porque el
     arnes (`LLMOperator`) usa `child[::-1]` como segundo descendiente.
+
+    `ge:<etiqueta>@<archivo_operators.txt>` es un operador de la evolucion
+    gramatical: la expresion de la linea `<etiqueta>: <expresion>` del archivo.
+    Se evalua con las primitivas de `HH_functions`, igual que en la
+    evaluacion original, pero a traves del mismo arnes que el resto.
     """
     name, _, source = spec.partition("=")
     name = name.strip()
@@ -97,9 +124,58 @@ def load_operator(spec):
             return single(x, y), single(y, x)
 
         return name, namespace_for(two_children), "classic2", key
+    if source.startswith("ge:"):
+        label, _, path = source[3:].partition("@")
+        label = label.strip()
+        path = path.strip()
+        if not label or not path:
+            raise SystemExit(f"--operator GE debe ser ge:etiqueta@archivo, "
+                             f"no {spec!r}")
+        expression = _ge_expression(path, label)
+        return name, ge_namespace(expression), "ge", expression
     with open(source) as handle:
         code = handle.read()
-    return name, compile_operator(code), "discovered", code
+    return name, compile_operator(code), "llamea", code
+
+
+def _ge_expression(path, label):
+    """Expresion de un operador GE en un `*_operators.txt`."""
+    if not os.path.isfile(path):
+        raise SystemExit(f"archivo de operadores GE no encontrado: {path!r}")
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            name, expression = line.split(":", 1)
+            if name.strip() == label:
+                return expression.strip()
+    raise SystemExit(f"operador GE {label!r} no encontrado en {path!r}")
+
+
+def parse_groups(specs):
+    """`--group nombre=op1,op2` -> `{nombre: [operadores]}`."""
+    groups = {}
+    for spec in specs or []:
+        name, _, members = spec.partition("=")
+        name = name.strip()
+        if not name or not members.strip():
+            raise SystemExit(f"--group debe ser nombre=op1,op2, no {spec!r}")
+        groups[name] = [item.strip() for item in members.split(",")
+                        if item.strip()]
+    return groups
+
+
+def parse_contrasts(specs):
+    """`--contrast grupoA:grupoB` -> `[(grupoA, grupoB)]`."""
+    contrasts = []
+    for spec in specs or []:
+        left, sep, right = spec.partition(":")
+        if not sep:
+            raise SystemExit(f"--contrast debe ser grupoA:grupoB, no {spec!r}")
+        contrasts.append((left.strip(), right.strip()))
+    return contrasts
+
 
 
 def _solve_task(task):
@@ -110,8 +186,13 @@ def _solve_task(task):
     `(key, front, error)`; `error` es `None` si todo salio bien.
     """
     (key, source, kind, instance, seed, model_name, mutation,
-     instance_timeout) = task
+     instance_timeout, overrides) = task
     try:
+        # El worker puede arrancar con el singleton `Params` vacio (fork/
+        # forkserver): se inicializa igual que en la ruta de LLaMEA para que
+        # el MOEA corra con MO_GENERATIONS, MO_POPULATION_SIZE y las
+        # direcciones de referencia correctos.
+        init_params(**(overrides or {}))
         if kind == "classic":
             ns = namespace_for(REFERENCE_OPERATORS[source])
         elif kind == "classic2":
@@ -121,6 +202,8 @@ def _solve_task(task):
                 return single(x, y), single(y, x)
 
             ns = namespace_for(two_children)
+        elif kind == "ge":
+            ns = ge_namespace(source)
         else:
             ns = compile_operator(source)
         front = _solve_front_namespace(
@@ -155,7 +238,8 @@ def protocol_name(solver, mutation):
     return f"{solver}+mut" if mutation else solver
 
 
-def collect_fronts(operators, paths, args, protocols, existing=None):
+def collect_fronts(operators, paths, args, protocols, existing=None,
+                   stored_failures=None):
     """Corre el MOEA para cada (repeticion, operador, instancia).
 
     Si `existing` trae frentes ya calculados (con la misma semilla por
@@ -176,6 +260,9 @@ def collect_fronts(operators, paths, args, protocols, existing=None):
         for key, front in fronts.items()
         if front is None or len(front) == 0
     }
+    # Los fallos guardados tienen su motivo exacto y prevalence sobre el
+    # generico de arriba.
+    failures.update(stored_failures or {})
     workers = max(1, int(os.environ.get("FITNESS_WORKERS", "1") or 1))
 
     # Instancias por repeticion: dependen solo de la semilla (args.seed + rep),
@@ -183,6 +270,7 @@ def collect_fronts(operators, paths, args, protocols, existing=None):
     # construyen una vez para no repetir la carga en cada protocolo.
     instances_by_rep = {}
     instance_timeout = None
+    overrides_by_rep = {}
     for rep in range(args.repeats):
         evaluator = build_evaluator(
             paths,
@@ -195,6 +283,10 @@ def collect_fronts(operators, paths, args, protocols, existing=None):
         )
         instances_by_rep[rep] = evaluator._ensure_instances()
         instance_timeout = evaluator.instance_timeout
+        # Los workers heredan el singleton `Params` del padre; con `fork`/
+        # `forkserver` puede quedar vacio, y entonces el MOEA corre sin
+        # MO_GENERATIONS, MO_POPULATION_SIZE ni las direcciones de referencia.
+        overrides_by_rep[rep] = evaluator._params_overrides()
 
     # Tareas pendientes (sin frentes ya calculados).
     tasks = []
@@ -210,6 +302,7 @@ def collect_fronts(operators, paths, args, protocols, existing=None):
                     tasks.append((
                         key, source, kind, instance,
                         args.seed + rep, solver, mutation, instance_timeout,
+                        overrides_by_rep[rep],
                     ))
 
     if not tasks:
@@ -237,6 +330,22 @@ def collect_fronts(operators, paths, args, protocols, existing=None):
     return fronts, failures
 
 
+def _frame_from_points(pieces):
+    """Marco de normalizacion de una instancia, como en `experiment.py`.
+
+    El original consolida los puntos de todos los operadores evaluados, saca
+    el frente no dominado (`best_front`), le aplica `comprobate` y de ahi
+    salen los limites (min/max por objetivo) con los que se normaliza cada
+    frente antes de integrar hasta el nadir fijo ``[1.1] * K``.
+    """
+    points = [np.asarray(piece, dtype=float) for piece in pieces
+              if piece is not None and len(piece)]
+    if not points:
+        return None
+    union = np.unique(np.vstack(points), axis=0)
+    return comprobate_frame(union)
+
+
 def shared_frame(fronts, operators, protocols, n_instances, repeats):
     """Marco por instancia: frente consolidado de TODAS las configuraciones."""
     frames = []
@@ -246,7 +355,7 @@ def shared_frame(fronts, operators, protocols, n_instances, repeats):
                   for name, _ns, _kind, _src in operators
                   for rep in range(repeats)]
         pieces = [p for p in pieces if p is not None and len(p)]
-        frames.append(_consolidated_frame(*pieces) if pieces else None)
+        frames.append(_frame_from_points(pieces))
     return frames
 
 
@@ -325,9 +434,10 @@ def pairwise_design(fronts, rows, protocols, n_instances, repeats, failures=None
     ~0 (el marco compartido se vuelve degenerado cuando uno domina la envolvente).
     """
     classics = [r["operator"] for r in rows if r["kind"] == "classic" and r.get("runs")]
-    discovered = [r["operator"] for r in rows if r["kind"] == "discovered" and r.get("runs")]
+    others = [r["operator"] for r in rows
+              if r["kind"] in ("llamea", "ge") and r.get("runs")]
     results = []
-    for ours in discovered:
+    for ours in others:
         for base in classics:
             frames = []
             for index in range(n_instances):
@@ -337,8 +447,8 @@ def pairwise_design(fronts, rows, protocols, n_instances, repeats, failures=None
                           for name in (ours, base)
                           for rep in range(repeats)]
                 pieces = [p for p in pieces if p is not None and len(p)]
-                frames.append(_consolidated_frame(*pieces) if pieces else None)
-            subset = [(ours, None, "discovered"), (base, None, "classic")]
+                frames.append(_frame_from_points(pieces))
+            subset = [(ours, None, "llamea", None), (base, None, "classic", None)]
             values = hv_values(fronts, subset, protocols, frames, repeats,
                                failures=failures, fail_policy=fail_policy)
             scores = per_run_scores(values, subset, protocols, repeats)
@@ -377,6 +487,70 @@ def pairwise_design(fronts, rows, protocols, n_instances, repeats, failures=None
     return results
 
 
+def _group_scores(scores, members):
+    """Puntuacion de un grupo por repeticion: media de sus operadores."""
+    if not members:
+        return []
+    lengths = [len(scores[name]) for name in members if name in scores]
+    n_reps = max(lengths) if lengths else 0
+    out = []
+    for rep in range(n_reps):
+        values = [scores[name][rep] for name in members
+                  if name in scores and rep < len(scores[name])
+                  and scores[name][rep] is not None]
+        out.append(float(np.mean(values)) if values else None)
+    return out
+
+
+def group_contrasts(fronts, rows, protocols, n_instances, repeats, groups,
+                     contrasts, failures=None, fail_policy="zero"):
+    """Contraste pareado entre **grupos** de operadores.
+
+    Cada grupo tiene una puntuacion por repeticion: la media de sus operadores
+    (y del HV por instancia), igual que `per_run_scores`. El marco de
+    normalizacion es el consolidado de los dos grupos comparados (el mismo
+    criterio que el par head-to-head), de modo que el contraste no dependa de
+    los operadores que quedan fuera.
+
+    Es la forma modular de plantear "OX,PMX vs GE" y "LLaMEA vs OX,PMX": los
+    grupos se declaran con `--group` y se contrastan con `--contrast`.
+    """
+    known = {r["operator"] for r in rows if r.get("runs")}
+    results = []
+    for left, right in contrasts:
+        members_left = [name for name in groups.get(left, []) if name in known]
+        members_right = [name for name in groups.get(right, []) if name in known]
+        if not members_left or not members_right:
+            continue
+        subset = [(name, None, "group", None)
+                  for name in members_left + members_right]
+        frames = []
+        for index in range(n_instances):
+            pieces = [fronts.get(
+                          (protocol_name(solver, mutation), name, rep, index))
+                      for solver, mutation in protocols
+                      for name in members_left + members_right
+                      for rep in range(repeats)]
+            pieces = [p for p in pieces if p is not None and len(p)]
+            frames.append(_frame_from_points(pieces))
+        values = hv_values(fronts, subset, protocols, frames, repeats,
+                            failures=failures, fail_policy=fail_policy)
+        scores = per_run_scores(values, subset, protocols, repeats)
+        left_scores = _group_scores(scores, members_left)
+        right_scores = _group_scores(scores, members_right)
+        summary = paired_summary(left_scores, right_scores)
+        if summary["pairs"] == 0:
+            continue
+        summary.update({
+            "group": left,
+            "baseline_group": right,
+            "members": members_left,
+            "baseline_members": members_right,
+        })
+        results.append(summary)
+    return results
+
+
 def summarize(scores, operators):
     rows = []
     for name, _ns, kind, _src in operators:
@@ -398,11 +572,16 @@ def summarize(scores, operators):
 
 
 def pairwise(scores, operators, rows):
-    """Cada operador descubierto contra cada clasico (pareado por repeticion)."""
+    """Cada operador no clasico (LLaMEA o GE) contra cada clasico.
+
+    El contraste es pareado por repeticion: el clasico y el evaluado comparten
+    semilla, poblacion inicial y marco, asi que la diferencia es del operador.
+    """
     classics = [r["operator"] for r in rows if r["kind"] == "classic" and r.get("runs")]
-    discovered = [r["operator"] for r in rows if r["kind"] == "discovered" and r.get("runs")]
+    others = [r["operator"] for r in rows
+              if r["kind"] in ("llamea", "ge") and r.get("runs")]
     comparisons = []
-    for ours in discovered:
+    for ours in others:
         for base in classics:
             summary = paired_summary(scores[ours], scores[base])
             if summary["pairs"] == 0:
@@ -473,9 +652,199 @@ def _ci(row):
     return f"[{low:+.6f}, {high:+.6f}]"
 
 
+def write_front(front, file_path):
+    """Escribe un frente en el formato `.pof` del original.
+
+    Cabecera `# N M` y una fila por punto en notacion cientifica: el mismo
+    formato que escribe `mohh/evaluation/experiment.py`, para que los frentes
+    de esta comparacion se puedan leer con las herramientas del original.
+    """
+    array = np.asarray(front, dtype=float)
+    if array.ndim != 2:
+        return
+    n_rows, n_cols = array.shape
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "w") as handle:
+        handle.write(f"# {n_rows} {n_cols}\n")
+        for row in array:
+            handle.write(" ".join(f"{num:1.6e}" for num in row) + "\n")
+
+
+def write_instance_artifacts(out_dir, args, fronts, values, frames, operators,
+                             protocols):
+    """Artefactos por instancia, como deja la evaluacion original.
+
+    * `hv_por_instancia/<instancia>.csv`: una fila por repeticion y una
+      columna por operador (el HV de esa instancia), igual que el CSV del
+      original (`<solver>/<label>/<instancia>.csv`).
+    * `fronts/<instancia>/<operador>.pof` y `_norm.pof`: el frente de la
+      repeticion mediana de cada operador, crudo y normalizado.
+    * `fronts/<instancia>/best_front_consolidated.pof` y `_norm.pof`: el marco
+      consolidado de la instancia, crudo y normalizado.
+    """
+    import csv
+
+    csv_dir = os.path.join(out_dir, "hv_por_instancia")
+    os.makedirs(csv_dir, exist_ok=True)
+    for index, path in enumerate(args.paths):
+        instance = os.path.basename(path)
+        # CSV por instancia: filas = repeticion, columnas = operador.
+        with open(os.path.join(csv_dir, f"{instance}.csv"), "w",
+                  newline="") as handle:
+            writer = csv.writer(handle)
+            header = ["Experiment"]
+            for name, _ns, _kind, _src in operators:
+                header.append(name)
+            writer.writerow(header)
+            for rep in range(args.repeats):
+                row = [rep + 1]
+                for name, _ns, _kind, _src in operators:
+                    cells = []
+                    for solver, mutation in protocols:
+                        values_row = values.get((protocol_name(solver, mutation),
+                                                name, rep))
+                        if values_row is not None and index < len(values_row) \
+                                and values_row[index] is not None:
+                            cells.append(values_row[index])
+                    row.append(f"{np.mean(cells):.10g}" if cells else "")
+                writer.writerow(row)
+
+        # Frentes: mediana por operador y consolidado de la instancia.
+        frame = frames[index] if index < len(frames) else None
+        bounds = None
+        if frame is not None and len(frame):
+            vmin, vmax = frame.min(axis=0), frame.max(axis=0)
+            if not np.any(vmax == vmin):
+                bounds = (vmin, vmax)
+        for name, _ns, _kind, _src in operators:
+            selected = _median_front(fronts, values, name, index, protocols,
+                                     args.repeats)
+            if selected is None:
+                continue
+            write_front(selected, os.path.join(out_dir, "fronts", instance,
+                                               f"{name}.pof"))
+            if bounds is not None:
+                write_front(clip_to_reference_box(
+                    normalize_front(selected, bounds)),
+                    os.path.join(out_dir, "fronts", instance, f"{name}_norm.pof"))
+        if frame is not None and len(frame):
+            write_front(frame, os.path.join(out_dir, "fronts", instance,
+                                            "best_front_consolidated.pof"))
+            if bounds is not None:
+                write_front(clip_to_reference_box(normalize_front(frame, bounds)),
+                            os.path.join(out_dir, "fronts", instance,
+                                         "best_front_consolidated_norm.pof"))
+
+
+def _median_front(fronts, values, name, index, protocols, repeats):
+    """Frente de la repeticion mediana (por HV) de un operador en una instancia."""
+    scores = []
+    for rep in range(repeats):
+        cells = []
+        for solver, mutation in protocols:
+            row = values.get((protocol_name(solver, mutation), name, rep))
+            if row is not None and index < len(row) and row[index] is not None:
+                cells.append(row[index])
+        scores.append(float(np.mean(cells)) if cells else None)
+    valid = [(rep, value) for rep, value in enumerate(scores)
+             if value is not None]
+    if not valid:
+        return None
+    valid.sort(key=lambda item: item[1])
+    median = valid[len(valid) // 2][0]
+    for solver, mutation in protocols:
+        front = fronts.get((protocol_name(solver, mutation), name, median, index))
+        if front is not None and len(front):
+            return np.asarray(front, dtype=float)
+    return None
+
+
+def write_csvs(out_dir, args, rows, comparisons, pairwise_results, values,
+               operators, protocols, group_results=None):
+    """CSV con todo el detalle: HV por instancia, resumen y contrastes.
+
+    Se escriben aparte del `evaluation.json` para que el analisis se pueda
+    re-hacer (o pegar en una hoja) sin volver a correr el MOEA interno.
+    """
+    import csv
+
+    # 1. HV por (operador, protocolo, repeticion, instancia).
+    path = os.path.join(out_dir, "hv_por_instancia.csv")
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["operador", "tipo", "protocolo", "repeticion",
+                         "instancia", "hv"])
+        for name, _ns, kind, _src in operators:
+            for solver, mutation in protocols:
+                protocol = protocol_name(solver, mutation)
+                for rep in range(args.repeats):
+                    row = values.get((protocol, name, rep))
+                    if row is None:
+                        continue
+                    for index, hv in enumerate(row):
+                        writer.writerow([
+                            name, kind, protocol, rep,
+                            os.path.basename(args.paths[index]),
+                            "" if hv is None else f"{hv:.10g}",
+                        ])
+
+    # 2. Resumen por operador (media de repeticiones).
+    path = os.path.join(out_dir, "resumen_operadores.csv")
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["operador", "tipo", "repeticiones", "media", "desv",
+                         "mediana", "min", "max"])
+        for row in sorted(rows, key=lambda r: -(r.get("mean") or -1)):
+            writer.writerow([
+                row["operator"], row["kind"], row.get("runs", 0),
+                _csv_num(row.get("mean")), _csv_num(row.get("sd")),
+                _csv_num(row.get("median")), _csv_num(row.get("min")),
+                _csv_num(row.get("max")),
+            ])
+
+    # 3. Contrastes estadisticos (marco compartido, por pareja y por grupo).
+    path = os.path.join(out_dir, "contrastes.csv")
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["tipo", "operador", "baseline", "pares", "faltan",
+                         "gana", "pierde", "empata", "media_op", "media_base",
+                         "dif_media", "sd_dif", "ic95_low", "ic95_high",
+                         "relativo", "dz", "wilcoxon", "p", "p_holm"])
+        for tipo, items, label_a, label_b in (
+                ("marco_compartido", comparisons, "operator", "baseline"),
+                ("por_pareja", pairwise_results, "operator", "baseline"),
+                ("por_grupo", group_results or [], "group", "baseline_group")):
+            for item in items:
+                writer.writerow([
+                    tipo, item.get(label_a), item.get(label_b),
+                    item.get("pairs"), item.get("missing"), item.get("wins"),
+                    item.get("losses"), item.get("ties"),
+                    _csv_num(item.get("operator_mean")),
+                    _csv_num(item.get("baseline_mean")),
+                    _csv_num(item.get("mean_difference")),
+                    _csv_num(item.get("sd_difference")),
+                    _csv_num(item.get("ci95_low")),
+                    _csv_num(item.get("ci95_high")),
+                    _csv_num(item.get("relative")),
+                    _csv_num(item.get("cohens_dz")),
+                    _csv_num(item.get("wilcoxon_statistic")),
+                    _csv_num(item.get("wilcoxon_p")),
+                    _csv_num(item.get("wilcoxon_p_holm")),
+                ])
+
+
+def _csv_num(value):
+    if value is None:
+        return ""
+    try:
+        return f"{float(value):.10g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def write_report(path, name, args, rows, comparisons, frames, scores, values,
                  operators, protocols, pairwise_results=None, stability=None,
-                 failures=None):
+                 failures=None, group_results=None):
     lines = [f"# Comparacion de operadores: {name}", ""]
     lines += [
         "## Diseno",
@@ -584,6 +953,28 @@ def write_report(path, name, args, rows, comparisons, frames, scores, values,
             )
         lines.append("")
 
+    if group_results:
+        lines += ["## Contraste entre grupos", "",
+                  "Cada grupo promedia sus operadores por repeticion (misma "
+                  "semilla, misma poblacion inicial). El marco de "
+                  "normalizacion es el consolidado de los dos grupos "
+                  "comparados.", "",
+                  "| Grupo | vs | Miembros | Pares | Falta | Gana | Pierde | "
+                  "Dif. media [IC95] | Relativo | dz | p | p Holm |",
+                  "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+        for c in group_results:
+            rel = "-" if c["relative"] is None else f"{100 * c['relative']:+.1f}%"
+            dz = "-" if c["cohens_dz"] is None else f"{c['cohens_dz']:.2f}"
+            lines.append(
+                f"| {c['group']} | {c['baseline_group']} | "
+                f"{', '.join(c['members'])} vs {', '.join(c['baseline_members'])} | "
+                f"{c['pairs']} | {c['missing']} | {c['wins']} | {c['losses']} | "
+                f"{_fmt(c['mean_difference'], signed=True)} {_ci(c)} | {rel} | "
+                f"{dz} | {_p(c['wilcoxon_p'])} | "
+                f"{_p(c.get('wilcoxon_p_holm'))} |"
+            )
+        lines.append("")
+
     if comparisons:
         lines += ["## Comparaciones pareadas (marco compartido de todos)", "",
                   "| Operador | vs | Pares | Falta | Gana | Pierde | Empata | "
@@ -628,15 +1019,29 @@ def write_report(path, name, args, rows, comparisons, frames, scores, values,
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--operator", action="append", required=True,
-                        help="nombre=ruta.py o nombre=classic:ox (repetible)")
+    parser.add_argument("--operator", action="append", required=False,
+                        help="nombre=ruta.py (LLaMEA), nombre=classic:ox, "
+                             "nombre=ge:Etiqueta@archivo_operators.txt (GE). "
+                             "Repetible.")
+    parser.add_argument("--ge-operators", action="append", default=[],
+                        help="Experimento GE del que tomar sus operadores "
+                             "(`<modelo>_operators.txt`: Best/Middle/Worst). "
+                             "Repetible.")
+    parser.add_argument("--group", action="append", default=[],
+                        help="grupo=nombre1,nombre2: agrupa operadores para "
+                             "los contrastes entre grupos. Repetible.")
+    parser.add_argument("--contrast", action="append", default=[],
+                        help="grupoA:grupoB: contraste pareado entre dos "
+                             "grupos (p. ej. base:ge, llamea:base). "
+                             "Repetible.")
     parser.add_argument("--split", choices=["train", "test"], default="test")
     parser.add_argument("--instances", default="8",
                         help="Numero de instancias del split, o 'all'. Usar el "
                              "mismo valor que TEST_INSTANCES para que la "
                              "evaluacion final y la comparacion sean pareadas.")
     parser.add_argument("--repeats", type=int, default=None,
-                        help="repeticiones independientes (default 11)")
+                        help="repeticiones independientes (default 31, como "
+                             "N_EXPERIMENTS de la evaluacion GE)")
     parser.add_argument("--mo-generations", type=int, default=None,
                         help="generaciones del MOEA interno (default 30; 300 con --ge-protocol)")
     parser.add_argument("--mo-population-size", type=int, default=None,
@@ -660,8 +1065,12 @@ def main():
                         help="que hacer si un operador falla en una instancia: "
                              "zero = HV 0 (default, conserva el par); exclude = "
                              "descarta el par; abort = detiene la comparacion.")
-    parser.add_argument("--save-fronts", action="store_true",
-                        help="guarda los frentes en fronts.npz (permite reanalizar sin repetir el MOEA)")
+    parser.add_argument("--save-fronts", action="store_true", default=True,
+                        help="guarda los frentes en fronts.npz (por defecto: "
+                             "permite reanalizar sin repetir el MOEA)")
+    parser.add_argument("--no-save-fronts", dest="save_fronts",
+                        action="store_false",
+                        help="no guardar los frentes (solo el informe)")
     parser.add_argument("--load-fronts", action="store_true",
                         help="reutiliza fronts.npz del directorio de salida para los (operador, repeticion, instancia) ya calculados")
     args = parser.parse_args()
@@ -669,7 +1078,7 @@ def main():
     # Defaults que dependen de --ge-protocol. Un valor explicito del usuario
     # siempre gana; `None` distingue "no lo especifique" de "quiero 30/30".
     if args.repeats is None:
-        args.repeats = 11
+        args.repeats = 31
     if args.mo_generations is None:
         args.mo_generations = 300 if args.ge_protocol else 30
     if args.mo_population_size is None:
@@ -684,6 +1093,19 @@ def main():
     all_paths = instance_paths(train=args.split == "train")
     args.paths = _select_instances(all_paths, args.instances, args.seed)
     operators = [load_operator(spec) for spec in args.operator]
+    # Operadores de la evolucion gramatical: se toman del experimento tal
+    # como los exporta el original (`<modelo>_operators.txt`).
+    for experiment_path in args.ge_operators:
+        found = load_ge_operators(experiment_path)
+        if not found:
+            raise SystemExit(
+                f"no se encontraron operadores GE en {experiment_path!r} "
+                "(se esperaba un archivo `<modelo>_operators.txt`)")
+        for label, expression in found.items():
+            operators.append((label, ge_namespace(expression), "ge", expression))
+    if not operators:
+        raise SystemExit("indica al menos un operador con --operator o "
+                         "--ge-operators")
     names = [name for name, _ns, _kind, _src in operators]
     duplicated = {name for name in names if names.count(name) > 1}
     if duplicated:
@@ -699,6 +1121,7 @@ def main():
         protocol_name(solver, mutation) for solver, mutation in protocols))
     default_protocol = protocol_name(*protocols[0])
     existing = None
+    existing_failures = {}
     if args.load_fronts:
         npz_path = os.path.join(out_dir, "fronts.npz")
         if os.path.exists(npz_path):
@@ -716,11 +1139,24 @@ def main():
                         raise SystemExit(f"clave invalida en fronts.npz: {key!r}")
                     existing[(protocol, op_name, int(rep), int(index))] = data[key]
             print(f"Reutilizando {len(existing)} frentes de {npz_path}")
+            # Los fallos se recargan con su motivo exacto: sin esto, un par
+            # fallido se contaria como "fallo recuperado" sin explicacion.
+            failures_path = os.path.join(out_dir, "failures.json")
+            if os.path.exists(failures_path):
+                with open(failures_path) as handle:
+                    stored = json.load(handle)
+                for key, reason in stored.items():
+                    parts = key.split("|")
+                    if len(parts) == 4:
+                        protocol, op_name, rep, index = parts
+                        existing_failures[(protocol, op_name, int(rep),
+                                           int(index))] = reason
+                print(f"Reutilizando {len(stored)} fallos de {failures_path}")
         else:
             print(f"AVISO: no hay {npz_path}; se recalcula todo")
     start = time.time()
     fronts, failures = collect_fronts(operators, args.paths, args, protocols,
-                                      existing)
+                                      existing, stored_failures=existing_failures)
     print(f"MOEA terminado en {time.time() - start:.1f}s; calculando HV...")
 
     frames = shared_frame(fronts, operators, protocols, len(args.paths),
@@ -735,6 +1171,22 @@ def main():
                         failures=failures, fail_policy=args.fail_policy)
     )
     stability = rank_stability(scores, operators)
+
+    groups = parse_groups(args.group)
+    contrasts = parse_contrasts(args.contrast)
+    for left, right in contrasts:
+        for group in (left, right):
+            if group not in groups:
+                raise SystemExit(
+                    f"el contraste {left}:{right} usa el grupo {group!r}, que no "
+                    f"esta declarado (usa --group {group}=op1,op2)")
+    group_results = []
+    if contrasts:
+        group_results = add_holm(
+            group_contrasts(fronts, rows, protocols, len(args.paths),
+                            args.repeats, groups, contrasts,
+                            failures=failures, fail_policy=args.fail_policy)
+        )
 
     result = {
         "config": {
@@ -775,6 +1227,8 @@ def main():
         "operators": rows,
         "comparisons": comparisons,
         "pairwise_head_to_head": pairwise_results,
+        "group_contrasts": group_results,
+        "groups": groups,
         "rank_stability": stability,
         "per_run_scores": scores,
         "per_protocol_scores": {
@@ -822,12 +1276,24 @@ def main():
                for (protocol, name, rep, index), front in fronts.items()
                if front is not None},
         )
+    # Los fallos no caben en el npz (son texto): van aparte, para que al
+    # recargar los frentes se sepa que pares son HV 0 y cuales missing.
+    with open(os.path.join(out_dir, "failures.json"), "w") as handle:
+        json.dump({f"{protocol}|{name}|{rep}|{index}": reason
+                   for (protocol, name, rep, index), reason in failures.items()},
+                  handle, indent=2)
     with open(os.path.join(out_dir, "evaluation.json"), "w") as handle:
         json.dump(result, handle, indent=2)
+    write_csvs(out_dir, args, rows, comparisons, pairwise_results, values,
+               operators, protocols, group_results)
+    write_instance_artifacts(out_dir, args, fronts, values, frames, operators,
+                             protocols)
     write_report(os.path.join(out_dir, "report.md"), name, args, rows,
                  comparisons, frames, scores, values, operators, protocols,
-                 pairwise_results, stability, failures)
+                 pairwise_results, stability, failures, group_results)
     print(f"Guardado en {out_dir}")
+    print("  hv_por_instancia.csv  resumen_operadores.csv  contrastes.csv")
+    print("  fronts.npz (reutilizable con --load-fronts)  evaluation.json")
 
 
 if __name__ == "__main__":

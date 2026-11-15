@@ -19,7 +19,7 @@ def _frame():
 
 
 def _operators():
-    return [("a", None, "discovered", "code"), ("b", None, "classic", "ox")]
+    return [("a", None, "llamea", "code"), ("b", None, "classic", "ox")]
 
 
 def test_failed_front_counts_as_zero_or_is_excluded():
@@ -67,6 +67,57 @@ def test_protocols_include_solver_and_mutation_variants():
         ("MOEAD", True), ("NSGAII", True),
     ]
     assert compare.protocol_name("MOEAD", True) == "MOEAD+mut"
+
+
+def test_load_operator_reads_a_ge_operator(tmp_path):
+    path = tmp_path / "MOEAD_operators.txt"
+    path.write_text(
+        "Best: order_based(fill_first_occurring,preserve_elements,y,"
+        "order_based(fill_first_occurring,preserve_elements,y,reverse(y)))\n",
+        encoding="utf-8")
+    name, namespace, kind, source = compare.load_operator(
+        f"ge_best=ge:Best@{path}")
+    assert name == "ge_best"
+    assert kind == "ge"
+    assert source.startswith("order_based(")
+    assert callable(namespace["crossover"])
+
+
+def test_load_operator_rejects_unknown_ge_label(tmp_path):
+    path = tmp_path / "MOEAD_operators.txt"
+    path.write_text("Best: reverse(y)\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        compare.load_operator(f"ge=ge:Missing@{path}")
+
+
+def test_parse_groups_and_contrasts():
+    groups = compare.parse_groups(["base=ox,pmx", "ge=ge_best"])
+    assert groups == {"base": ["ox", "pmx"], "ge": ["ge_best"]}
+    assert compare.parse_contrasts(["base:ge"]) == [("base", "ge")]
+    with pytest.raises(SystemExit):
+        compare.parse_contrasts(["base_ge"])
+
+
+def test_group_contrasts_compares_two_groups():
+    protocols = [("MOEAD", False)]
+    operators = [("ox", None, "classic", "ox"), ("llamea", None, "llamea", "code")]
+    fronts = {
+        ("MOEAD", "ox", 0, 0): np.array([[0.0, 1.0], [1.0, 0.0]]),
+        ("MOEAD", "llamea", 0, 0): np.array([[0.5, 0.5]]),
+    }
+    rows = [
+        {"operator": "ox", "kind": "classic", "runs": 1, "mean": 0.1},
+        {"operator": "llamea", "kind": "llamea", "runs": 1, "mean": 0.4},
+    ]
+    results = compare.group_contrasts(
+        fronts, rows, protocols, 1, 1,
+        {"base": ["ox"], "nuevo": ["llamea"]}, [("nuevo", "base")])
+    assert len(results) == 1
+    contrast = results[0]
+    assert contrast["group"] == "nuevo"
+    assert contrast["baseline_group"] == "base"
+    assert contrast["pairs"] == 1
+    assert contrast["wins"] == 1
 
 
 def test_reference_history_stays_aligned_when_a_classic_appears_late():
