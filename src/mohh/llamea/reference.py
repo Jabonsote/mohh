@@ -123,12 +123,43 @@ def erx(x, y):
     return np.array(child, dtype=x.dtype)
 
 
+def pmx_canonical(x, y):
+    """PMX canonico (Deb): correspondencia de valores dentro del segmento.
+
+    A diferencia de `pmx` (que repara por posiciones), aqui el segmento
+    ``[start, end]`` de `x` se copia tal cual y se construye el mapeo de
+    valores ``x[start+i] -> y[start+i]``; cada posicion fuera del segmento
+    toma el valor de `y` aplicando ese mapeo hasta salir del segmento. Es la
+    variante que LLaMEA rediscoverio (ver el operador encontrado en
+    `results/searches/glm-gptoss/llamea_best_operator.py`).
+    """
+    n = len(x)
+    start = int(np.random.randint(0, n - 1))
+    end = int(np.random.randint(start + 1, n))
+    child = np.empty(n, dtype=x.dtype)
+    child[start:end + 1] = x[start:end + 1]
+    segment_values = list(x[start:end + 1])
+    mapping = {int(value): int(y[start + i])
+               for i, value in enumerate(segment_values)}
+    segment = set(mapping.keys())
+    for position in range(n):
+        if start <= position <= end:
+            continue
+        gene = int(y[position])
+        while gene in segment:
+            gene = mapping[gene]
+        child[position] = gene
+    return child
+
+
 # Panel por defecto: cubre orden (OX), posicion (PBX), mapeo (PMX),
-# ciclos (CX) y adyacencia (ERX).
+# ciclos (CX) y adyacencia (ERX). `pmx_canonical` es la variante de mapeo
+# por valores (Deb), distinta del `pmx` del panel.
 REFERENCE_OPERATORS = {
     "ox": ox,
     "pbx": pbx,
     "pmx": pmx,
+    "pmx_canonical": pmx_canonical,
     "cx": cx,
     "erx": erx,
 }
