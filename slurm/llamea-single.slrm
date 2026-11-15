@@ -66,7 +66,30 @@ EXP_DIR="results/${CATEGORY}/${EXPERIMENT_NAME}"
 
 # Modelo y limites segun el perfil de GPU (override con MODEL/GPU_MEM_UTIL/...).
 source slurm/llamea-gpu-profile.sh
-PORT="${PORT:-8000}"
+# Puerto unico por job: un vLLM zombi de un job anterior en el mismo nodo
+# deja el 8000 ocupado y este job se quedaria 30 min esperando el servidor.
+PORT="${PORT:-$((8000 + ${SLURM_JOB_ID:-0} % 1000))}"
+
+# El puerto tiene que estar libre antes de arrancar vLLM (fallo rapido en
+# lugar de 30 min de espera).
+if ! python - "$PORT" <<'PYPORT'
+import socket
+import sys
+
+sock = socket.socket()
+try:
+    sock.bind(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    sys.exit(1)
+finally:
+    sock.close()
+PYPORT
+then
+    echo "ERROR: el puerto $PORT ya esta ocupado en $(hostname)." >&2
+    echo "       Suele ser un vLLM de un job anterior: cancélalo y revisa" >&2
+    echo "       'sacct -u $USER -S hoy' para ver jobs que siguen vivos." >&2
+    exit 1
+fi
 
 echo "Nodo:           $SLURM_JOB_NODELIST"
 echo "Experimento:    $EXPERIMENT_NAME"
@@ -74,6 +97,7 @@ echo "Perfil:         $PROFILE"
 echo "Modelo:         $MODEL"
 echo "Constraint:     $CONSTRAINT"
 echo "max-model-len:  $MAX_MODEL_LEN   gpu-mem-util: $GPU_MEM_UTIL"
+echo "puerto:          $PORT"
 echo "vLLM args:      ${VLLM_ARGS:-} ${EXTRA_VLLM_ARGS:-}"
 
 # vLLM usa unos pocos hilos para tokenizacion/planificacion; el MOEA interno es
