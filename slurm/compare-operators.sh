@@ -13,9 +13,11 @@
 #
 # Opciones por entorno (se exportan al job con --export=ALL):
 #   OPERATORS          lista "nombre=fuente" (separada por espacios)
+#   GROUPS             "nombre=op1,op2" (repetible): agrupa operadores
+#   CONTRASTS          "grupoA:grupoB" (repetible): contraste entre grupos
 #   SPLIT (test)       train | test
 #   INSTANCES (all)    numero de instancias o 'all'
-#   REPEATS (11)       repeticiones independientes
+#   REPEATS (31)       repeticiones independientes (N_EXPERIMENTS de GE)
 #   GE_PROTOCOL (1)    1 = protocolo GE completo (3 solvers, ambas mutaciones,
 #                      300/105); 0 = protocolo corto (MOEAD, 30/30)
 #   MO_GENERATIONS     override explicito de generaciones MOEA
@@ -48,7 +50,10 @@ fi
 
 export SPLIT="${SPLIT:-test}"
 export INSTANCES="${INSTANCES:-all}"
-export REPEATS="${REPEATS:-11}"
+export REPEATS="${REPEATS:-31}"
+# Grupos and contrasts: "name=op1,op2" and "groupA:groupB" (repeatable).
+export GROUPS="${GROUPS:-}"
+export CONTRASTS="${CONTRASTS:-}"
 export GE_PROTOCOL="${GE_PROTOCOL:-1}"
 export SEED="${SEED:-42}"
 export NAME="${NAME:-llamea_vs_clasicos}"
@@ -105,6 +110,13 @@ fi
 if [ -n "${SOLVER:-}" ]; then
     ARGS+=(--solver "$SOLVER")
 fi
+# Cada grupo/contraste se pasa como un argumento propio.
+for group in $GROUPS; do
+    ARGS+=(--group "$group")
+done
+for contrast in $CONTRASTS; do
+    ARGS+=(--contrast "$contrast")
+done
 # OPERATORS: cada token "nombre=fuente" se pasa como --operator.
 for spec in $OPERATORS; do
     ARGS+=(--operator "$spec")
