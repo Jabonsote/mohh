@@ -266,7 +266,7 @@ ARGS=(
     --top-k "${TOP_K:-20}"
     --sampling-repetition-penalty "${SAMPLING_REPETITION_PENALTY:-1.05}"
     --thinking "${THINKING:-auto}"
-    --max-tokens "${MAX_TOKENS:-2048}"
+    --max-tokens "${MAX_TOKENS:-4096}"
     --operator-memory "${OPERATOR_MEMORY:-6}"
     --repeat-penalty "${REPEAT_PENALTY:-0.5}"
     --patience "${PATIENCE:-0}"
@@ -284,6 +284,19 @@ ARGS=(
     --results-dir "results/${CATEGORY:-searches}"
     --experiment-name "${EXPERIMENT_NAME}"
 )
+# Aviso: con modelos de razonamiento (gpt-oss, GLM con --reasoning-parser) el
+# pensamiento consume la mayor parte de `max_tokens`. Si la respuesta se corta,
+# el codigo nunca llega a escribirse (31,8 % de las peticiones en
+# `results/searches/glm-gptoss` con 2048 tokens). El modo pensamiento NO se
+# desactiva: lo que hace falta es presupuesto para el codigo.
+MAX_TOKENS_EFF="${MAX_TOKENS:-4096}"
+if [ "$MAX_TOKENS_EFF" -lt 8192 ] 2>/dev/null; then
+    echo "AVISO: MAX_TOKENS=$MAX_TOKENS_EFF puede ser corto para un modelo de" >&2
+    echo "       razonamiento: la respuesta se cortaria antes de escribir el" >&2
+    echo "       codigo. Usa MAX_TOKENS=8192 (los perfiles gptoss-20b y" >&2
+    echo "       glm47-flash ya lo ponen)." >&2
+fi
+
 if [ "${EVAL_TEST:-0}" = "1" ]; then
     ARGS+=(--eval-test --test-instances "${TEST_INSTANCES:-all}")
 fi

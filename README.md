@@ -280,6 +280,26 @@ the LLM is injected through `solver.crossover` (`src/mohh/llamea/`).
 Cluster quick start: [`docs/llamea-prompts/CLUSTER.md`](docs/llamea-prompts/CLUSTER.md).
 Full background and design notes: [`docs/llamea-prompts/`](docs/llamea-prompts/).
 
+### Rules the generated operator must follow
+
+The 1+1 loop (`--simple`, `src/mohh/llamea/simple.py`) accepts an operator only
+if it is **reproducible** and if the prompt tells the model what it is
+refining:
+
+- **Reproducibility**: the operator must use numpy's global RNG
+  (`np.random.*`). A private generator (`np.random.default_rng()`) is
+  rejected, because the harness seeds `np.random.seed(...)` and a private
+  generator ignores that seed: the operator would not be reproducible and the
+  paired comparison would measure noise.
+- **`refine` vs `create`**: `refine` shows the parent operator (the incumbent
+  or a random prior) with **its own** mean rank; `create` shows no operator at
+  all, only the interface skeleton, so the model explores instead of copying.
+- **Token budget**: reasoning models (`gpt-oss`, GLM with `--reasoning-parser`)
+  spend most of `max_tokens` thinking. If the answer is cut off, the code is
+  never written: `search_summary.json` counts it as
+  `respuesta truncada` and `tokens.truncated_responses` counts the cut
+  answers. Use `MAX_TOKENS=8192` for those models.
+
 ### Install
 
 ```bash

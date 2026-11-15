@@ -20,6 +20,7 @@ import json
 import linecache
 import multiprocessing
 import os
+import re
 import signal
 import tempfile
 import threading
@@ -397,7 +398,24 @@ def validate_operator_minimal(crossover_func):
     return True, None
 
 
-def compile_operator(code: str, timeout=COMPILE_TIMEOUT) -> dict:
+#: Generador propio sin semilla: `np.random.default_rng()` sin argumentos.
+#: El arnes siembra el RNG global (`np.random.seed`), pero un generador propio
+#: se inicializa con la entropia del sistema: el operador deja de ser
+#: reproducible y la comparacion pareada (mismas semillas) pierde sentido.
+_UNSEEDED_RNG_RE = re.compile(r"default_rng\s*\(\s*\)")
+
+
+def uses_unseeded_rng(code: str) -> bool:
+    """True si el codigo crea un generador propio sin semilla.
+
+    `np.random.default_rng(42)` si es determinista y no se rechaza; lo que
+    rompe la reproducibilidad es la llamada sin argumentos.
+    """
+    return bool(_UNSEEDED_RNG_RE.search(code or ""))
+
+
+def compile_operator(code: str, timeout=COMPILE_TIMEOUT,
+                     check_seeded_rng=True) -> dict:
     """`exec` del codigo del LLM; devuelve el namespace o lanza ValueError.
 
     El namespace incluye los primitivos de permutacion de MOHH-R, de modo que
@@ -408,12 +426,27 @@ def compile_operator(code: str, timeout=COMPILE_TIMEOUT) -> dict:
     tamano fallo, que se encontro en lugar de una permutacion y, si el codigo
     lanzo una excepcion, la linea que la provoco.
 
+    `check_seeded_rng=True` rechaza los operadores que crean su propio
+    generador sin semilla (`np.random.default_rng()`): el arnes siembra el RNG
+    global, pero ese generador se inicializa con la entropia del sistema y el
+    operador dejaria de ser reproducible (rompe la comparacion pareada). La
+    comparacion de operadores lo desactiva para poder cargar el operador y
+    avisar.
+
     El `exec` va acotado por `timeout`: el LLM suele dejar codigo de modulo
     ("self-check" que llama a `crossover` al importar) y un bucle infinito ahi
     colgaba la corrida entera (paso en
     `results/searches/qwen25coder7b_moead_b30_st_r3`, ver
     `docs/llamea-prompts/areas-de-mejora.md` §14).
     """
+    if check_seeded_rng and uses_unseeded_rng(code):
+        raise ValueError(
+            "Operator creates its own random generator without a seed "
+            "(np.random.default_rng()). The evaluation seeds numpy's global "
+            "RNG (np.random.seed), but a private generator ignores it and the "
+            "operator would not be reproducible. Use the global RNG "
+            "(np.random.*) instead."
+        )
     namespace = primitive_namespace()
     try:
         compiled = _compile_with_source(code)

@@ -41,7 +41,16 @@ The operator must work for any n >= 2.
 Do NOT call `.pop()` or `.index()` on a numpy array; convert with
 `list(x)` first if needed. Ensure `len(child) == n`, every value appears
 exactly once, and there are no -1 entries. It must also work when `x` is
-`[0, 1, ..., n-1]` and `y` is `[n-1, ..., 1, 0]`."""
+`[0, 1, ..., n-1]` and `y` is `[n-1, ..., 1, 0]`.
+
+Use randomness ONLY through numpy's global RNG (`np.random.*`). Do NOT create
+your own generator (`np.random.default_rng()`): the evaluation seeds
+`np.random.seed(...)` and a private generator would ignore that seed, making
+the operator irreproducible.
+
+Answer with the code only: no long explanations, no examples of usage, no
+self-checks that call `crossover` at import time. The operator must fit in a
+few dozen lines."""
 
 TASK_ONE = TASK + "\nReturn exactly one child permutation (not a tuple)."
 
@@ -54,6 +63,17 @@ STRATEGY_CREATE = (
     "tried before. Use a different combination of order, position, adjacency "
     "or cycle ideas."
 )
+
+#: Esqueleto que se muestra cuando no hay un operador padre (estrategia
+#: `create`): fija el contrato sin dar ningun mecanismo que copiar.
+SKELETON = """import numpy as np
+
+def crossover(x, y):
+    n = len(x)
+    child = np.empty(n, dtype=x.dtype)   # construye una permutacion NUEVA
+    # ... tu mecanismo ...
+    return child
+"""
 
 FORMAT = """Answer in exactly this format:
 
@@ -83,33 +103,63 @@ class Candidate:
 
 
 def build_prompt(parent_code, strategy, last_error="", score=None,
-                 description="", one_child=True, history=()):
-    """Plantilla BAG: rol, tarea, historial, codigo, estrategia y formato."""
+                 description="", one_child=True, history=(), best_score=None):
+    """Plantilla BAG: rol, tarea, historial, codigo, estrategia y formato.
+
+    `score` es el score **del padre que se muestra** (el incumbent cuando se
+    refina, el prior cuando se refina un prior) y `best_score` el del mejor
+    operador hasta ahora. Antes se confundian: se le atribuia al prior el
+    score del incumbent, asi que el modelo creia que estaba refinando el
+    mejor operador cuando en realidad era uno de los peores.
+
+    `parent_code=None` (estrategia `create`) omite el bloque `REFERENCE CODE`
+    y lo sustituye por un esqueleto: el modelo no tiene un operador que
+    copiar, solo el contrato. Anclar la exploracion al incumbent era lo que
+    hacia que la estrategia `create` fuera una copia anotada.
+    """
     task = TASK_ONE if one_child else TASK
     if strategy == "refine":
         strategy_text = STRATEGY_REFINE
     else:
         strategy_text = STRATEGY_CREATE
+    has_parent = parent_code is not None
     history_text = ""
-    if score is not None:
-        rows = []
-        for item in list(history)[-6:]:
-            if isinstance(item, (tuple, list)) and len(item) >= 2:
-                rows.append(f"- {item[0]} (Score: {item[1]:.4f})")
-            else:
-                rows.append(f"- {item}")
-        listed = "\n".join(rows)
+    rows = []
+    for item in list(history)[-6:]:
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            rows.append(f"- {item[0]} (mean rank: {item[1]:.4f})")
+        else:
+            rows.append(f"- {item}")
+    listed = "\n".join(rows)
+    legend = ("The score is the GE mean rank over the training instances "
+              "(1 = best, lower is better; 2 = worst).")
+    if has_parent:
+        shown = score if score is not None else best_score
+        if shown is not None:
+            history_text = (
+                "The algorithms already evaluated "
+                "(description, mean rank) are:\n"
+                f"{listed or '- current best (mean rank: %.4f)' % shown}\n\n"
+                f"{legend}\n\n"
+                "The selected solution to update is:\n"
+                f"{description or 'current best'} (mean rank: {shown:.4f})\n\n"
+                "Do not repeat an operator already evaluated; change its mechanism.\n\n")
+    else:
         history_text = (
             "The algorithms already evaluated "
-            "(name, description, score) are:\n"
-            f"{listed or '- current best (Score: %.4f)' % score}\n\n"
-            "The selected solution to update is:\n"
-            f"{description or 'current best'} (Score: {score:.4f}; "
-            "1 is best; lower is better)\n\n"
-            "Do not repeat an operator already evaluated; change its mechanism.\n\n")
+            "(description, mean rank) are:\n"
+            f"{listed or '- (none yet)'}\n\n"
+            f"{legend}\n\n"
+            "There is no parent operator: design a new one from scratch, "
+            "with a mechanism different from the ones listed above.\n\n")
+    if has_parent:
+        reference = f"REFERENCE CODE\n```python\n{parent_code}\n```"
+    else:
+        reference = ("SKELETON (fill in the mechanism yourself; do not copy a "
+                     "known operator verbatim)\n```python\n" + SKELETON + "```")
     prompt = (
         f"{ROLE}\n\nTASK\n{task}\n\n{history_text}"
-        f"REFERENCE CODE\n```python\n{parent_code}\n```\n\n"
+        f"{reference}\n\n"
         f"STRATEGY\n{strategy_text}\n\n{FORMAT}"
     )
     if last_error:
@@ -118,6 +168,23 @@ def build_prompt(parent_code, strategy, last_error="", score=None,
             f"{last_error}\n"
             "Fix that exact error. Return a complete, runnable operator.")
     return prompt
+
+
+def _response_truncated(llm):
+    """True si la ultima respuesta del LLM se corto por el limite de tokens.
+
+    Con modelos de razonamiento (`thinking=auto`) el pensamiento se come el
+    presupuesto de `max_tokens` y la respuesta se corta antes de escribir el
+    codigo: en `glm-gptoss` eso fue el 31,8 % de las peticiones y la causa
+    de casi todos los fallos de parseo.
+    """
+    checker = getattr(llm, "last_truncated", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:  # noqa: BLE001 - nunca debe tumbar la corrida
+            return False
+    return False
 
 
 def minimal_compile(code):
@@ -187,6 +254,9 @@ def _summary(args, exp_dir, evaluator, llm, state):
             "invalid": state["invalid"],
             "success_rate": (state["valid"] / total) if total else None,
             "improvements": state["improvements"],
+            # Respuestas cortadas por `max_tokens`: el modelo no llego a
+            # escribir el codigo. Es el motivo de casi todos los fallos.
+            "truncated_responses": tokens.get("truncated_responses"),
         },
         "failures": {
             "total": state["invalid"],
@@ -396,6 +466,13 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
         logger.info("Prior %s: rank=%s hv=%s error=%s",
                     label, candidate.fitness, candidate.hv, candidate.error)
 
+    # Score de cada prior: el prompt debe mostrar el score del operador que
+    # se pide refinar, no el del incumbent.
+    prior_scores = {}
+    for (label, _), candidate in zip(priors, prior_solutions):
+        value = float(candidate.fitness)
+        prior_scores[label] = value if math.isfinite(value) else None
+
     best_code = best_solution.code
     best_fitness = float(best_solution.fitness)
     best_hv = best_solution.hv
@@ -441,26 +518,53 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
         if iteration % args.prior_every == 0:
             parent_label, parent_code = next_prior()
             strategy = "refine"
+            # Si el prior no se pudo evaluar, su score es desconocido: se
+            # muestra el del incumbent (que es lo unico que hay).
+            parent_score = prior_scores.get(parent_label)
+            if parent_score is None:
+                parent_score = best_fitness
         elif random.random() < 0.5:
             parent_label, parent_code = "current-best", best_code
             strategy = "refine"
+            parent_score = best_fitness
         else:
-            parent_label, parent_code = "current-best", best_code
+            # `create` no lleva codigo de referencia: sin un operador que
+            # copiar, el modelo explora de verdad. Antes receive el incumbent
+            # y "crear" era una copia anotada de su mecanismo.
+            parent_label, parent_code = "new-operator", None
             strategy = "create"
+            parent_score = None
 
         prompt = build_prompt(
             parent_code, strategy, last_error=last_error,
-            score=best_fitness, description=parent_label, one_child=True,
-            history=history)
+            score=parent_score, description=parent_label, one_child=True,
+            history=history, best_score=best_fitness)
         try:
             response = llm.query([{"role": "user", "content": prompt}])
             code = parse_llm_response(response or "")
         except Exception as error:  # noqa: BLE001
-            logger.warning("iter %d: respuesta invalida: %s", iteration, error)
-            last_error = f"{type(error).__name__}: {error}"
+            truncated = _response_truncated(llm)
+            if truncated:
+                # Se agotaron los tokens: el modelo no llego a escribir el
+                # codigo. Es un fallo del presupuesto, no del operador, asi
+                # que se cuenta aparte y el feedback pide una respuesta corta.
+                stage = "respuesta truncada"
+                reason = "max_tokens agotado"
+                last_error = (
+                    "the previous answer was cut off because it ran out of "
+                    "tokens before the code was written. Answer with the code "
+                    "only: a few dozen lines, no explanations, no usage "
+                    "examples, no self-check at import time.")
+                logger.warning("iter %d: respuesta truncada (max_tokens)",
+                               iteration)
+            else:
+                stage = "respuesta invalida"
+                reason = type(error).__name__
+                last_error = f"{type(error).__name__}: {error}"
+                logger.warning("iter %d: respuesta invalida: %s", iteration, error)
             _append_jsonl(candidates_path, {
                 "iteration": iteration, "valid": False,
-                "error": f"{type(error).__name__}: {error}",
+                "error": last_error,
                 "parent": parent_label, "strategy": strategy,
                 "description": "", "code": (response or "")[:2000],
             })
@@ -468,9 +572,9 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
                 handle.write(
                     f"iter {iteration} best={best_fitness:.6f} "
                     f"best_hv={best_hv} candidate=worst "
-                    f"valid=0 error={type(error).__name__} "
+                    f"valid=0 error={stage} "
                     f"parent={parent_label} strategy={strategy}\n")
-            _count_failure(state, "respuesta invalida", type(error).__name__)
+            _count_failure(state, stage, reason)
             state["timeline"].append({
                 "iteration": iteration, "valid": False,
                 "fitness": None, "hv": None,

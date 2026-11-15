@@ -33,10 +33,29 @@ done
 `Gres` es el total del nodo; `AllocTRES` lo ocupado. `MIXED` puede tener GPU
 libre; `IDLE` está libre; `DOWN` no se puede usar.
 
-A100/H100: `coder30b-awq`, `glm47-flash-awq`, `big-quant`.
+A100/H100: `coder30b-awq`, `glm47-flash-awq`, `big-quant`, `gptoss-20b`.
 H100: `coder30b-fp8`, `coder-next-awq`.
-A10: `coder30b-awq-a10`, `qwen3-8b-awq`, `a10-quant`, `coder8b`.
+A10: `coder30b-awq-a10`, `qwen3-8b-awq`, `a10-quant`, `coder8b`, `gptoss-20b`.
 Pasa `PROFILE` explícito.
+
+### Modelos de razonamiento: `MAX_TOKENS`
+
+`gptoss-20b`, `glm47-flash-awq` y `glm47-flash-awq-a10` razonan antes de
+responder, y el pensamiento se come `max_tokens`. Con `MAX_TOKENS=2048` el
+31,8 % de las respuestas se cortaron **antes de escribir el codigo**
+(`results/searches/glm-gptoss`): ese presupuesto perdido es la causa de
+casi todos los fallos de parseo.
+
+El modo pensamiento **no** se desactiva; lo que hace falta es presupuesto:
+
+```bash
+PROFILE=gptoss-20b GENERATIONS=1000 bash slurm/llamea-all.sh   # MAX_TOKENS=8192
+```
+
+Los perfiles de razonamiento ya traen `MAX_TOKENS=8192`. Para subirlos:
+`MAX_TOKENS=16384`. Si la respuesta se corta, el resumen lo dice:
+`search_summary.json` -> `failures.by_reason["respuesta truncada: ..."]` y
+`tokens.truncated_responses`.
 
 Si vLLM muere al arrancar con `NVMLError_InvalidArgument` o `No CUDA
 runtime is found`, revisa el mapeo de GPU dentro del job:
@@ -89,6 +108,12 @@ job. En `SIMPLE=1`, `EVAL_TEST=1` no llega a ejecutar la evaluación final:
 
 Resultados: `results/searches/<EXPERIMENT_NAME>/`. Ahí están `progress.txt`,
 `llamea_best_operator.py`, `candidates.jsonl` y `llm_requests.jsonl`.
+
+El operador encontrado debe ser **reproducible**: la búsqueda rechaza los
+operadores que crean su propio generador sin semilla (`np.random.default_rng()`),
+porque el arnés siembra `np.random.seed(...)` y ese generador lo ignora. Para
+comparar un operador antiguo que use esa API, `compare_operators.py` lo carga
+igualmente pero avisa por stderr.
 `COMPARE=1` escribe en `results/evaluations/`.
 
 ```bash

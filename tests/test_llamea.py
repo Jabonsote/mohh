@@ -104,6 +104,46 @@ def test_compile_operator_rejects_non_permutation():
         compile_operator(INVALID_CODE)
 
 
+def test_compile_operator_rejects_unseeded_generator():
+    """Un generador propio sin semilla rompe la reproducibilidad del MOEA."""
+    code = """import numpy as np
+
+def crossover(x, y):
+    rng = np.random.default_rng()
+    child = np.array(x, copy=True)
+    child[0], child[1] = child[1], child[0]
+    return child
+"""
+    with pytest.raises(ValueError, match="random generator"):
+        compile_operator(code)
+
+
+def test_compile_operator_accepts_seeded_generator():
+    """`default_rng(42)` es determinista: se admite."""
+    code = """import numpy as np
+
+def crossover(x, y):
+    rng = np.random.default_rng(42)
+    child = np.array(x, copy=True)
+    child[0], child[1] = child[1], child[0]
+    return child
+"""
+    compile_operator(code)
+
+
+def test_compile_operator_can_skip_the_seeded_rng_check():
+    """La comparacion de operadores carga el codigo y avisa por separado."""
+    code = """import numpy as np
+
+def crossover(x, y):
+    rng = np.random.default_rng()
+    child = np.array(x, copy=True)
+    child[0], child[1] = child[1], child[0]
+    return child
+"""
+    compile_operator(code, check_seeded_rng=False)
+
+
 def test_compile_operator_rejects_missing_function():
     with pytest.raises(ValueError):
         compile_operator(NO_FUNCTION_CODE)

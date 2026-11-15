@@ -60,13 +60,17 @@ def _args(budget=4, prior_every=2):
 class FakeLLM:
     operator_memory = 0
 
-    def __init__(self, responses):
+    def __init__(self, responses, truncated=False):
         self.responses = list(responses)
         self.prompts = []
+        self.truncated = truncated
 
     def query(self, messages, **kwargs):
         self.prompts.append(messages[-1]["content"])
         return self.responses.pop(0)
+
+    def last_truncated(self):
+        return self.truncated
 
 
 class _FakeEvaluator:
@@ -100,6 +104,31 @@ def test_build_prompt_has_reference_and_strategy():
     assert "mQAP" not in prompt
     create = simple.build_prompt(VALID, "create")
     assert "Generate a new algorithm" in create
+
+
+def test_build_prompt_create_has_no_reference_code():
+    """`create` no muestra ningun operador que copiar (si no, es una copia)."""
+    prompt = simple.build_prompt(None, "create")
+    assert "REFERENCE CODE" not in prompt
+    assert "SKELETON" in prompt
+    assert "from scratch" in prompt
+    assert "Generate a new algorithm" in prompt
+
+
+def test_build_prompt_shows_the_score_of_the_parent():
+    """El score mostrado es el del padre, no el del incumbent."""
+    prompt = simple.build_prompt(VALID, "refine", score=2.5,
+                                 description="CX", best_score=1.1)
+    assert "CX (mean rank: 2.5000)" in prompt
+    assert "1.1000" not in prompt.split("The selected solution to update is:")[1]
+
+
+def test_build_prompt_history_explains_the_scale():
+    prompt = simple.build_prompt(VALID, "refine", score=1.0,
+                                 description="current best",
+                                 history=[("OX-like", 1.9)], best_score=1.0)
+    assert "mean rank" in prompt
+    assert "1 = best" in prompt
 
 
 def test_minimal_compile_accepts_permutation_and_tuple():
@@ -251,6 +280,33 @@ def test_run_simple_prior_injection_changes_parent(tmp_path, monkeypatch):
     simple.run_simple(_args(budget=4, prior_every=2), str(tmp_path), logger, llm, [])
     # En la iteración 2 debe usar el prompt de un prior, no el del mejor.
     assert "REFERENCE CODE" in llm.prompts[1]
+
+
+def test_run_simple_create_prompt_has_no_reference_code(tmp_path, monkeypatch):
+    """En la estrategia `create` el prompt no lleva el codigo del incumbent."""
+    monkeypatch.setattr(simple, "build_population_evaluator", _fake_builder)
+    monkeypatch.setattr(simple, "load_priors", lambda: [("prior", VALID)])
+    monkeypatch.setattr(simple.random, "random", lambda: 0.9)  # -> create
+    llm = FakeLLM([VALID])
+    logger = logging.getLogger("test-simple-create")
+    simple.run_simple(_args(budget=1, prior_every=1000), str(tmp_path),
+                      logger, llm, [])
+    assert "REFERENCE CODE" not in llm.prompts[0]
+    assert "SKELETON" in llm.prompts[0]
+
+
+def test_run_simple_counts_truncated_responses(tmp_path, monkeypatch):
+    """Una respuesta cortada por `max_tokens` se cuenta como tal."""
+    monkeypatch.setattr(simple, "build_population_evaluator", _fake_builder)
+    monkeypatch.setattr(simple, "load_priors", lambda: [("prior", VALID)])
+    llm = FakeLLM(["sin codigo"], truncated=True)
+    logger = logging.getLogger("test-simple-truncated")
+    simple.run_simple(_args(budget=1), str(tmp_path), logger, llm, [])
+    summary = json.loads((tmp_path / "search_summary.json").read_text())
+    reasons = summary["failures"]["by_reason"]
+    assert any("truncada" in key for key in reasons), reasons
+    progress = (tmp_path / "progress.txt").read_text()
+    assert "respuesta truncada" in progress
 
 
 def test_build_prompt_includes_previous_error():

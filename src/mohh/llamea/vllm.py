@@ -236,11 +236,13 @@ class VLLM_LLM(OpenAI_LLM):
         self.usage = {"requests": 0, "prompt_tokens": 0,
                       "completion_tokens": 0, "total_tokens": 0,
                       "reasoning_tokens": 0, "cached_prompt_tokens": 0,
-                      "inference_seconds": 0.0, "failed_requests": 0}
+                      "inference_seconds": 0.0, "failed_requests": 0,
+                      "truncated_responses": 0}
         self.usage_history = []
         self._last_message_chars = 0
         self._last_response = None
         self._last_elapsed = 0.0
+        self._last_finish_reason = None
 
     def _install_usage_capture(self):
         """Envuelve `chat.completions.create` para registrar tokens, `max_tokens`
@@ -335,6 +337,13 @@ class VLLM_LLM(OpenAI_LLM):
             finish_reason = response.choices[0].finish_reason
         except Exception:  # noqa: BLE001
             pass
+        self._last_finish_reason = finish_reason
+        if finish_reason == "length":
+            # La respuesta se corto por `max_tokens`: con modelos de
+            # razonamiento el pensamiento se come el presupuesto y el codigo
+            # nunca llega a escribirse (31,8 % de las peticiones en
+            # `results/searches/glm-gptoss`).
+            self.usage["truncated_responses"] += 1
         reasoning_content = _message_field(
             message, "reasoning_content", "reasoning", "thinking"
         )
@@ -376,6 +385,14 @@ class VLLM_LLM(OpenAI_LLM):
         if extra:
             effective["extra_body"] = _json_safe(extra)
         return _json_safe(effective)
+
+    def last_finish_reason(self):
+        """`finish_reason` de la ultima respuesta (`length` = truncada)."""
+        return getattr(self, "_last_finish_reason", None)
+
+    def last_truncated(self):
+        """True si la ultima respuesta se corto por el limite de tokens."""
+        return self.last_finish_reason() == "length"
 
     def _response_reasoning(self):
         """`reasoning_content` de la ultima respuesta, si el servidor lo expone."""
@@ -569,6 +586,8 @@ class VLLM_LLM(OpenAI_LLM):
             self._request_lock = threading.Lock()
         if not hasattr(self, "_request_index"):
             self._request_index = 0
+        if not hasattr(self, "_last_finish_reason"):
+            self._last_finish_reason = None
         if not hasattr(self, "_last_response"):
             self._last_response = None
         if not hasattr(self, "_last_elapsed"):

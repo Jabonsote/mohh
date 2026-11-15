@@ -59,6 +59,7 @@ import argparse
 import json
 import multiprocessing
 import os
+import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
 
@@ -75,6 +76,7 @@ from mohh.llamea.fitness import (
     comprobate_frame,
     compile_operator,
     init_params,
+    uses_unseeded_rng,
     normalize_front,
 )
 from mohh.llamea.ge_operators import ge_namespace, load_ge_operators
@@ -135,7 +137,17 @@ def load_operator(spec):
         return name, ge_namespace(expression), "ge", expression
     with open(source) as handle:
         code = handle.read()
-    return name, compile_operator(code), "llamea", code
+    # El operador se carga sin el filtro de RNG sembrado: el aviso va aparte.
+    # Un `np.random.default_rng()` sin semilla hace que el operador no
+    # dependa de la semilla del MOEA, asi que los resultados no son
+    # reproducibles y la comparacion pareada no es valida.
+    namespace = compile_operator(code, check_seeded_rng=False)
+    if uses_unseeded_rng(code):
+        print(f"AVISO: el operador {name!r} crea su propio generador sin "
+              "semilla (np.random.default_rng()). No es reproducible: la "
+              "semilla del MOEA no lo controla. Semilla el operador antes de "
+              "usar estos resultados.", file=sys.stderr)
+    return name, namespace, "llamea", code
 
 
 def _ge_expression(path, label):

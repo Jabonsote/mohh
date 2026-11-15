@@ -33,6 +33,10 @@
 #   coder30b-fp8     Qwen3-Coder-30B-A3B FP8 oficial (~31 GB). Recomendado en
 #                    H100 (FP8 nativo sm90); deja KV cache para 32k.
 #   coder30b-awq-a10 El mismo 30B AWQ en A10 24 GB, contexto 8k.
+#   gptoss-20b        gpt-oss-20b (MoE, razonamiento puro). Es el modelo de
+#                    razonamiento: `MAX_TOKENS=8192` por defecto, porque con
+#                    2048 la respuesta se corta antes de escribir el codigo
+#                    (31,8 % de las peticiones en `glm-gptoss`).
 #   glm47-flash-awq  GLM-4.7-Flash (30B/3B activos) AWQ W4A16 (~20 GB),
 #                    A100 40 GB/H100 80 GB: mejor razonamiento/matematicas/
 #                    codigo (AIME25 91.6, LCB v6 64.0). Requiere vLLM main
@@ -68,6 +72,7 @@ coder30b-fp8      Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8       ~31 GB  H100
 coder30b-awq-a10  QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ  ~18 GB  A10
 glm47-flash-awq   QuantTrio/GLM-4.7-Flash-AWQ                ~20 GB  A100/H100
 glm47-flash-awq-a10 QuantTrio/GLM-4.7-Flash-AWQ              ~17 GB  A10 (4k, eager)
+gptoss-20b         openai/gpt-oss-20b                         ~13 GB  A10/A100/H100
 qwen3-8b-awq      Qwen/Qwen3-8B-AWQ                          ~6 GB   A10/A100/H100
 coder-next-awq    qtum/Qwen3-Coder-Next-AWQ                  ~42 GB  H100
 h100-fp16         Qwen/Qwen2.5-Coder-32B-Instruct             ~65 GB  H100
@@ -114,6 +119,18 @@ case "$PROFILE" in
         GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
         VLLM_ARGS="${VLLM_ARGS:---quantization awq_marlin}"
         ;;
+    gptoss-20b)
+        # gpt-oss-20b (MoE 20B, razonamiento puro): necesita tokens para el
+        # pensamiento Y para el codigo. Con `max_tokens=2048` el 31,8 % de las
+        # respuestas se cortaron antes de escribir el operador
+        # (results/searches/glm-gptoss).
+        MODEL="${MODEL:-openai/gpt-oss-20b}"
+        CONSTRAINT="${CONSTRAINT:-A10|A100|H100}"
+        MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+        GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
+        VLLM_ARGS="${VLLM_ARGS:---reasoning-parser openai_gptoss}"
+        export MAX_TOKENS="${MAX_TOKENS:-8192}"
+        ;;
     glm47-flash-awq-a10)
         # GLM-4.7-Flash AWQ (~17 GB de pesos) en A10 24 GB. La configuracion
         # anterior (0.95 de GPU, 8k, CUDA graphs) agotaba la memoria en el
@@ -125,6 +142,8 @@ case "$PROFILE" in
         MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
         GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
         VLLM_ARGS="${VLLM_ARGS:---trust-remote-code --reasoning-parser glm45 --enforce-eager}"
+        # Tambien razona: el pensamiento se come `max_tokens`.
+        export MAX_TOKENS="${MAX_TOKENS:-8192}"
         export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
         export VLLM_USE_FLASHINFER_MOE_FP16="${VLLM_USE_FLASHINFER_MOE_FP16:-1}"
         export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
@@ -148,6 +167,8 @@ case "$PROFILE" in
         MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
         GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.92}"
         VLLM_ARGS="${VLLM_ARGS:---trust-remote-code --reasoning-parser glm45}"
+        # Tambien razona: el pensamiento se come `max_tokens`.
+        export MAX_TOKENS="${MAX_TOKENS:-8192}"
         export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
         export VLLM_USE_FLASHINFER_MOE_FP16="${VLLM_USE_FLASHINFER_MOE_FP16:-1}"
         export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
@@ -199,3 +220,7 @@ case "$PROFILE" in
 esac
 
 export MODEL CONSTRAINT MAX_MODEL_LEN GPU_MEM_UTIL VLLM_ARGS PROFILE
+# `MAX_TOKENS` solo se exporta si el perfil lo define (modelos de razonamiento).
+if [ -n "${MAX_TOKENS:-}" ]; then
+    export MAX_TOKENS
+fi
