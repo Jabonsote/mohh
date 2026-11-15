@@ -30,13 +30,6 @@ from functools import lru_cache
 
 import numpy as np
 
-from mohh.llamea.diversity import (
-    BehaviorTracker,
-    behavior_descriptor,
-    behavior_fingerprint,
-    family_from_fingerprint,
-)
-
 FALLBACK_SCORE = 0.0
 
 
@@ -846,8 +839,6 @@ class OperatorEvaluator:
                  instance_timeout=INSTANCE_TIMEOUT, normalize=True,
                  bounds=None, reference_operators=None, archive=None,
                  frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0,
-                 diversity_feedback=True, diversity_log=None,
-                 target_penalty=1.0, require_target_family=False,
                  fitness_workers=1, model_names=None, mutations=None,
                  ranking=False):
         self.instance_paths = [str(p) for p in instance_paths]
@@ -886,24 +877,11 @@ class OperatorEvaluator:
         # evaluaciones seguidas, se lanza `EarlyStop` y `run.py` cierra con el
         # mejor operador guardado (evita gastar 1000 generaciones en un anclaje).
         self.patience = int(patience)
-        # Validacion contra la familia conductual objetivo del combine. El HV
-        # crudo nunca se altera: `target_penalty` solo afecta al ranking que ve
-        # LLaMEA (como `repeat_penalty`), y `require_target_family` permite
-        # rechazar el hijo antes de gastar el MOEA.
-        self.target_penalty = float(target_penalty)
-        self.require_target_family = bool(require_target_family)
-        self._target_attempts = 0
-        self._target_hits = 0
         self._best_ranking = None
         self._best_solution = None
         self._since_improvement = 0
         self._first_seen = {}            # clave -> generacion de la primera vez
         self._duplicates = 0             # repeticiones exactas evaluadas
-        # Diversidad conductual (no textual): huella de lo que hace el operador
-        # sobre pares de padres fijos, novedad, familias y archivo MAP-Elites.
-        # `diversity_feedback` agrega el diagnostico al feedback que ve el LLM.
-        self.diversity = BehaviorTracker()
-        self.diversity_feedback = bool(diversity_feedback)
         self._evaluations = 0            # llamadas a __call__ (incluye invalidas)
         self._valid_evaluations = 0      # llamadas con HV definido
         # Frentes crudos por candidato (evidencia de la evaluacion). Si es None
@@ -911,20 +889,6 @@ class OperatorEvaluator:
         self.fronts_dir = fronts_dir
         if fronts_dir:
             os.makedirs(fronts_dir, exist_ok=True)
-        # `diversity.jsonl` es una traza independiente del manifest de frentes.
-        # `run.py` pasa `exp_dir/diversity.jsonl` para conservarla incluso con
-        # `--no-save-fronts`; si no se indica, se deriva del directorio de
-        # frentes (compatibilidad con llamadas antiguas).
-        self.diversity_log = diversity_log or (
-            os.path.join(os.path.dirname(os.path.abspath(fronts_dir)),
-                         "diversity.jsonl")
-            if fronts_dir else None
-        )
-        if self.diversity_log:
-            os.makedirs(
-                os.path.dirname(os.path.abspath(self.diversity_log)), exist_ok=True
-            )
-        self._diversity_lock = threading.Lock()
         self._fronts_lock = threading.Lock()
         self._cache = {}
         self._instances = None
@@ -944,13 +908,11 @@ class OperatorEvaluator:
         """
         state = self.__dict__.copy()
         state["_instances"] = None
-        state.pop("_diversity_lock", None)
         state.pop("_fronts_lock", None)
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
-        self._diversity_lock = threading.Lock()
         self._fronts_lock = threading.Lock()
 
     def _params_overrides(self):
@@ -1252,138 +1214,8 @@ class OperatorEvaluator:
                 self._valid_evaluations / self._evaluations
                 if self._evaluations else 0.0
             ),
-            "target_family_attempts": self._target_attempts,
-            "target_family_hits": self._target_hits,
-            "target_family_hit_rate": (
-                self._target_hits / self._target_attempts
-                if self._target_attempts else 0.0
-            ),
-            "target_penalty": self.target_penalty,
-            "require_target_family": self.require_target_family,
         }
-        stats.update(self.diversity.snapshot())
         return stats
-
-    def diversity_snapshot(self):
-        """Resumen de diversidad conductual (para logger y reporte)."""
-        return self.diversity.snapshot()
-
-    def diversity_entries(self):
-        """Entradas de diversidad serializables (fingerprints incluidos)."""
-        return self.diversity.entries_snapshot()
-
-    @staticmethod
-    def _target_family(solution):
-        getter = getattr(solution, "get_metadata", None)
-        if not callable(getter):
-            return None
-        try:
-            value = getter("target_family")
-        except Exception:  # noqa: BLE001 - metadata opcional
-            return None
-        return str(value) if value else None
-
-    @staticmethod
-    def _target_note(target_family, observed_family, hit):
-        """Texto accionable para el LLM tras validar la familia objetivo."""
-        if not target_family:
-            return ""
-        if observed_family is None:
-            return (
-                f" Target family check: expected {target_family}, but the "
-                "behavior could not be measured (the fixed-pair probe failed)."
-            )
-        if hit:
-            return (
-                f" Target family check: PASS (expected {target_family}, observed "
-                f"{observed_family}). Keep this mechanism and improve its HV."
-            )
-        return (
-            f" Target family check: MISS (expected {target_family}, observed "
-            f"{observed_family}). The child did not behave as requested; change "
-            "the recombination mechanism (not just the syntax) so the measured "
-            "family matches the target."
-        )
-
-    def _behavioral_feedback(self, info, entry):
-        """Diagnostico conductual accionable para el LLM (reflexion tipo ReEvo)."""
-        if not self.diversity_feedback:
-            return ""
-        fingerprint = entry.get("fingerprint")
-        if fingerprint is None or not info:
-            return (
-                " Behavioral profile unavailable: the operator passed the basic "
-                "checks but failed the fixed-pair behavior probe. Keep it simple "
-                "and deterministic."
-            )
-
-        recombination, structure = behavior_descriptor(fingerprint)
-        family = info.get("family", "mixed")
-        closest = info.get("closest_reference")
-        closest_distance = info.get("closest_distance", 0.0)
-        novelty = float(info.get("novelty", 0.0))
-        coverage = float(info.get("coverage", 0.0))
-        hint = info.get("hint", "")
-        note = (
-            f" Behavioral profile: family={family}, closest classic={closest} "
-            f"(distance {closest_distance:.2f}), recombination={recombination:.2f}, "
-            f"structure preservation={structure:.2f}."
-        )
-        if info.get("cached"):
-            note += (
-                " This is the same code as a previous candidate; changing the "
-                "mechanism is the only way to get a new behavior."
-            )
-        elif novelty < self.diversity.threshold:
-            nearest = self.diversity.nearest(info.get("key"))
-            where = ""
-            if nearest:
-                where = (
-                    f" (generation {nearest.get('generation')}, family "
-                    f"{nearest.get('family')}, description "
-                    f"'{nearest.get('description')[:80]}')"
-                )
-            note += (
-                f" BEHAVIORALLY REDUNDANT: novelty {novelty:.3f} is below "
-                f"{self.diversity.threshold:.2f}; this behaves almost exactly like "
-                f"a previously evaluated operator{where}. A syntactic rewrite will "
-                f"not help: change the recombination mechanism."
-            )
-        else:
-            note += (
-                f" Behavioral novelty: {novelty:.3f} (0 = same behavior as an "
-                f"existing operator, 1 = unlike any tried)."
-            )
-        note += f" Behavior archive coverage: {coverage:.0%}."
-        if hint:
-            note += f" Under-explored direction: {hint}."
-        return note
-
-    def _log_diversity(self, key, info, entry, score, target_family=None,
-                       observed_family=None, target_hit=None):
-        """Traza durable por operador, aunque la corrida se corte a mitad."""
-        if not self.diversity_log:
-            return
-        record = {
-            "time": datetime.now().isoformat(timespec="seconds"),
-            "key_sha1": hashlib.sha1(key.encode("utf-8")).hexdigest()[:12],
-            "generation": info.get("generation"),
-            "family": info.get("family"),
-            "closest_reference": info.get("closest_reference"),
-            "closest_distance": info.get("closest_distance"),
-            "novelty": info.get("novelty"),
-            "cell": list(info.get("cell", ())),
-            "coverage": info.get("coverage"),
-            "fitness": float(score),
-            "fingerprint": [float(value) for value in entry["fingerprint"]],
-            "description": info.get("description", ""),
-            "target_family": target_family,
-            "observed_family": observed_family,
-            "target_family_hit": target_hit,
-        }
-        with self._diversity_lock:
-            with open(self.diversity_log, "a") as handle:
-                handle.write(json.dumps(record) + "\n")
 
     def best_solution(self):
         """El mejor `Solution` visto (para cerrar tras una parada temprana)."""
@@ -1516,7 +1348,6 @@ class OperatorEvaluator:
         # muchas veces (p. ej. el OX del ejemplo). Reutilizar los frentes
         # ahorra todo el MOEA interno sin cambiar el resultado.
         key = (solution.code or "").strip()
-        target_family = self._target_family(solution)
         entry = self._cache.get(key)
         cached_hit = entry is not None
 
@@ -1529,43 +1360,6 @@ class OperatorEvaluator:
             message = entry["error"]
             if cached_hit:
                 message = f"(reused) {message}"
-            observed_family = entry.get("observed_family")
-            target_hit = entry.get("target_hit")
-            if target_family:
-                self._target_attempts += 1
-                fingerprint = entry.get("fingerprint")
-                if target_hit is None and fingerprint is not None:
-                    observed_family = family_from_fingerprint(fingerprint)
-                    target_hit = observed_family == target_family
-                self._target_hits += int(bool(target_hit))
-                _set_metadata(solution, "target_family", target_family)
-                _set_metadata(solution, "target_family_hit", target_hit)
-                if observed_family is not None:
-                    _set_metadata(solution, "target_family_observed", observed_family)
-                message += self._target_note(target_family, observed_family,
-                                             target_hit)
-                # Dejar evidencia tambien cuando el hijo se rechaza antes del
-                # MOEA: el `diversity.jsonl` debe explicar por que no entro.
-                if entry.get("fingerprint") is not None:
-                    tracker = getattr(self, "diversity", None)
-                    self._log_diversity(
-                        key,
-                        {
-                            "generation": getattr(solution, "generation", None),
-                            "family": observed_family,
-                            "closest_reference": None,
-                            "closest_distance": None,
-                            "novelty": entry.get("novelty"),
-                            "cell": (),
-                            "coverage": getattr(tracker, "coverage", None),
-                            "description": "",
-                        },
-                        entry,
-                        FALLBACK_SCORE,
-                        target_family,
-                        observed_family,
-                        target_hit,
-                    )
             error = entry.get("exception")
             if error is None:
                 error = ValueError(message)
@@ -1651,72 +1445,6 @@ class OperatorEvaluator:
                 f"not improve the search: propose a STRUCTURALLY DIFFERENT crossover."
             )
 
-        # Diversidad conductual: se mide una sola vez por codigo (el fingerprint
-        # se calculo en `_evaluate_code`) y se expone en `Solution.metadata`
-        # para que LLaMEA use `distance_metric` / `behavior_descriptor`
-        # conductuales en novelty, clearing y MAP-Elites.
-        diversity_info = None
-        fingerprint = entry.get("fingerprint")
-        if fingerprint is not None:
-            diversity_info = self.diversity.add(
-                key, fingerprint, score,
-                generation=generation,
-                description=getattr(solution, "description", ""),
-            )
-            _set_metadata(solution, "behavior_fingerprint",
-                          [float(value) for value in fingerprint])
-            _set_metadata(solution, "behavior_descriptor",
-                          behavior_descriptor(fingerprint))
-            _set_metadata(solution, "behavior_family", diversity_info["family"])
-            _set_metadata(solution, "behavioral_novelty",
-                          float(diversity_info["novelty"]))
-            _set_metadata(solution, "behavior_cell",
-                          list(diversity_info["cell"]))
-
-        # Validacion contra la familia objetivo del combine. Se mide con el
-        # fingerprint que ya calculo el evaluador; no se vuelve a ejecutar el
-        # operador. El HV crudo queda intacto y la penalizacion, si se activa,
-        # solo afecta al ranking que ve LLaMEA.
-        observed_family = None
-        target_hit = None
-        target_note = ""
-        if target_family:
-            self._target_attempts += 1
-            if diversity_info is not None:
-                observed_family = diversity_info.get("family")
-                target_hit = observed_family == target_family
-                self._target_hits += int(target_hit)
-            _set_metadata(solution, "target_family", target_family)
-            _set_metadata(solution, "target_family_hit", target_hit)
-            if observed_family is not None:
-                _set_metadata(solution, "target_family_observed", observed_family)
-            target_note = self._target_note(target_family, observed_family,
-                                             target_hit)
-            if self.require_target_family and target_hit is False:
-                reason = (
-                    "Target family validation failed: expected "
-                    f"{target_family}, observed {observed_family}. The child was "
-                    "rejected before it could enter the population."
-                )
-                solution.set_scores(FALLBACK_SCORE, reason + target_note,
-                                    ValueError(reason))
-                self._track_best(FALLBACK_SCORE, solution)
-                if diversity_info is not None:
-                    self._log_diversity(key, diversity_info, entry, score,
-                                        target_family, observed_family, target_hit)
-                return solution
-            if target_hit is False and self.target_penalty < 1.0:
-                ranking_score *= self.target_penalty
-                target_note += (
-                    f" The ranking score was multiplied by x{self.target_penalty:.2f} "
-                    f"because the target family was missed ({score:.6f} -> "
-                    f"{ranking_score:.6f}); the raw HV is unchanged."
-                )
-
-        if diversity_info is not None:
-            self._log_diversity(key, diversity_info, entry, score,
-                                target_family, observed_family, target_hit)
-
         # El archivo de ranking guarda candidatos unicos. Antes una repeticion
         # se agregaba con la misma clave y su HV penalizado sobrescribia el de
         # la primera evaluacion (el mejor podia bajar solo por repetir codigo).
@@ -1784,8 +1512,6 @@ class OperatorEvaluator:
             f"Per-instance HV: {[None if hv is None else round(hv, 6) for hv in per_instance]}."
             f"{degenerate_note}{duplicate_note}{reuse}"
         )
-        feedback += self._behavioral_feedback(diversity_info, entry)
-        feedback += target_note
         solution.set_scores(ranking_score, feedback)
         return solution
 
@@ -1800,42 +1526,13 @@ class OperatorEvaluator:
             namespace = compile_operator(solution.code)
         except ValueError as e:
             return {"fronts": None, "per_instance": [], "score": None,
-                    "error": str(e), "exception": e, "novelty": 0.0,
-                    "fingerprint": None}
+                    "error": str(e), "exception": e, "novelty": 0.0}
 
         # Chequeo barato de degeneracion ANTES del MOEA: si el operador solo
         # copia a un padre no vale la pena correr las instancias.
         # La novedad se registra como diagnostico, pero no se rechaza el
         # candidato: el fitness decide.
         _ok, novelty, _reason = recombination_novelty(namespace["crossover"])
-
-        # Huella conductual sobre pares de padres fijos. Es independiente del
-        # MOEA y se reutiliza si el LLM repite el codigo. Si el operador falla
-        # en algun par, `behavior_fingerprint` devuelve None y la evaluacion
-        # sigue: la diversidad es un diagnostico, no un requisito de validez.
-        fingerprint = behavior_fingerprint(
-            namespace["crossover"], timeout=OPERATOR_CALL_TIMEOUT
-        )
-
-        # Validacion dura opcional: si el hijo no pertenece a la familia que
-        # pidio el combine, no se gasta el MOEA interno. El fingerprint ya se
-        # calculo sobre pares fijos y es barato comparado con las instancias.
-        target_family = self._target_family(solution)
-        if target_family and self.require_target_family and fingerprint is not None:
-            observed_family = family_from_fingerprint(fingerprint)
-            if observed_family != target_family:
-                reason = (
-                    "Target family validation failed: expected "
-                    f"{target_family}, observed {observed_family}. The child did "
-                    "not behave as requested and was rejected before the MOEA."
-                )
-                return {
-                    "fronts": None, "per_instance": [], "score": None,
-                    "error": reason, "exception": ValueError(reason),
-                    "novelty": novelty, "fingerprint": fingerprint,
-                    "target_family": target_family,
-                    "observed_family": observed_family, "target_hit": False,
-                }
 
         instances = self._ensure_instances()
         init_params(**self._params_overrides())
@@ -1864,7 +1561,6 @@ class OperatorEvaluator:
                         "error": f"Crossover failed on an instance: {detail}",
                         "exception": ValueError(detail),
                         "novelty": novelty,
-                        "fingerprint": fingerprint,
                     }
                 fronts.append(result["front"])
         else:
@@ -1881,14 +1577,12 @@ class OperatorEvaluator:
                                   f"{type(e).__name__}: {e}"),
                         "exception": e,
                         "novelty": novelty,
-                        "fingerprint": fingerprint,
                     }
                 fronts.append(front)
 
         if self.normalize:
             return {"fronts": fronts, "per_instance": [], "score": None,
-                    "error": None, "exception": None, "novelty": novelty,
-                    "fingerprint": fingerprint}
+                    "error": None, "exception": None, "novelty": novelty}
 
         # Sin normalizacion (`--no-normalize`): HV crudo por instancia.
         raw = []
@@ -1898,8 +1592,7 @@ class OperatorEvaluator:
             raw.append(float(compute_hypervolume(ref_point, front)))
         return {"fronts": None, "per_instance": raw,
                 "score": float(np.mean(raw)), "error": None,
-                "exception": None, "novelty": novelty,
-                "fingerprint": fingerprint}
+                "exception": None, "novelty": novelty}
 
     # -- artefactos ------------------------------------------------------- #
     def _save_candidate_fronts(self, key, entry, solution):
@@ -2198,6 +1891,7 @@ class PopulationEvaluator(OperatorEvaluator):
                     f"everything evaluated so far."
                 )
             solution.set_scores(score, feedback=feedback)
+            # Diversidad conductual: el operador entra en el archivo
             if not self.raw_rank:
                 self._track_best(score, solution)
                 self.archive.update(key, score)
@@ -2213,9 +1907,6 @@ def build_population_evaluator(train_instances, mo_generations,
                                reference_operators=None, archive=None,
                                frame="stationary", fronts_dir=None,
                                repeat_penalty=0.5, patience=0,
-                               diversity_feedback=True, diversity_log=None,
-                               target_penalty=1.0,
-                               require_target_family=False,
                                fitness_workers=1, model_names=None,
                                mutations=None, raw_rank=False):
     """Construye el evaluador batch con el fitness de la busqueda GE.
@@ -2239,10 +1930,6 @@ def build_population_evaluator(train_instances, mo_generations,
         fronts_dir=fronts_dir,
         repeat_penalty=repeat_penalty,
         patience=patience,
-        diversity_feedback=diversity_feedback,
-        diversity_log=diversity_log,
-        target_penalty=target_penalty,
-        require_target_family=require_target_family,
         fitness_workers=fitness_workers,
         model_names=model_names,
         mutations=mutations,
@@ -2255,8 +1942,6 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
                     instance_timeout=INSTANCE_TIMEOUT, normalize=True,
                     bounds=None, reference_operators=None, archive=None,
                     frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0,
-                    diversity_feedback=True, diversity_log=None,
-                    target_penalty=1.0, require_target_family=False,
                     fitness_workers=1, model_names=None, mutations=None,
                     ranking=False):
     """Construye la funcion de fitness que consume LLaMEA.
@@ -2303,10 +1988,6 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
         fronts_dir=fronts_dir,
         repeat_penalty=repeat_penalty,
         patience=patience,
-        diversity_feedback=diversity_feedback,
-        diversity_log=diversity_log,
-        target_penalty=target_penalty,
-        require_target_family=require_target_family,
         fitness_workers=fitness_workers,
         model_names=model_names,
         mutations=mutations,

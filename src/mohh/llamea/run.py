@@ -57,10 +57,6 @@ from mohh.llamea.prompts import (
     SKELETON_PROMPT,
     OUTPUT_FORMAT_PROMPT,
 )
-from mohh.llamea.diversity import (
-    solution_behavior_descriptor,
-    solution_distance,
-)
 from mohh.llamea.reporting import (
     ResultsExperimentLogger,
     _atomic_write_json,
@@ -186,7 +182,7 @@ def _model_revision(model):
 
 
 def _make_evaluator(paths, args, bounds=None, archive=None, fronts_dir=None,
-                    diversity_log=None):
+                    ):
     model_names = [name.strip() for name in
                    str(getattr(args, "solvers", "")).split(",") if name.strip()]
     if not model_names:
@@ -217,10 +213,6 @@ def _make_evaluator(paths, args, bounds=None, archive=None, fronts_dir=None,
         fronts_dir=fronts_dir,
         repeat_penalty=getattr(args, "repeat_penalty", 0.5),
         patience=getattr(args, "patience", 0),
-        diversity_feedback=getattr(args, "diversity_feedback", True),
-        diversity_log=diversity_log,
-        target_penalty=getattr(args, "target_penalty", 1.0),
-        require_target_family=getattr(args, "require_target_family", False),
         fitness_workers=getattr(args, "fitness_workers", 1),
         model_names=model_names,
         mutations=mutations,
@@ -242,13 +234,6 @@ def _llamea_kwargs(args):
         "adaptive_mutation": args.adaptive_mutation,
         "feature_guided_mutation": args.feature_guided_mutation,
         "novelty_k": args.novelty_k,
-        # Hooks nativos de LLaMEA: la distancia y el descriptor leen la huella
-        # conductual que el evaluador deja en `Solution.metadata`. Asi
-        # `--niching novelty`, `clearing` y `map_elites` comparan lo que hace el
-        # operador, no cuantas lineas o tokens tiene el codigo. Si un candidato
-        # no tiene fingerprint se cae a la distancia de codigo original.
-        "distance_metric": solution_distance,
-        "behavior_descriptor": solution_behavior_descriptor,
     }
     if args.novelty_archive_size is not None:
         kwargs["novelty_archive_size"] = args.novelty_archive_size
@@ -466,7 +451,6 @@ def run_llamea(args):
     fronts_dir = None if args.no_save_fronts else os.path.join(exp_dir, "fronts")
     fitness = _make_evaluator(
         train_paths, args, bounds=bounds, fronts_dir=fronts_dir,
-        diversity_log=os.path.join(exp_dir, "diversity.jsonl"),
     )
 
     config = {
@@ -477,10 +461,6 @@ def run_llamea(args):
         "n_parents": args.n_parents,
         "n_offspring": args.n_offspring,
         "combine": args.combine,
-        "behavioral_parent_selection": args.behavioral_parent_selection,
-        "novelty_weight": args.novelty_weight,
-        "target_penalty": args.target_penalty,
-        "require_target_family": args.require_target_family,
         "solver": args.solver,
         "mo_generations": args.mo_generations,
         "mo_population_size": args.mo_population_size,
@@ -505,7 +485,6 @@ def run_llamea(args):
                     "skeleton" if args.skeleton_example else "ox"),
         "comma": args.comma,
         "repeat_penalty": args.repeat_penalty,
-        "diversity_feedback": args.diversity_feedback,
         "patience": args.patience,
         "parent_selection": args.parent_selection,
         "tournament_size": args.tournament_size,
@@ -628,7 +607,6 @@ def run_llamea(args):
 
     # Diversidad conductual por generacion (mecanismos distintos, entropia,
     # novedad y cobertura del archivo). El evaluador ya la acumula.
-    ResultsExperimentLogger.diversity_source = fitness
 
     from llamea import LLaMEA
 
@@ -644,16 +622,6 @@ def run_llamea(args):
 
     search_class = LLaMEA
     search_kwargs = {}
-    if args.combine:
-        # Extension propia: seleccion conductual de los dos padres y
-        # validacion de la familia objetivo. No se toca el LLaMEA instalado.
-        from mohh.llamea.behavioral import BehavioralLLaMEA
-
-        search_class = BehavioralLLaMEA
-        search_kwargs = {
-            "behavioral_parent_selection": args.behavioral_parent_selection,
-            "novelty_weight": args.novelty_weight,
-        }
 
     llamea = search_class(
         f=fitness,
@@ -762,7 +730,6 @@ def run_llamea(args):
     # para regenerar el mapa conductual sin volver a ejecutar el LLM/MOEA.
     _atomic_write_json(os.path.join(exp_dir, "diversity.json"), {
         "summary": diversity_stats,
-        "entries": fitness.diversity_entries(),
     })
 
     # 5b. Marco de normalizacion final. El HV del mejor candidato y el de la
@@ -1065,27 +1032,8 @@ def main(argv=None):
     parser.add_argument("--n-offspring", type=int, default=1,
                         help="Descendientes/evaluaciones por generacion (default 1).")
     parser.add_argument("--combine", action="store_true",
-                        help="Agregar el operador propio de recombinacion conductual "
-                             "de dos padres (requiere --n-parents >= 2 y "
-                             "--max-workers 1). Los dos padres se eligen por "
-                             "diversidad conductual y el hijo se valida contra la "
-                             "familia objetivo.")
-    parser.add_argument("--no-behavioral-parent-selection",
-                        dest="behavioral_parent_selection", action="store_false",
-                        default=True,
-                        help="Con --combine, elegir el padre focal solo por fitness "
-                             "(comportamiento de LLaMEA original).")
-    parser.add_argument("--novelty-weight", type=float, default=0.5,
-                        help="Peso del bono de novedad en el torneo conductual "
-                             "(default 0.5).")
-    parser.add_argument("--target-penalty", type=float, default=1.0,
-                        help="Multiplicador del ranking cuando el hijo no alcanza la "
-                             "familia objetivo (default 1.0 = solo feedback; 0.0 "
-                             "hace que un fallo no pueda ganar). El HV crudo no "
-                             "cambia.")
-    parser.add_argument("--require-target-family", action="store_true",
-                        help="Rechazar un hijo de combine que no pertenezca a la "
-                             "familia objetivo antes de gastar el MOEA interno.")
+                        help="Agregar el operador propio de recombinacion de dos "
+                             "padres (requiere --n-parents >= 2 y --max-workers 1).")
     parser.add_argument("--comma", action="store_true",
                         help="Estrategia (1,1) comma en lugar de (1+1) con elitismo.")
     parser.add_argument("--refine-only", action="store_true",
@@ -1164,11 +1112,6 @@ def main(argv=None):
                              "el ranking) cuando el codigo ya se habia evaluado. 1.0 "
                              "lo desactiva. Ataca el anclaje del modelo (repeticion "
                              "literal del mismo operador).")
-    parser.add_argument("--no-diversity-feedback", dest="diversity_feedback",
-                        action="store_false", default=True,
-                        help="No agregar el diagnostico conductual (familia, novedad, "
-                             "cobertura) al feedback del LLM. La medicion y el "
-                             "archivo se siguen guardando.")
     # Diversidad y parada temprana (mecanismos de LLaMEA 1.4).
     parser.add_argument("--patience", type=int, default=0,
                         help="Parada temprana: corta tras N evaluaciones sin mejora "
@@ -1222,6 +1165,11 @@ def main(argv=None):
     parser.add_argument("--prior-every", type=int, default=10,
                         help="Cada cuantas iteraciones se refina un prior "
                              "aleatorio (default 10).")
+    parser.add_argument("--summary-every", type=int, default=25,
+                        help="Cada cuantas iteraciones se escribe el resumen "
+                             "consolidado `search_summary.json` (tokens, "
+                             "exitos/fallos, diversidad, mejor operador). "
+                             "0 = solo al final.")
     parser.add_argument("--eval-test", action="store_true",
                         help="Evaluar el mejor operador en el conjunto de test al final.")
     parser.add_argument("--no-download", action="store_true",
@@ -1258,8 +1206,6 @@ def main(argv=None):
                      "--max-workers 1 (y sube --fitness-workers) o al reves.")
     if args.fitness_workers < 1:
         parser.error("--fitness-workers debe ser >= 1")
-    if not 0.0 <= args.target_penalty <= 1.0:
-        parser.error("--target-penalty debe estar en [0, 1]")
 
     if args.train_instances != "all":
         args.train_instances = int(args.train_instances)

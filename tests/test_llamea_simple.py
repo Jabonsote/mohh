@@ -204,6 +204,34 @@ def test_run_simple_small_model_failures_and_best(tmp_path, monkeypatch):
     assert (tmp_path / "llamea_best_info.json").is_file()
 
 
+def test_run_simple_writes_summary_and_generation_log(tmp_path, monkeypatch):
+    """La corrida deja resumen consolidado y todos los operadores por generacion."""
+    monkeypatch.setattr(simple, "build_population_evaluator", _fake_builder)
+    monkeypatch.setattr(simple, "load_priors", lambda: [("prior", VALID)])
+    llm = FakeLLM([VALID, BAD, VALID])
+    logger = logging.getLogger("test-simple")
+    logger.setLevel(logging.INFO)
+    simple.run_simple(_args(budget=3), str(tmp_path), logger, llm, [])
+
+    summary = json.loads((tmp_path / "search_summary.json").read_text())
+    assert summary["iterations"]["total"] == 3
+    assert summary["iterations"]["valid"] + summary["iterations"]["invalid"] == 3
+    assert "success_rate" in summary["iterations"]
+    assert "tokens" in summary and "code_diversity" in summary
+    assert summary["code_diversity"]["metric"].startswith("CrystalBLEU")
+    assert summary["best"]["fitness_metric"] == "GE population mean rank"
+    assert summary["failures"]["total"] == summary["iterations"]["invalid"]
+
+    # Todos los operadores de cada generacion quedan registrados.
+    individuals = (tmp_path / "generations" / "individuals.jsonl").read_text()
+    assert len(individuals.strip().splitlines()) == 3
+    generations = (tmp_path / "generations" / "generation_summary.jsonl")
+    assert len(generations.read_text().strip().splitlines()) == 3
+    last = json.loads(generations.read_text().strip().splitlines()[-1])
+    assert last["generation"] == 3
+    assert last["best_fitness"] is not None
+
+
 def test_run_simple_keeps_global_best(tmp_path, monkeypatch):
     monkeypatch.setattr(simple, "build_population_evaluator", _fake_builder)
     monkeypatch.setattr(simple, "load_priors", lambda: [("prior", VALID)])

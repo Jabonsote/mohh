@@ -419,8 +419,6 @@ def test_llamea_single_job_serves_and_searches_in_one_job():
     # Combine conductual propio, con familia objetivo y validacion.
     assert 'COMBINE="${COMBINE:-1}"' in content
     assert "--combine" in content
-    assert "--target-penalty" in content
-    assert "--require-target-family" in content
     # Todo el pipeline en el mismo job: comparacion pareada opcional.
     assert "compare_operators.py" in content
     assert "classic:ox" in content

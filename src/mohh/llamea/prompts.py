@@ -268,46 +268,8 @@ The two parents were selected because their measured behaviors are different; \
 their descriptions and code are above. Do not merely refine or copy one parent: \
 the child must use the mechanism of BOTH parents.
 
-TARGET BEHAVIOR FAMILY: {target_family}.
-After the child is generated, its behavior is measured on fixed parent pairs and \
-classified into a behavioral family (order, position, cycle, adjacency, \
-exploratory, mixed, or copy). The recombination is considered successful only if \
-the observed family matches the target. Use the target as a design constraint:
-- order: preserve relative order (OX/OBX-style);
-- position: preserve absolute positions or mapped segments (PBX/PMX-style);
-- cycle: exchange complete permutation cycles (CX-style);
-- adjacency: preserve parent neighbours/edges (ERX-style);
-- exploratory: produce a child unlike both parents (high recombination, not a \
-small perturbation).
-If the feedback says the target family was missed, change the mechanism, not just \
-the syntax."""
-
-
-class TargetedCombineOperator(Operator):
-    """Operador LLaMEA de dos padres con una familia conductual objetivo.
-
-    Es una subclase de `llamea.Operator`, no una modificacion del paquete: LLaMEA
-    lo acepta igual (`prompt`, `name`, `weight`, `number_of_parents`, `id`,
-    `rewards`). `target_family` puede ser None: `BehavioralLLaMEA` elige en cada
-    generacion la familia menos representada del archivo conductual y la fija
-    antes de construir el prompt. El `__repr__` es lo que LLaMEA concatena.
-    """
-
-    def __init__(self, target_family=None, weight=0.30):
-        super().__init__(
-            prompt=OPERATOR_COMBINE_TEMPLATE,
-            name="combine",
-            weight=weight,
-            number_of_parents=2,
-        )
-        self.target_family = target_family
-        # Si no se fijo una familia concreta, BehavioralLLaMEA la recalcula en
-        # cada generacion (la menos representada). Si se fijo, es estatica.
-        self.dynamic_target = target_family is None
-
-    def __repr__(self):
-        target = self.target_family or "the least represented behavioral family"
-        return self.prompt.format(target_family=target)
+The child should combine mechanisms that are genuinely different, so the new \
+operator explores behaviour that neither parent covers on its own."""
 
 
 def make_operators(include_combine=False):
@@ -335,5 +297,6 @@ def make_operators(include_combine=False):
                  number_of_parents=1),
         Operator(prompt=OPERATOR_REDESIGN, name="redesign", weight=0.35,
                  number_of_parents=1),
-        TargetedCombineOperator(weight=0.30),
+        Operator(prompt=OPERATOR_COMBINE_TEMPLATE, name="combine",
+                 weight=0.30, number_of_parents=2),
     ]

@@ -32,11 +32,7 @@
 #                          (si se define, ignora GENERATIONS)
 #   COMBINE (1)            1 = incluir el combine conductual propio; 0 = solo
 #                          refine/redesign (comportamiento LLaMEA original)
-#   BEHAVIORAL_PARENTS (1) 0 = elegir el padre focal solo por fitness
-#   NOVELTY_WEIGHT (0.5)   peso de novedad en el torneo conductual
-#   TARGET_PENALTY (1.0)   castigo de ranking si el hijo no alcanza la familia
 #                          objetivo (1.0 = solo feedback; 0.0 = no puede ganar)
-#   REQUIRE_TARGET_FAMILY (0) 1 = rechazar el hijo antes de gastar el MOEA
 #   EVAL_TEST=1            evaluar el mejor operador en el conjunto de test
 #   EVAL_REPEATS (11)      repeticiones de esa evaluacion final (11 = comparacion
 #                          pareada contra los clasicos; 1 = solo una muestra)
@@ -53,7 +49,7 @@
 #   SOLVER, TRAIN_INSTANCES, TEST_INSTANCES, MO_GENERATIONS, MO_POPULATION_SIZE,
 #   TEMPERATURE, MAX_TOKENS, THINKING (auto|on|off), SEED, MUTATION=1, COMMA=1,
 #   REFINE_ONLY=1,
-#   REPEAT_PENALTY, DIVERSITY_FEEDBACK=0, PATIENCE, STALL_TIMEOUT,
+#   REPEAT_PENALTY, PATIENCE, STALL_TIMEOUT,
 #   PARENT_SELECTION, NICHING, EXPERIMENT_NAME (unico por defecto:
 #   LLaMEA_single_<fecha>_<pid>), CATEGORY, CONSTRAINT, MAX_MODEL_LEN,
 #   GPU_MEM_UTIL, CPUS (16), FITNESS_WORKERS (CPUS-4; 1 = secuencial),

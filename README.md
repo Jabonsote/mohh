@@ -344,15 +344,12 @@ Defaults and the flags that matter:
 |------|---------|---------|
 | `--budget N` | LLM candidate evaluations, not generations: `G ~= (B - parents) / offspring` | `1000` |
 | `--n-parents` / `--n-offspring` | population size / children per generation | `1` / `1` |
-| `--combine` | own behavioral two-parent recombination (requires `--n-parents >= 2`) | off |
-| `--target-penalty F` | ranking multiplier when the combine child misses its target family (`1.0` = feedback only) | `1.0` |
-| `--require-target-family` | reject a combine child before the inner MOEA if its family does not match | off |
+| `--combine` | own two-parent recombination (requires `--n-parents >= 2`) | off |
 | `--solver MOEAD` | inner MOEA (`MOEAD`, `NSGAII`, `SMSEMOA`) | `MOEAD` |
 | `--mo-generations` / `--mo-population-size` | inner MOEA budget | `30` / `30` |
 | `--repeat-penalty F` | diversity pressure: ranking score is multiplied by `F` when the code was already evaluated (`1.0` disables) | `0.5` |
 | `--operator-memory N` | inject the last `N` mechanism descriptions into the prompt | `0` (CLI), `12` (cluster job) |
 | `--thinking` | `auto` leaves the server template untouched; `on`/`off` sets `chat_template_kwargs.enable_thinking` (Qwen3 and similar) and logs `reasoning_content` | `auto` |
-| `--no-diversity-feedback` | stop adding the behavioral diagnosis to the prompt (measurement/logging continue) | feedback on |
 | `--patience N` | early stop after `N` evaluations without improving the best HV (`0` = off) | `0` |
 | `--parent-selection` | LLaMEA parent selection: `random`, `roulette`, `tournament` | `tournament` |
 | `--adaptive-mutation` / `--no-adaptive-mutation` | LLaMEA adaptive mutation | on |
@@ -564,46 +561,32 @@ Everything lands under `results/<category>/<name>/`:
 | `prompts/` | exact prompt sent + clean response + raw response/reasoning + per-turn tokens, sampling params and `finish_reason` |
 | `llm_requests.jsonl` | one raw JSONL record per request: full messages, effective sampling params, raw response, `reasoning_content`, usage and errors |
 | `fronts/` | raw Pareto fronts per candidate (evidence; `--no-save-fronts` to skip) |
-| `diversity.json`, `diversity.jsonl` | behavioral fingerprint, family, novelty, MAP-Elites cell and coverage per operator |
+| `search_summary.json` | consolidated summary: tokens, valid/invalid, failures by reason, CrystalBLEU diversity, best operator, timeline |
+| `generations/individuals.jsonl` | every operator of every generation (code sha1, fitness, error, tokens) |
+| `generations/generation_summary.jsonl` | per generation: validity, best, improvements, diversity, tokens, wall time |
 | `checkpoint.json`, `best_so_far.py` | durable state — a crash never loses the best operator |
 | `seeds.json` | every seed used and the policy |
 | `tokens.json`, `metrics.json` | tokens, inference time, GPU seconds (vLLM `/metrics`), energy |
 | `progress.txt`, `llamea.log`, `error.log` | monitoring + traceback-only log |
 | `llamea_logs/exp-*/` | LLaMEA's own logs (`report.md`, `evolution.png`, `code/`) |
 
-### Behavioral diversity (not code hashes)
+### Diversity: CrystalBLEU
 
-Counting distinct code hashes overestimates diversity: a renamed OX is a new
-hash but the same mechanism. The evaluator therefore probes each valid operator
-on fixed parent pairs (sizes 11, 24, 50, 100) and computes a 14-feature
-**behavioral fingerprint**: recombination strength, distance/bias to each
-parent, position/order/adjacency preservation, edge-union preservation, runs
-and parent switches. From it:
+Diversity is measured with **CrystalBLEU** (Eghbali & Pradel, ASE 2022), the
+official metric (`pip install crystalbleu`): it ignores the n-grams that are
+trivially shared by any two pieces of code, so it distinguishes "truly similar"
+operators from "written in the same language".
 
-- **Behavioral novelty** = distance to the closest operator already tried
-  (low = syntactic rewrite of the same mechanism).
-- **Families** = closest classic mechanism (`order`, `position`, `cycle`,
-  `adjacency`) or `exploratory`/`copy`/`mixed`.
-- **MAP-Elites archive** = best HV per cell of recombination x structure; its
-  coverage shows which mechanism regions remain unexplored.
-- The feedback given to the LLM includes the family, novelty, closest previous
-  operator and the least-explored direction (a light ReEvo-style reflection).
-- LLaMEA's native `distance_metric` and `behavior_descriptor` hooks use the
-  fingerprint, so `--niching novelty`, `clearing` and `map_elites` operate on
-  behavior instead of code length/tokens.
-
-Inspect a run after it finishes (or after a crash, from `diversity.jsonl`):
+The search reports it per generation and in the consolidated summary:
 
 ```bash
-python scripts/analyze_diversity.py results/searches/LLaMEA_single \
-    --plot results/searches/LLaMEA_single/diversity.png
-python scripts/analyze_llamea_runs.py 'results/searches/*' \
-    --summary --csv results/bakeoff.csv
+python scripts/analyze_small_runs.py 'results/searches/*' --summary
 ```
 
-The summary now reports `distinct` (code) vs `mecanismos` (behavior), novelty,
-archive coverage and family counts. `--no-diversity-feedback` keeps measuring
-and logging but stops adding the diagnosis to the prompt.
+`search_summary.json` holds the measured value (1 - CrystalBLEU averaged over
+pairs, 0 = identical code), the number of distinct codes it was computed on,
+the tokens (total, input, output), the valid/invalid counts, the failures
+grouped by reason, the best operator and the per-iteration timeline.
 
 ### Persistent model weights
 
