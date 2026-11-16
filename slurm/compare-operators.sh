@@ -25,9 +25,13 @@
 #   SOLVER             override del solver (default MOEAD / los 3 con GE)
 #   SEED (42)          semilla base
 #   NAME               nombre del experimento de salida
-#   CPUS (32)          CPUs del job
+#   CPUS (32)          CPUs del job. Ojo: Slurm no reparte cores entre
+#                      nodos, asi que CPUS no puede superar los cores de un
+#                      nodo (en `ixachi` son 52) o el job se queda en PD.
+#                      Comprobacion: sinfo -p ixachi -o "%c %m %N"
 #   MEM (64G)          memoria
-#   TIME               limite SLURM
+#   TIME               limite SLURM (opcional; por defecto, el de la
+#                      particion)
 #
 # Ejemplo rapido (protocolo corto, 3 reps):
 #   OPERATORS="llamea=.../llamea_best_operator.py ox=classic:ox" \
@@ -63,6 +67,10 @@ export MEM="${MEM:-64G}"
 # Aprovechar todos los nucleos: FITNESS_WORKERS es el paralelismo de
 # compare_operators.py; se deja 1 hilo para el proceso principal.
 export FITNESS_WORKERS=$((CPUS - 1))
+if [ "$FITNESS_WORKERS" -lt 1 ]; then
+    echo "ERROR: CPUS=$CPUS deja 0 workers." >&2
+    exit 1
+fi
 # Cada worker corre un MOEA con arrays pequenos: si BLAS/OpenMP lanza sus
 # propios hilos, los procesos se pelean por los nucleos y el paralelismo se
 # pierde. Con un hilo por worker, los CPUS del job se aprovechan de verdad.
