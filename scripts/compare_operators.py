@@ -62,7 +62,7 @@ import multiprocessing
 import os
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 
 import numpy as np
@@ -70,9 +70,11 @@ import numpy as np
 from mohh.core.utilities.algorithm.MO import compute_hypervolume
 from mohh.core.utilities.instance_utils import instance_paths
 from mohh.llamea.fitness import (
+    EVAL_BUDGETS,
     NADIR_FACTOR,
     _consolidated_frame,
     _solve_front_namespace,
+    solve_front_snapshots,
     build_evaluator,
     clip_to_reference_box,
     comprobate_frame,
@@ -199,7 +201,7 @@ def _solve_task(task):
     picklable) y corre el MOEA con la semilla/solver/mutacion dados. Devuelve
     `(key, front, error)`; `error` es `None` si todo salio bien.
     """
-    (key, source, kind, instance, seed, model_name, mutation,
+    (keys, source, kind, instance, seed, model_name, mutation,
      instance_timeout, overrides) = task
     try:
         # El worker puede arrancar con el singleton `Params` vacio (fork/
@@ -220,15 +222,24 @@ def _solve_task(task):
             ns = ge_namespace(source)
         else:
             ns = compile_operator(source)
+        if isinstance(keys[0], tuple) and len(keys[0]) == 5:
+            # Varios presupuestos: una corrida con snapshots devuelve los tres.
+            snaps = solve_front_snapshots(
+                instance, ns, seed=seed, model_name=model_name,
+                mutation=mutation, instance_timeout=instance_timeout,
+            )
+            empty = np.empty((0, 0), dtype=float)
+            return [(key, snaps.get(key[3], empty), None) for key in keys]
         front = _solve_front_namespace(
             instance, ns, seed=seed, model_name=model_name,
             mutation=mutation, instance_timeout=instance_timeout,
         )
         if front is None:
             raise RuntimeError("el MOEA no devolvio un frente")
-        return key, front, None
+        return keys[0], front, None
     except Exception as error:  # noqa: BLE001 - se reporta y sigue
-        return key, np.empty((0, 0), dtype=float), f"{type(error).__name__}: {error}"
+        return [(key, np.empty((0, 0), dtype=float),
+                 f"{type(error).__name__}: {error}") for key in keys]
 
 
 def build_protocols(args):
@@ -253,77 +264,61 @@ def protocol_name(solver, mutation):
 
 
 def collect_fronts(operators, paths, args, protocols, existing=None,
-                   stored_failures=None):
+                   stored_failures=None, labels=None):
     """Corre el MOEA para cada (repeticion, operador, instancia).
+
+    Con `labels` (10k/30k/50k) cada tarea devuelve los frentes de los
+    presupuestos de la misma corrida (como el `MyCallback` del original); sin
+    `labels`, un solo frente (el final).
 
     Si `existing` trae frentes ya calculados (con la misma semilla por
     repeticion), esos se reutilizan: sirve para agregar operadores a una
     comparacion ya corrida sin repetir el MOEA de los demas.
 
-    Un fallo se guarda como frente vacio. Asi ``hv_values`` puede contarlo como
-    HV 0 en el par (o abortar con ``--fail-policy abort``) en vez de eliminar
-    silenciosamente la instancia, que sesgaria la comparacion a favor del
-    operador que falla.
-
-    Paraleliza sobre instancias con ``FITNESS_WORKERS`` procesos (default 1).
-    Devuelve ``(fronts, failures)``; ``failures`` mapea la clave a un mensaje.
+    Un fallo se guarda como frente vacio. Asi ``hv_values`` puede contarlo
+    como HV 0 en el par (o abortar con ``--fail-policy abort``) en vez de
+    eliminar la repeticion entera.
     """
-    fronts = dict(existing or {})
-    failures = {
-        key: "fallo recuperado de fronts.npz"
-        for key, front in fronts.items()
-        if front is None or len(front) == 0
-    }
-    # Los fallos guardados tienen su motivo exacto y prevalence sobre el
-    # generico de arriba.
-    failures.update(stored_failures or {})
-    workers = max(1, int(os.environ.get("FITNESS_WORKERS", "1") or 1))
+    labels = labels or [None]
+    fronts = {} if existing is None else dict(existing)
+    failures = {} if stored_failures is None else dict(stored_failures)
+    instance_timeout = 300  # s por corrida del MOEA, como el original
+    # Las instancias como objetos `Instance` (picklable para el worker) y los
+    # overrides de Params: los workers arrancan con el singleton vacio
+    # (forkserver) y necesitan MO_GENERATIONS/MO_POPULATION_SIZE y las
+    # direcciones de referencia. Con snapshots, MO_GENERATIONS es el ultimo
+    # presupuesto (500), no el presupuesto de analisis.
+    evaluator = build_evaluator(
+        paths, mo_generations=max(EVAL_BUDGETS[label] // 105 for label in labels),
+        mo_population_size=105, seed=args.seed,
+        model_name=protocols[0][0], mutation=protocols[0][1], normalize=False,
+    )
+    instances = evaluator._ensure_instances()
+    instance_timeout = evaluator.instance_timeout
+    overrides = evaluator._params_overrides()
 
-    # Instancias por repeticion: dependen solo de la semilla (args.seed + rep),
-    # asi que son identicas en todos los protocolos de esa repeticion. Se
-    # construyen una vez para no repetir la carga en cada protocolo.
-    instances_by_rep = {}
-    instance_timeout = None
-    overrides_by_rep = {}
-    for rep in range(args.repeats):
-        evaluator = build_evaluator(
-            paths,
-            mo_generations=args.mo_generations,
-            mo_population_size=args.mo_population_size,
-            seed=args.seed + rep,
-            model_name=protocols[0][0],
-            mutation=protocols[0][1],
-            normalize=False,
-        )
-        instances_by_rep[rep] = evaluator._ensure_instances()
-        instance_timeout = evaluator.instance_timeout
-        # Los workers heredan el singleton `Params` del padre; con `fork`/
-        # `forkserver` puede quedar vacio, y entonces el MOEA corre sin
-        # MO_GENERATIONS, MO_POPULATION_SIZE ni las direcciones de referencia.
-        overrides_by_rep[rep] = evaluator._params_overrides()
-
-    # Tareas pendientes (sin frentes ya calculados).
     tasks = []
     for rep in range(args.repeats):
-        instances = instances_by_rep[rep]
+        seed = args.seed + rep
         for solver, mutation in protocols:
             protocol = protocol_name(solver, mutation)
             for name, _ns, kind, source in operators:
                 for index, instance in enumerate(instances):
-                    key = (protocol, name, rep, index)
-                    if key in fronts:
+                    todo = [(protocol, name, rep, label, index)
+                            for label in labels
+                            if (protocol, name, rep, label, index) not in fronts]
+                    if not todo:
                         continue
-                    tasks.append((
-                        key, source, kind, instance,
-                        args.seed + rep, solver, mutation, instance_timeout,
-                        overrides_by_rep[rep],
-                    ))
+                    tasks.append((todo, source, kind, instance, seed, solver,
+                                  mutation, instance_timeout, overrides))
 
     if not tasks:
         return fronts, failures
 
-    print(f"  Evaluando {len(tasks)} tareas con {workers} worker(s)...",
-          flush=True)
+    total = sum(len(task[0]) for task in tasks)
+    workers = args.fitness_workers
+    print(f"  Evaluando {len(tasks)} tareas ({total} frentes) "
+          f"con {workers} worker(s)...", flush=True)
     if workers > 1 and len(tasks) > 1:
         try:
             context = multiprocessing.get_context("forkserver")
@@ -332,15 +327,30 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
         with ProcessPoolExecutor(
             max_workers=min(workers, len(tasks)), mp_context=context
         ) as pool:
-            results = list(pool.map(_solve_task, tasks))
+            futures = {pool.submit(_solve_task, task): task for task in tasks}
+            done_count = 0
+            started = time.time()
+            for future in as_completed(futures):
+                for key, front, error in future.result():
+                    fronts[key] = front
+                    if error:
+                        failures[key] = error
+                done_count += 1
+                if done_count % 5 == 0 or done_count == len(tasks):
+                    elapsed = time.time() - started
+                    pending = len(tasks) - done_count
+                    eta = elapsed / done_count * pending if done_count else 0.0
+                    print(f"\r  {done_count}/{len(tasks)} tareas "
+                          f"({100.0 * done_count / len(tasks):4.1f} %)  "
+                          f"faltan {pending}  "
+                          f"ETA {eta / 60:.0f} min   ", end="", flush=True)
+            print("", flush=True)
     else:
-        results = [_solve_task(task) for task in tasks]
-
-    for key, front, error in results:
-        fronts[key] = front
-        if error:
-            failures[key] = error
-            print(f"  AVISO {key}: {error}", flush=True)
+        for task in tasks:
+            for key, front, error in _solve_task(task):
+                fronts[key] = front
+                if error:
+                    failures[key] = error
     return fronts, failures
 
 
@@ -360,21 +370,23 @@ def _frame_from_points(pieces):
     return comprobate_frame(union)
 
 
-def shared_frame(fronts, operators, protocols, n_instances, repeats):
-    """Marco por instancia: frente consolidado de TODAS las configuraciones."""
-    frames = []
-    for index in range(n_instances):
-        pieces = [fronts.get((protocol_name(solver, mutation), name, rep, index))
-                  for solver, mutation in protocols
-                  for name, _ns, _kind, _src in operators
-                  for rep in range(repeats)]
-        pieces = [p for p in pieces if p is not None and len(p)]
-        frames.append(_frame_from_points(pieces))
+def shared_frame(fronts, operators, protocols, n_instances, repeats, labels):
+    """Marco por instancia y presupuesto: frente consolidado de todo."""
+    frames = {}
+    for label in labels:
+        for index in range(n_instances):
+            pieces = [fronts.get((protocol_name(solver, mutation), name, rep,
+                                  label, index))
+                      for solver, mutation in protocols
+                      for name, _ns, _kind, _src in operators
+                      for rep in range(repeats)]
+            pieces = [p for p in pieces if p is not None and len(p)]
+            frames[(label, index)] = _frame_from_points(pieces)
     return frames
 
 
-def hv_values(fronts, operators, protocols, frames, repeats, failures=None,
-              fail_policy="zero"):
+def hv_values(fronts, operators, protocols, frames, repeats, labels,
+              failures=None, fail_policy="zero"):
     """HV de cada (operador, repeticion, instancia) en el marco comun.
 
     ``frame is None`` significa que la instancia no tiene escala (``vmin ==
@@ -385,13 +397,16 @@ def hv_values(fronts, operators, protocols, frames, repeats, failures=None,
     """
     failures = failures or {}
     values = {}
-    for solver, mutation in protocols:
+    for label in labels:
+      for solver, mutation in protocols:
         protocol = protocol_name(solver, mutation)
         for name, _ns, _kind, _src in operators:
             for rep in range(repeats):
                 row = []
-                for index, frame in enumerate(frames):
-                    key = (protocol, name, rep, index)
+                for index in range(len(  # frames[(label, index)]
+                        [k for k in frames if k[0] == label])):
+                    frame = frames.get((label, index))
+                    key = (protocol, name, rep, label, index)
                     front = fronts.get(key)
                     if frame is None:
                         row.append(None)
@@ -420,7 +435,7 @@ def hv_values(fronts, operators, protocols, frames, repeats, failures=None,
                     row.append(float(compute_hypervolume(
                         np.full(normalized.shape[1], NADIR_FACTOR), normalized
                     )))
-                values[(protocol, name, rep)] = row
+                values[(protocol, name, rep, label)] = row
     return values
 
 
@@ -726,19 +741,20 @@ def write_operator_catalog(out_dir, operators):
 
 
 def write_ge_layout(out_dir, args, fronts, values, frames, operators, protocols,
-                    failures=None):
+                    failures=None, labels=None):
     """Escribe la evaluacion con la estructura del original (`experiment.py`).
 
     * `<solver>/<presupuesto>/<instancia>.csv`: una fila por repeticion y una
       columna por operador, con el nombre `<solver>_<operador>_<NM|WM>_<solver>`
-      que usa el original.
+      que usa el original. Un CSV por presupuesto (10k/30k/50k, como el
+      original).
     * `<solver>/<presupuesto>/fronts/<instancia>/<columna>.pof` (y `_norm`):
       el frente de la repeticion mediana; y `best_front_consolidated.pof` con
       el marco consolidado de la instancia.
     * `run_metrics/evaluation_<instancia>.json`: metricas por instancia.
     """
-    evals = budget_label(args.mo_generations, args.mo_population_size)
     failures = failures or {}
+    labels = labels or [budget_label(args.mo_generations, args.mo_population_size)]
     solvers = []
     for solver, _mutation in protocols:
         if solver not in solvers:
@@ -753,10 +769,11 @@ def write_ge_layout(out_dir, args, fronts, values, frames, operators, protocols,
                                     ge_column_name(solver, mutation, name)))
 
     for solver in solvers:
+      for label in labels:
         for index, path in enumerate(args.paths):
             # El original nombra los ficheros sin extension (`KC11-2fl-1rl.csv`).
             instance = os.path.splitext(os.path.basename(path))[0]
-            folder = os.path.join(out_dir, solver, evals)
+            folder = os.path.join(out_dir, solver, label)
             os.makedirs(folder, exist_ok=True)
 
             # -- CSV por instancia (formato del original) --------------------
@@ -769,7 +786,7 @@ def write_ge_layout(out_dir, args, fronts, values, frames, operators, protocols,
                 for rep in range(args.repeats):
                     row = [rep + 1]
                     for _s, _m, protocol, name, _col in columns[solver]:
-                        values_row = values.get((protocol, name, rep))
+                        values_row = values.get((protocol, name, rep, label))
                         if values_row is not None and index < len(values_row) \
                                 and values_row[index] is not None:
                             row.append(f"{values_row[index]:.10g}")
@@ -778,7 +795,8 @@ def write_ge_layout(out_dir, args, fronts, values, frames, operators, protocols,
                     writer.writerow(row)
 
             # -- Frentes (repeticion mediana por operador) ------------------
-            frame = frames[index] if index < len(frames) else None
+            frame = frames.get((label, index)) if isinstance(frames, dict) else (
+                frames[index] if index < len(frames) else None)
             bounds = None
             if frame is not None and len(frame):
                 vmin, vmax = frame.min(axis=0), frame.max(axis=0)
@@ -787,7 +805,8 @@ def write_ge_layout(out_dir, args, fronts, values, frames, operators, protocols,
             front_dir = os.path.join(folder, "fronts", instance)
             for solver_p, mutation, _protocol, name, col in columns[solver]:
                 selected = _median_front(fronts, values, name, index,
-                                         [(solver_p, mutation)], args.repeats)
+                                         [(solver_p, mutation)], args.repeats,
+                                         label=label)
                 if selected is None:
                     continue
                 write_front(selected, os.path.join(front_dir, f"{col}.pof"))
@@ -810,7 +829,7 @@ def write_ge_layout(out_dir, args, fronts, values, frames, operators, protocols,
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
                 "instance": instance,
                 "solver": solver,
-                "budget": evals,
+                "budget": label,
                 "counters": {
                     "evaluations": len(columns[solver]) * args.repeats,
                     "failures": sum(1 for key in failures
@@ -892,13 +911,14 @@ def write_instance_artifacts(out_dir, args, fronts, values, frames, operators,
                                          "best_front_consolidated_norm.pof"))
 
 
-def _median_front(fronts, values, name, index, protocols, repeats):
+def _median_front(fronts, values, name, index, protocols, repeats, label=None):
     """Frente de la repeticion mediana (por HV) de un operador en una instancia."""
+    suffix = (label,) if label is not None else ()
     scores = []
     for rep in range(repeats):
         cells = []
         for solver, mutation in protocols:
-            row = values.get((protocol_name(solver, mutation), name, rep))
+            row = values.get((protocol_name(solver, mutation), name, rep, *suffix))
             if row is not None and index < len(row) and row[index] is not None:
                 cells.append(row[index])
         scores.append(float(np.mean(cells)) if cells else None)
@@ -909,7 +929,8 @@ def _median_front(fronts, values, name, index, protocols, repeats):
     valid.sort(key=lambda item: item[1])
     median = valid[len(valid) // 2][0]
     for solver, mutation in protocols:
-        front = fronts.get((protocol_name(solver, mutation), name, median, index))
+        front = fronts.get((protocol_name(solver, mutation), name, median,
+                            *suffix, index))
         if front is not None and len(front):
             return np.asarray(front, dtype=float)
     return None
@@ -1032,7 +1053,10 @@ def write_report(path, name, args, rows, comparisons, frames, scores, values,
             policy_note = "Un fallo aborta la comparacion."
         lines += [f"- Fallos de evaluacion contabilizados: {len(failures)} "
                   f"(politica `{args.fail_policy}`). {policy_note}", ""]
-        for (protocol, operator, rep, index), reason in sorted(failures.items()):
+        for key, reason in sorted(failures.items()):
+            index = key[-1] if len(key) == 5 else key[3]
+            operator, rep = key[1], key[2]
+            protocol = key[0]
             lines.append(f"  - `{protocol}` `{operator}` rep={rep} "
                          f"`{os.path.basename(args.paths[index])}`: {reason}")
         lines.append("")
@@ -1214,8 +1238,16 @@ def main():
                              "mutaciones, 300/105 y 11 repeticiones. Los valores "
                              "explicitos de --solver/--mutation/--mo-* tienen prioridad.")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--fitness-workers", type=int,
+                        default=os.cpu_count() or 1,
+                        help="procesos que corren el MOEA en paralelo")
     parser.add_argument("--out", default="results/evaluations")
     parser.add_argument("--name", default=None)
+    parser.add_argument("--budget", default=None,
+                        help="presupuesto del analisis (resumen, contrastes, "
+                             "report); por defecto 30k si se evaluo, y si no "
+                             "el primero; con GE_PROTOCOL=1 se evaluan los "
+                             "tres (10k/30k/50k) y se escriben los tres")
     parser.add_argument("--fail-policy", choices=["zero", "exclude", "abort"],
                         default="zero",
                         help="que hacer si un operador falla en una instancia: "
@@ -1307,18 +1339,51 @@ def main():
                         protocol, op_name, rep, index = parts
                         existing_failures[(protocol, op_name, int(rep),
                                            int(index))] = reason
+                    elif len(parts) == 5:
+                        protocol, op_name, rep, label, index = parts
+                        existing_failures[(protocol, op_name, int(rep), label,
+                                           int(index))] = reason
                 print(f"Reutilizando {len(stored)} fallos de {failures_path}")
         else:
             print(f"AVISO: no hay {npz_path}; se recalcula todo")
+    # Presupuestos de la evaluacion (10k/30k/50k como el original). Con
+    # GE_PROTOCOL=1 los tres salen de la misma corrida (snapshots); sin el,
+    # uno solo (el final).
+    labels = list(EVAL_BUDGETS) if args.ge_protocol else [budget_label(
+        args.mo_generations, args.mo_population_size)]
+    init_params(MO_GENERATIONS=max(EVAL_BUDGETS[label] // 105
+                                   for label in labels),
+                MO_POPULATION_SIZE=105)
+
     start = time.time()
     fronts, failures = collect_fronts(operators, args.paths, args, protocols,
-                                      existing, stored_failures=existing_failures)
+                                      existing,
+                                      stored_failures=existing_failures,
+                                      labels=labels)
     print(f"MOEA terminado en {time.time() - start:.1f}s; calculando HV...")
 
-    frames = shared_frame(fronts, operators, protocols, len(args.paths),
-                          args.repeats)
-    values = hv_values(fronts, operators, protocols, frames, args.repeats,
-                       failures=failures, fail_policy=args.fail_policy)
+    frames_all = shared_frame(fronts, operators, protocols, len(args.paths),
+                              args.repeats, labels)
+    values = hv_values(fronts, operators, protocols, frames_all, args.repeats,
+                       labels, failures=failures, fail_policy=args.fail_policy)
+
+    # El analisis (resumen, contrastes, report) se hace sobre el presupuesto
+    # `--budget`; los tres se evaluan y se escriben en el layout del original.
+    if args.budget is None:
+        args.budget = "30k" if "30k" in labels else labels[-1]
+    if args.budget not in labels:
+        raise SystemExit(f"--budget {args.budget!r} no se evaluo "
+                         f"(presupuestos: {', '.join(labels)})")
+    values_all, fronts_all = values, fronts
+    values_flat = {(protocol, name, rep): row
+                   for (protocol, name, rep, label), row in values.items()
+                   if label == args.budget}
+    fronts_flat = {(protocol, name, rep, index): front
+                   for (protocol, name, rep, label, index), front in fronts.items()
+                   if label == args.budget}
+    frames_flat = [frames_all[(args.budget, index)]
+                   for index in range(len(args.paths))]
+    values, fronts, frames = values_flat, fronts_flat, frames_flat
     scores = per_run_scores(values, operators, protocols, args.repeats)
     rows = summarize(scores, operators)
     comparisons = add_holm(pairwise(scores, operators, rows))
@@ -1414,9 +1479,12 @@ def main():
             for name, _ns, _k, _src in operators
         },
         "failures": [
-            {"protocol": protocol, "operator": operator, "repeat": rep,
-             "instance": os.path.basename(args.paths[index]), "reason": reason}
-            for (protocol, operator, rep, index), reason in sorted(failures.items())
+            {"protocol": key[0], "operator": key[1], "repeat": key[2],
+             "budget": (key[3] if len(key) == 5 else None),
+             "instance": os.path.basename(
+                 args.paths[key[-1] if len(key) == 5 else key[3]]),
+             "reason": reason}
+            for key, reason in sorted(failures.items())
         ],
         # Semilla efectiva de cada corrida del MOEA interno (operador x repeticion).
         "run_seeds": [
@@ -1435,9 +1503,8 @@ def main():
     # Los fallos no caben en el npz (son texto): van aparte, para que al
     # recargar los frentes se sepa que pares son HV 0 y cuales missing.
     with open(os.path.join(out_dir, "failures.json"), "w") as handle:
-        json.dump({f"{protocol}|{name}|{rep}|{index}": reason
-                   for (protocol, name, rep, index), reason in failures.items()},
-                  handle, indent=2)
+        json.dump({"|".join(str(part) for part in key): reason
+                   for key, reason in failures.items()}, handle, indent=2)
     with open(os.path.join(out_dir, "evaluation.json"), "w") as handle:
         json.dump(result, handle, indent=2)
     write_csvs(out_dir, args, rows, comparisons, pairwise_results, values,
@@ -1447,8 +1514,8 @@ def main():
     # Estructura de la evaluacion original (experiment.py): <solver>/<presupuesto>/
     # <instancia>.csv, los frentes por solver y las metricas por instancia; mas
     # el catalogo de operadores usados.
-    write_ge_layout(out_dir, args, fronts, values, frames, operators, protocols,
-                    failures)
+    write_ge_layout(out_dir, args, fronts_all, values_all, frames_all,
+                    operators, protocols, failures, labels=labels)
     catalog = write_operator_catalog(out_dir, operators)
     write_report(os.path.join(out_dir, "report.md"), name, args, rows,
                  comparisons, frames, scores, values, operators, protocols,

@@ -509,6 +509,84 @@ def _load_mutation(solver, model_name, mutation):
         solver.load_operator("mutation", "NullMutation")
 
 
+#: Presupuestos de la evaluacion original (`experiment.py`), en evaluaciones:
+#: 100/300/500 generaciones con poblacion 105. El original corre el MOEA hasta
+#: el ultimo y guarda el frente de la poblacion al alcanzar cada uno.
+EVAL_BUDGETS = {"10k": 10500, "30k": 31500, "50k": 52500}
+
+
+def solve_front_snapshots(instance, namespace, seed, model_name, mutation,
+                          instance_timeout, budgets=None):
+    """Como `_solve_front_namespace`, pero con los snapshots del original.
+
+    Corre el MOEA hasta el ultimo presupuesto y devuelve ``{label: frente}``
+    con el frente de la poblacion al alcanzar cada uno (10k/30k/50k). Una
+    sola corrida da los tres presupuestos: el coste no se multiplica (correr
+    hasta 500 generaciones cuesta ~1.7x una a 300).
+    """
+    from pymoo.core.callback import Callback
+
+    class _Snapshots(Callback):
+        """El `MyCallback` del original: guarda el frente en cada presupuesto."""
+
+        def __init__(self, population_size, budget_map):
+            super().__init__()
+            self.populations = {}
+            self.checkpoints = {
+                label: max(1, budget // population_size)
+                for label, budget in budget_map.items()
+            }
+
+        def notify(self, algorithm):
+            for label, generation in self.checkpoints.items():
+                if algorithm.n_gen == generation:
+                    # `F` puede ser 1D si el frente tiene un solo punto.
+                    front = np.atleast_2d(np.asarray(algorithm.result().F,
+                                                     dtype=float))
+                    if front.size:
+                        front, _ = np.unique(front, axis=0, return_index=True)
+                        self.populations[label] = front
+
+    budgets = dict(EVAL_BUDGETS) if budgets is None else dict(budgets)
+    from mohh.generation.algorithm.multiobjective import MOSolver
+    from mohh.llamea.operator import LLMOperator
+
+    np.random.seed(seed)
+    population_size, _current_generations = _params_size()
+    generations = max(budget // population_size for budget in budgets.values())
+
+    solver = MOSolver(seed=seed)
+    solver.crossover = LLMOperator(namespace, prob=1.0)
+    _load_mutation(solver, model_name, mutation)
+    solver.load_instance(instance)
+    # El solver usa `params["MO_GENERATIONS"]` como terminacion: el snapshot
+    # necesita llegar al ultimo presupuesto, no solo a los 300 del default.
+    solver.generations = generations
+    solver.start_model(model_name=model_name)
+    callback = _Snapshots(population_size, budgets)
+    solver.algorithm.callback = callback
+    _call_with_timeout(solver.solve_instance, instance_timeout)
+    return {label: front for label, front in callback.populations.items()
+            if front is not None and len(front)}
+
+
+def _params_size():
+    """Poblacion y generaciones vigentes (Params es un dict-like)."""
+    from mohh.core.params import Params
+    params = Params()
+    try:
+        population_size = int(params["MO_POPULATION_SIZE"])
+    except Exception:  # noqa: BLE001 - sin params, el default del original
+        population_size = 105
+    try:
+        generations = int(params["MO_GENERATIONS"])
+    except Exception:  # noqa: BLE001
+        generations = 300
+    return population_size, generations
+
+
+
+
 def _solve_front_namespace(instance, namespace, seed, model_name, mutation,
                            instance_timeout):
     """Corre el MOEA interno sobre una instancia y devuelve su frente.
