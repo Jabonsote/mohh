@@ -56,6 +56,7 @@ Salida: `results/evaluations/<name>/` con `evaluation.json`, `report.md`,
 """
 
 import argparse
+import copy
 import csv
 import json
 import multiprocessing
@@ -202,7 +203,12 @@ def _solve_task(task):
     `(key, front, error)`; `error` es `None` si todo salio bien.
     """
     (keys, source, kind, instance, seed, model_name, mutation,
-     instance_timeout, overrides) = task
+     instance_timeout, overrides, initial_solutions) = task
+    if initial_solutions is not None:
+        # Poblacion inicial de ESTA repeticion (como el original, que fija
+        # `set_initial_solutions(experiment=i)` antes de construir el solver).
+        instance = copy.deepcopy(instance)
+        instance.initial_solutions = np.asarray(initial_solutions)
     try:
         # El worker puede arrancar con el singleton `Params` vacio (fork/
         # forkserver): se inicializa igual que en la ruta de LLaMEA para que
@@ -264,7 +270,7 @@ def protocol_name(solver, mutation):
 
 
 def collect_fronts(operators, paths, args, protocols, existing=None,
-                   stored_failures=None, labels=None):
+                   stored_failures=None, labels=None, out_dir=None):
     """Corre el MOEA para cada (repeticion, operador, instancia).
 
     Con `labels` (10k/30k/50k) cada tarea devuelve los frentes de los
@@ -296,6 +302,27 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
     instances = evaluator._ensure_instances()
     instance_timeout = evaluator.instance_timeout
     overrides = evaluator._params_overrides()
+    if out_dir is None:
+        out_dir = os.path.join(args.out, args.name or "evaluacion")
+
+    # Soluciones iniciales: UNA poblacion por repeticion (como el original,
+    # donde cada experimento arranca con la suya). Determinista por
+    # (instancia, repeticion); se guardan en el formato del original y el
+    # MOEA de esa repeticion arranca con ellas.
+    population_size = instances[0].initial_solutions.shape[0]
+    seeds = [args.seed + rep for rep in range(args.repeats)]
+    initial = {}
+    for index, instance in enumerate(instances):
+        n_variables = instance.initial_solutions.shape[1]
+        instance_name = os.path.splitext(os.path.basename(paths[index]))[0]
+        by_rep = [
+            _initial_permutations(
+                n_variables, population_size,
+                np.random.default_rng(args.seed + rep * 1_000 + index))
+            for rep in range(args.repeats)
+        ]
+        initial[index] = by_rep
+        write_initial_solutions(out_dir, instance_name, by_rep, seeds)
 
     tasks = []
     for rep in range(args.repeats):
@@ -310,7 +337,8 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
                     if not todo:
                         continue
                     tasks.append((todo, source, kind, instance, seed, solver,
-                                  mutation, instance_timeout, overrides))
+                                  mutation, instance_timeout, overrides,
+                                  initial[index][rep]))
 
     if not tasks:
         return fronts, failures
@@ -397,16 +425,23 @@ def hv_values(fronts, operators, protocols, frames, repeats, labels,
     """
     failures = failures or {}
     values = {}
-    for label in labels:
+    # `frames` puede ser un dict por presupuesto (claves (label, index)) o una
+    # lista aplanada al presupuesto de analisis (claves por indice).
+    is_dict = isinstance(frames, dict)
+    n_instances = (max(k[1] for k in frames) + 1) if is_dict else len(frames)
+    for label in (labels or [None]):
       for solver, mutation in protocols:
         protocol = protocol_name(solver, mutation)
         for name, _ns, _kind, _src in operators:
             for rep in range(repeats):
                 row = []
-                for index in range(len(  # frames[(label, index)]
-                        [k for k in frames if k[0] == label])):
-                    frame = frames.get((label, index))
-                    key = (protocol, name, rep, label, index)
+                for index in range(n_instances):
+                    if is_dict:
+                        frame = frames.get((label, index))
+                        key = (protocol, name, rep, label, index)
+                    else:
+                        frame = frames[index]
+                        key = (protocol, name, rep, index)
                     front = fronts.get(key)
                     if frame is None:
                         row.append(None)
@@ -435,7 +470,8 @@ def hv_values(fronts, operators, protocols, frames, repeats, labels,
                     row.append(float(compute_hypervolume(
                         np.full(normalized.shape[1], NADIR_FACTOR), normalized
                     )))
-                values[(protocol, name, rep, label)] = row
+                suffix = (label,) if is_dict else ()
+                values[(protocol, name, rep, *suffix)] = row
     return values
 
 
@@ -740,6 +776,49 @@ def write_operator_catalog(out_dir, operators):
                 text = source
             handle.write(f"{name}: {text}\n")
     return path
+
+
+def _initial_permutations(n_variables, population_size, rng):
+    """Una poblacion inicial de permutaciones (una por individuo)."""
+    return np.array([rng.permutation(n_variables) for _ in range(population_size)],
+                    dtype=int)
+
+
+def write_initial_solutions(out_dir, instance_name, solutions_by_rep, seeds):
+    """`initial_solutions/permutation/<instancia>/experiment_XXX.txt` + seeds.txt.
+
+    Es la estructura del original (`experiment.py`): una poblacion inicial
+    **por repeticion**, con su semilla, para poder reproducir cada corrida.
+    """
+    folder = os.path.join(out_dir, "initial_solutions", "permutation",
+                          instance_name)
+    os.makedirs(folder, exist_ok=True)
+    for rep, sols in enumerate(solutions_by_rep, start=1):
+        with open(os.path.join(folder, f"experiment_{rep:03d}.txt"), "w",
+                  encoding="utf-8") as handle:
+            for sol in sols:
+                handle.write("[" + ", ".join(f"{int(w):03d}" for w in sol) + "]\n")
+    with open(os.path.join(folder, "seeds.txt"), "w", encoding="utf-8") as handle:
+        for seed in seeds:
+            handle.write(f"{seed}\n")
+
+
+def write_run_metrics_summary(out_dir, n_instances, n_runs, n_failures,
+                              total_seconds):
+    """`run_metrics/summary.json`, como el original (resumen de la corrida)."""
+    summary = {
+        "phase": "summary",
+        "instances": n_instances,
+        "moea_runs": n_runs,
+        "failures": n_failures,
+        "total_seconds": round(float(total_seconds), 3),
+    }
+    path = os.path.join(out_dir, "run_metrics", "summary.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=1)
+
+
 
 
 def write_ge_layout(out_dir, args, fronts, values, frames, operators, protocols,
@@ -1323,11 +1402,17 @@ def main():
                         # Formato anterior: un solo solver/mutacion.
                         op_name, rep, index = parts
                         protocol = default_protocol
+                        existing[(protocol, op_name, int(rep), int(index))] = data[key]
                     elif len(parts) == 4:
                         protocol, op_name, rep, index = parts
+                        existing[(protocol, op_name, int(rep), int(index))] = data[key]
+                    elif len(parts) == 5:
+                        # Con snapshots: el presupuesto (10k/30k/50k) va en la clave.
+                        protocol, op_name, rep, label, index = parts
+                        existing[(protocol, op_name, int(rep), label,
+                                  int(index))] = data[key]
                     else:
                         raise SystemExit(f"clave invalida en fronts.npz: {key!r}")
-                    existing[(protocol, op_name, int(rep), int(index))] = data[key]
             print(f"Reutilizando {len(existing)} frentes de {npz_path}")
             # Los fallos se recargan con su motivo exacto: sin esto, un par
             # fallido se contaria como "fallo recuperado" sin explicacion.
@@ -1361,7 +1446,7 @@ def main():
     fronts, failures = collect_fronts(operators, args.paths, args, protocols,
                                       existing,
                                       stored_failures=existing_failures,
-                                      labels=labels)
+                                      labels=labels, out_dir=out_dir)
     print(f"MOEA terminado en {time.time() - start:.1f}s; calculando HV...")
 
     frames_all = shared_frame(fronts, operators, protocols, len(args.paths),
@@ -1369,8 +1454,23 @@ def main():
     values = hv_values(fronts, operators, protocols, frames_all, args.repeats,
                        labels, failures=failures, fail_policy=args.fail_policy)
 
+    # Guardar los frentes ANTES del analisis: si el analisis falla, el MOEA no
+    # se repite (el mismo comando + --load-fronts reutiliza los frentes). Con
+    # snapshots, las claves llevan el presupuesto (protocolo|op|rep|label|inst).
+    if args.save_fronts:
+        np.savez_compressed(
+            os.path.join(out_dir, "fronts.npz"),
+            **{f"{protocol}|{name}|{rep}|{label}|{index}": np.asarray(front)
+               for (protocol, name, rep, label, index), front in fronts.items()
+               if front is not None and len(front)},
+        )
+    with open(os.path.join(out_dir, "failures.json"), "w") as handle:
+        json.dump({"|".join(str(part) for part in key): reason
+                   for key, reason in failures.items()}, handle, indent=2)
+
     # El analisis (resumen, contrastes, report) se hace sobre el presupuesto
     # `--budget`; los tres se evaluan y se escriben en el layout del original.
+    # Un fallo aqui NO pierde los frentes: ya estan en fronts.npz.
     if args.budget is None:
         args.budget = "30k" if "30k" in labels else labels[-1]
     if args.budget not in labels:
@@ -1386,148 +1486,150 @@ def main():
     frames_flat = [frames_all[(args.budget, index)]
                    for index in range(len(args.paths))]
     values, fronts, frames = values_flat, fronts_flat, frames_flat
-    scores = per_run_scores(values, operators, protocols, args.repeats)
-    rows = summarize(scores, operators)
-    comparisons = add_holm(pairwise(scores, operators, rows))
-    pairwise_results = add_holm(
-        pairwise_design(fronts, rows, protocols, len(args.paths), args.repeats,
-                        failures=failures, fail_policy=args.fail_policy)
-    )
-    stability = rank_stability(scores, operators)
-
-    groups = parse_groups(args.group)
-    contrasts = parse_contrasts(args.contrast)
-    for left, right in contrasts:
-        for group in (left, right):
-            if group not in groups:
-                raise SystemExit(
-                    f"el contraste {left}:{right} usa el grupo {group!r}, que no "
-                    f"esta declarado (usa --group {group}=op1,op2)")
-    group_results = []
-    if contrasts:
-        group_results = add_holm(
-            group_contrasts(fronts, rows, protocols, len(args.paths),
-                            args.repeats, groups, contrasts,
+    try:
+        scores = per_run_scores(values, operators, protocols, args.repeats)
+        rows = summarize(scores, operators)
+        comparisons = add_holm(pairwise(scores, operators, rows))
+        pairwise_results = add_holm(
+            pairwise_design(fronts, rows, protocols, len(args.paths), args.repeats,
                             failures=failures, fail_policy=args.fail_policy)
         )
+        stability = rank_stability(scores, operators)
 
-    result = {
-        "config": {
-            "split": args.split,
-            "instances": [os.path.basename(p) for p in args.paths],
-            "repeats": args.repeats,
-            "seed": args.seed,
-            "seeds": {
-                "base": args.seed,
-                "instance_selection": args.seed,
-                "per_repeat": {str(rep): args.seed + rep
-                               for rep in range(args.repeats)},
-                "policy": ("semilla = base + repeticion; una poblacion inicial por "
-                           "repeticion compartida por todos los operadores, de modo "
-                           "que la comparacion es pareada"),
+        groups = parse_groups(args.group)
+        contrasts = parse_contrasts(args.contrast)
+        for left, right in contrasts:
+            for group in (left, right):
+                if group not in groups:
+                    raise SystemExit(
+                        f"el contraste {left}:{right} usa el grupo {group!r}, que no "
+                        f"esta declarado (usa --group {group}=op1,op2)")
+        group_results = []
+        if contrasts:
+            group_results = add_holm(
+                group_contrasts(fronts, rows, protocols, len(args.paths),
+                                args.repeats, groups, contrasts,
+                                failures=failures, fail_policy=args.fail_policy)
+            )
+
+        result = {
+            "config": {
+                "split": args.split,
+                "instances": [os.path.basename(p) for p in args.paths],
+                "repeats": args.repeats,
+                "seed": args.seed,
+                "seeds": {
+                    "base": args.seed,
+                    "instance_selection": args.seed,
+                    "per_repeat": {str(rep): args.seed + rep
+                                   for rep in range(args.repeats)},
+                    "policy": ("semilla = base + repeticion; una poblacion inicial por "
+                               "repeticion compartida por todos los operadores, de modo "
+                               "que la comparacion es pareada"),
+                },
+                "solver": args.solver,
+                "mo_generations": args.mo_generations,
+                "mo_population_size": args.mo_population_size,
+                "mutation": args.mutation,
+                "mutation_both": args.mutation_both,
+                "ge_protocol": args.ge_protocol,
+                "protocols": [
+                    {"solver": solver, "mutation": mutation,
+                     "name": protocol_name(solver, mutation)}
+                    for solver, mutation in protocols
+                ],
+                "fail_policy": args.fail_policy,
+                "frame": "consolidated over every operator and repetition",
+                "nadir_factor": NADIR_FACTOR,
+                "degenerate_instances": [
+                    os.path.basename(args.paths[i])
+                    for i, frame in enumerate(frames)
+                    if frame is None or np.any(frame.max(axis=0) == frame.min(axis=0))
+                ],
+                "failed_runs": len(failures),
             },
-            "solver": args.solver,
-            "mo_generations": args.mo_generations,
-            "mo_population_size": args.mo_population_size,
-            "mutation": args.mutation,
-            "mutation_both": args.mutation_both,
-            "ge_protocol": args.ge_protocol,
-            "protocols": [
-                {"solver": solver, "mutation": mutation,
-                 "name": protocol_name(solver, mutation)}
-                for solver, mutation in protocols
+            "operators": rows,
+            "comparisons": comparisons,
+            "pairwise_head_to_head": pairwise_results,
+            "group_contrasts": group_results,
+            "groups": groups,
+            "rank_stability": stability,
+            "per_run_scores": scores,
+            "per_protocol_scores": {
+                name: {
+                    protocol_name(solver, mutation): [
+                        float(np.mean([
+                            v for v in values[(protocol_name(solver, mutation), name, rep)]
+                            if v is not None
+                        ]))
+                        if any(v is not None
+                               for v in values[(protocol_name(solver, mutation), name, rep)])
+                        else None
+                        for rep in range(args.repeats)
+                    ]
+                    for solver, mutation in protocols
+                }
+                for name, _ns, _k, _src in operators
+            },
+            "per_instance_hv": {
+                name: {
+                    protocol_name(solver, mutation): [
+                        values[(protocol_name(solver, mutation), name, rep)]
+                        for rep in range(args.repeats)
+                    ]
+                    for solver, mutation in protocols
+                }
+                for name, _ns, _k, _src in operators
+            },
+            "failures": [
+                {"protocol": key[0], "operator": key[1], "repeat": key[2],
+                 "budget": (key[3] if len(key) == 5 else None),
+                 "instance": os.path.basename(
+                     args.paths[key[-1] if len(key) == 5 else key[3]]),
+                 "reason": reason}
+                for key, reason in sorted(failures.items())
             ],
-            "fail_policy": args.fail_policy,
-            "frame": "consolidated over every operator and repetition",
-            "nadir_factor": NADIR_FACTOR,
-            "degenerate_instances": [
-                os.path.basename(args.paths[i])
-                for i, frame in enumerate(frames)
-                if frame is None or np.any(frame.max(axis=0) == frame.min(axis=0))
+            # Semilla efectiva de cada corrida del MOEA interno (operador x repeticion).
+            "run_seeds": [
+                {"operator": name, "repeat": rep, "seed": args.seed + rep}
+                for name, _ns, _k, _src in operators
+                for rep in range(args.repeats)
             ],
-            "failed_runs": len(failures),
-        },
-        "operators": rows,
-        "comparisons": comparisons,
-        "pairwise_head_to_head": pairwise_results,
-        "group_contrasts": group_results,
-        "groups": groups,
-        "rank_stability": stability,
-        "per_run_scores": scores,
-        "per_protocol_scores": {
-            name: {
-                protocol_name(solver, mutation): [
-                    float(np.mean([
-                        v for v in values[(protocol_name(solver, mutation), name, rep)]
-                        if v is not None
-                    ]))
-                    if any(v is not None
-                           for v in values[(protocol_name(solver, mutation), name, rep)])
-                    else None
-                    for rep in range(args.repeats)
-                ]
-                for solver, mutation in protocols
-            }
-            for name, _ns, _k, _src in operators
-        },
-        "per_instance_hv": {
-            name: {
-                protocol_name(solver, mutation): [
-                    values[(protocol_name(solver, mutation), name, rep)]
-                    for rep in range(args.repeats)
-                ]
-                for solver, mutation in protocols
-            }
-            for name, _ns, _k, _src in operators
-        },
-        "failures": [
-            {"protocol": key[0], "operator": key[1], "repeat": key[2],
-             "budget": (key[3] if len(key) == 5 else None),
-             "instance": os.path.basename(
-                 args.paths[key[-1] if len(key) == 5 else key[3]]),
-             "reason": reason}
-            for key, reason in sorted(failures.items())
-        ],
-        # Semilla efectiva de cada corrida del MOEA interno (operador x repeticion).
-        "run_seeds": [
-            {"operator": name, "repeat": rep, "seed": args.seed + rep}
-            for name, _ns, _k, _src in operators
-            for rep in range(args.repeats)
-        ],
-    }
-    if args.save_fronts:
-        np.savez_compressed(
-            os.path.join(out_dir, "fronts.npz"),
-            **{f"{protocol}|{name}|{rep}|{index}": np.asarray(front)
-               for (protocol, name, rep, index), front in fronts.items()
-               if front is not None},
-        )
-    # Los fallos no caben en el npz (son texto): van aparte, para que al
-    # recargar los frentes se sepa que pares son HV 0 y cuales missing.
-    with open(os.path.join(out_dir, "failures.json"), "w") as handle:
-        json.dump({"|".join(str(part) for part in key): reason
-                   for key, reason in failures.items()}, handle, indent=2)
-    with open(os.path.join(out_dir, "evaluation.json"), "w") as handle:
-        json.dump(result, handle, indent=2)
-    write_csvs(out_dir, args, rows, comparisons, pairwise_results, values,
-               operators, protocols, group_results)
-    write_instance_artifacts(out_dir, args, fronts, values, frames, operators,
-                             protocols)
-    # Estructura de la evaluacion original (experiment.py): <solver>/<presupuesto>/
-    # <instancia>.csv, los frentes por solver y las metricas por instancia; mas
-    # el catalogo de operadores usados.
-    write_ge_layout(out_dir, args, fronts_all, values_all, frames_all,
-                    operators, protocols, failures, labels=labels)
-    catalog = write_operator_catalog(out_dir, operators)
-    write_report(os.path.join(out_dir, "report.md"), name, args, rows,
-                 comparisons, frames, scores, values, operators, protocols,
-                 pairwise_results, stability, failures, group_results)
+        }
+        with open(os.path.join(out_dir, "evaluation.json"), "w") as handle:
+            json.dump(result, handle, indent=2)
+        write_csvs(out_dir, args, rows, comparisons, pairwise_results, values,
+                   operators, protocols, group_results)
+        write_instance_artifacts(out_dir, args, fronts, values, frames, operators,
+                                 protocols)
+        # Estructura de la evaluacion original (experiment.py): <solver>/<presupuesto>/
+        # <instancia>.csv, los frentes por solver y las metricas por instancia; mas
+        # el catalogo de operadores usados.
+        write_ge_layout(out_dir, args, fronts_all, values_all, frames_all,
+                        operators, protocols, failures, labels=labels)
+        catalog = write_operator_catalog(out_dir, operators)
+        write_report(os.path.join(out_dir, "report.md"), name, args, rows,
+                     comparisons, frames, scores, values, operators, protocols,
+                     pairwise_results, stability, failures, group_results)
+    except Exception as error:  # noqa: BLE001 - los frentes ya estan guardados
+        import traceback
+        traceback.print_exc()
+        print(f"AVISO: el analisis fallo ({type(error).__name__}: {error}); "
+              "los frentes estan en fronts.npz (reanuda con --load-fronts).")
     print(f"Guardado en {out_dir}")
     print("  hv_por_instancia.csv  resumen_operadores.csv  contrastes.csv")
     print("  fronts.npz (reutilizable con --load-fronts)  evaluation.json")
     print(f"  {budget_label(args.mo_generations, args.mo_population_size)}/"
           "<solver>/<instancia>.csv  (formato del original)")
     print(f"  {os.path.relpath(catalog, out_dir)}  (operadores usados)")
+    with open(os.path.join(out_dir, "seeds.txt"), "w", encoding="utf-8") as handle:
+        handle.write("base_seed\t" + str(args.seed) + "\n")
+        for rep in range(args.repeats):
+            handle.write(f"rep\t{rep + 1}\t{args.seed + rep}\n")
+    write_run_metrics_summary(
+        out_dir, len(args.paths),
+        len(protocols) * len(operators) * args.repeats * len(args.paths),
+        len(failures), time.time() - start)
 
 
 if __name__ == "__main__":
