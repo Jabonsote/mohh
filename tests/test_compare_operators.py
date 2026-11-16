@@ -31,17 +31,17 @@ def test_failed_front_counts_as_zero_or_is_excluded():
     failures = {("MOEAD", "a", 0, 0): "RuntimeError: boom"}
 
     zero = compare.hv_values(fronts, _operators(), protocols, [_frame()], 1,
-                             failures=failures, fail_policy="zero")
+                             [None], failures=failures, fail_policy="zero")
     assert zero[("MOEAD", "a", 0)] == [0.0]
     assert zero[("MOEAD", "b", 0)][0] > 0.0
 
     excluded = compare.hv_values(fronts, _operators(), protocols, [_frame()], 1,
-                                 failures=failures, fail_policy="exclude")
+                                 [None], failures=failures, fail_policy="exclude")
     assert excluded[("MOEAD", "a", 0)] == [None]
 
     with pytest.raises(RuntimeError, match="fallo en MOEAD a"):
         compare.hv_values(fronts, _operators(), protocols, [_frame()], 1,
-                          failures=failures, fail_policy="abort")
+                          [None], failures=failures, fail_policy="abort")
 
 
 def test_shared_frame_ignores_failed_front_but_uses_the_rest():
@@ -50,7 +50,9 @@ def test_shared_frame_ignores_failed_front_but_uses_the_rest():
         ("MOEAD", "a", 0, 0): np.empty((0, 0)),
         ("MOEAD", "b", 0, 0): np.array([[0.0, 1.0], [1.0, 0.0]]),
     }
-    frame = compare.shared_frame(fronts, _operators(), protocols, 1, 1)[0]
+    frames = compare.shared_frame(fronts, _operators(), protocols, 1, 1,
+                                  [None])
+    frame = frames[(None, 0)]
     assert frame is not None
     assert len(frame) == 2
 
@@ -160,16 +162,17 @@ def test_ge_layout_matches_the_original_evaluation(tmp_path):
 
     operators = [("ox", None, "classic", "ox"), ("llamea", None, "llamea", "code")]
     protocols = [("MOEAD", False)]
-    values = {("MOEAD", "ox", 0): [0.5], ("MOEAD", "ox", 1): [0.6],
-              ("MOEAD", "llamea", 0): [0.7], ("MOEAD", "llamea", 1): [0.8]}
+    values = {("MOEAD", "ox", 0, "30k"): [0.5], ("MOEAD", "ox", 1, "30k"): [0.6],
+              ("MOEAD", "llamea", 0, "30k"): [0.7],
+              ("MOEAD", "llamea", 1, "30k"): [0.8]}
     # La repeticion mediana de "ox" es la 1 (0.6 > 0.5): ahi debe estar el frente.
     front = np.array([[0.0, 0.0], [1.0, 1.0]])
-    fronts = {("MOEAD", "ox", 1, 0): front,
-              ("MOEAD", "llamea", 1, 0): front}
-    frames = [np.array([[0.0, 0.0], [1.0, 1.0]])]
+    fronts = {("MOEAD", "ox", 1, "30k", 0): front,
+              ("MOEAD", "llamea", 1, "30k", 0): front}
+    frames = {("30k", 0): np.array([[0.0, 0.0], [1.0, 1.0]])}
 
     write_ge_layout(str(tmp_path), Args(), fronts, values, frames, operators,
-                    protocols)
+                    protocols, labels=["30k"])
     csv_path = tmp_path / "MOEAD" / "30k" / "KC11-2fl-1rl.csv"
     assert csv_path.is_file()
     lines = csv_path.read_text().strip().splitlines()
