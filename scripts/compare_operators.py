@@ -56,12 +56,14 @@ Salida: `results/evaluations/<name>/` con `evaluation.json`, `report.md`,
 """
 
 import argparse
+import csv
 import json
 import multiprocessing
 import os
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime
 
 import numpy as np
 
@@ -682,6 +684,148 @@ def write_front(front, file_path):
             handle.write(" ".join(f"{num:1.6e}" for num in row) + "\n")
 
 
+# --------------------------------------------------------------------------- #
+# Estructura de la evaluacion original (`experiment.py`)
+# --------------------------------------------------------------------------- #
+def budget_label(mo_generations, mo_population_size):
+    """Etiqueta del presupuesto como en el original.
+
+    El original evalua tres presupuestos ("10k", "30k", "50k") que son
+    100/300/500 generaciones con poblacion 105. Aqui solo se evalua el
+    final, asi que la etiqueta sale del propio presupuesto.
+    """
+    budget = int(mo_generations) * int(mo_population_size)
+    thousands = round(budget / 1050)
+    if thousands >= 1:
+        return f"{thousands}k"
+    return f"{mo_generations}x{mo_population_size}"
+
+
+def ge_column_name(solver, mutation, name):
+    """`<solver>_<operador>_<NM|WM>_<solver>`, como en `experiment.py`."""
+    return f"{solver}_{name}_{'WM' if mutation else 'NM'}_{solver}"
+
+
+def write_operator_catalog(out_dir, operators):
+    """Guarda los operadores usados: `operators.txt` (una linea por operador).
+
+    Es el equivalente del `MOEAD_operators.txt` que deja la evolucion
+    gramatical, pero con **todos** los operadores de la comparacion (los de
+    la GE, los clasicos y el descubierto por LLaMEA), para que el resultado
+    sea reproducible sin el comando que lo lanzo.
+    """
+    path = os.path.join(out_dir, "operators.txt")
+    with open(path, "w", encoding="utf-8") as handle:
+        for name, _ns, kind, source in operators:
+            if kind in ("classic", "classic2"):
+                text = f"{kind}:{source}"
+            else:
+                text = source
+            handle.write(f"{name}: {text}\n")
+    return path
+
+
+def write_ge_layout(out_dir, args, fronts, values, frames, operators, protocols,
+                    failures=None):
+    """Escribe la evaluacion con la estructura del original (`experiment.py`).
+
+    * `<solver>/<presupuesto>/<instancia>.csv`: una fila por repeticion y una
+      columna por operador, con el nombre `<solver>_<operador>_<NM|WM>_<solver>`
+      que usa el original.
+    * `<solver>/<presupuesto>/fronts/<instancia>/<columna>.pof` (y `_norm`):
+      el frente de la repeticion mediana; y `best_front_consolidated.pof` con
+      el marco consolidado de la instancia.
+    * `run_metrics/evaluation_<instancia>.json`: metricas por instancia.
+    """
+    evals = budget_label(args.mo_generations, args.mo_population_size)
+    failures = failures or {}
+    solvers = []
+    for solver, _mutation in protocols:
+        if solver not in solvers:
+            solvers.append(solver)
+
+    # Columnas por solver: (solver, mutacion, protocolo, operador, columna).
+    columns = {solver: [] for solver in solvers}
+    for solver, mutation in protocols:
+        for name, _ns, _kind, _src in operators:
+            columns[solver].append((solver, mutation,
+                                    protocol_name(solver, mutation), name,
+                                    ge_column_name(solver, mutation, name)))
+
+    for solver in solvers:
+        for index, path in enumerate(args.paths):
+            # El original nombra los ficheros sin extension (`KC11-2fl-1rl.csv`).
+            instance = os.path.splitext(os.path.basename(path))[0]
+            folder = os.path.join(out_dir, solver, evals)
+            os.makedirs(folder, exist_ok=True)
+
+            # -- CSV por instancia (formato del original) --------------------
+            with open(os.path.join(folder, f"{instance}.csv"), "w",
+                      newline="", encoding="utf-8") as handle:
+                # `\n` como el original (pandas `to_csv`), no `\r\n`.
+                writer = csv.writer(handle, lineterminator="\n")
+                writer.writerow(["Experiment"]
+                                + [col for _s, _m, _p, _n, col in columns[solver]])
+                for rep in range(args.repeats):
+                    row = [rep + 1]
+                    for _s, _m, protocol, name, _col in columns[solver]:
+                        values_row = values.get((protocol, name, rep))
+                        if values_row is not None and index < len(values_row) \
+                                and values_row[index] is not None:
+                            row.append(f"{values_row[index]:.10g}")
+                        else:
+                            row.append("")
+                    writer.writerow(row)
+
+            # -- Frentes (repeticion mediana por operador) ------------------
+            frame = frames[index] if index < len(frames) else None
+            bounds = None
+            if frame is not None and len(frame):
+                vmin, vmax = frame.min(axis=0), frame.max(axis=0)
+                if not np.any(vmax == vmin):
+                    bounds = (vmin, vmax)
+            front_dir = os.path.join(folder, "fronts", instance)
+            for solver_p, mutation, _protocol, name, col in columns[solver]:
+                selected = _median_front(fronts, values, name, index,
+                                         [(solver_p, mutation)], args.repeats)
+                if selected is None:
+                    continue
+                write_front(selected, os.path.join(front_dir, f"{col}.pof"))
+                if bounds is not None:
+                    write_front(clip_to_reference_box(
+                        normalize_front(selected, bounds)),
+                        os.path.join(front_dir, f"{col}_norm.pof"))
+            if frame is not None and len(frame):
+                write_front(frame, os.path.join(front_dir,
+                                                "best_front_consolidated.pof"))
+                if bounds is not None:
+                    write_front(clip_to_reference_box(
+                        normalize_front(frame, bounds)),
+                        os.path.join(front_dir,
+                                     "best_front_consolidated_norm.pof"))
+
+            # -- Metricas por instancia -------------------------------------
+            metrics = {
+                "phase": "evaluation",
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "instance": instance,
+                "solver": solver,
+                "budget": evals,
+                "counters": {
+                    "evaluations": len(columns[solver]) * args.repeats,
+                    "failures": sum(1 for key in failures
+                                    if key[0] in (protocol_name(solver, False),
+                                                  protocol_name(solver, True))),
+                },
+            }
+            metrics_dir = os.path.join(out_dir, "run_metrics")
+            os.makedirs(metrics_dir, exist_ok=True)
+            with open(os.path.join(metrics_dir,
+                                   f"evaluation_{instance}.json"), "w",
+                      encoding="utf-8") as handle:
+                json.dump(metrics, handle, indent=1)
+
+
 def write_instance_artifacts(out_dir, args, fronts, values, frames, operators,
                              protocols):
     """Artefactos por instancia, como deja la evaluacion original.
@@ -1300,12 +1444,21 @@ def main():
                operators, protocols, group_results)
     write_instance_artifacts(out_dir, args, fronts, values, frames, operators,
                              protocols)
+    # Estructura de la evaluacion original (experiment.py): <solver>/<presupuesto>/
+    # <instancia>.csv, los frentes por solver y las metricas por instancia; mas
+    # el catalogo de operadores usados.
+    write_ge_layout(out_dir, args, fronts, values, frames, operators, protocols,
+                    failures)
+    catalog = write_operator_catalog(out_dir, operators)
     write_report(os.path.join(out_dir, "report.md"), name, args, rows,
                  comparisons, frames, scores, values, operators, protocols,
                  pairwise_results, stability, failures, group_results)
     print(f"Guardado en {out_dir}")
     print("  hv_por_instancia.csv  resumen_operadores.csv  contrastes.csv")
     print("  fronts.npz (reutilizable con --load-fronts)  evaluation.json")
+    print(f"  {budget_label(args.mo_generations, args.mo_population_size)}/"
+          "<solver>/<instancia>.csv  (formato del original)")
+    print(f"  {os.path.relpath(catalog, out_dir)}  (operadores usados)")
 
 
 if __name__ == "__main__":

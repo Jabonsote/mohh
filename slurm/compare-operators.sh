@@ -63,6 +63,13 @@ export MEM="${MEM:-64G}"
 # Aprovechar todos los nucleos: FITNESS_WORKERS es el paralelismo de
 # compare_operators.py; se deja 1 hilo para el proceso principal.
 export FITNESS_WORKERS=$((CPUS - 1))
+# Cada worker corre un MOEA con arrays pequenos: si BLAS/OpenMP lanza sus
+# propios hilos, los procesos se pelean por los nucleos y el paralelismo se
+# pierde. Con un hilo por worker, los CPUS del job se aprovechan de verdad.
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
 
 SBATCH_ARGS=(
     --parsable --export=ALL
@@ -89,7 +96,8 @@ eval "$(conda shell.bash hook)" 2>/dev/null || true
 conda activate "$SLURM_SUBMIT_DIR/.conda-env"
 
 export FITNESS_WORKERS
-echo "FITNESS_WORKERS=$FITNESS_WORKERS  SPLIT=$SPLIT INSTANCES=$INSTANCES REPEATS=$REPEATS GE_PROTOCOL=$GE_PROTOCOL"
+echo "FITNESS_WORKERS=$FITNESS_WORKERS  OMP_NUM_THREADS=$OMP_NUM_THREADS"
+echo "SPLIT=$SPLIT INSTANCES=$INSTANCES REPEATS=$REPEATS GE_PROTOCOL=$GE_PROTOCOL"
 
 ARGS=(
     --split "$SPLIT"

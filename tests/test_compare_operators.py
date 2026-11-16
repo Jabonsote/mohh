@@ -140,3 +140,47 @@ def test_instance_selection_is_sorted_before_sampling():
     assert _select_instances(paths, 2, 7) == _select_instances(
         list(reversed(paths)), 2, 7
     )
+
+
+def test_ge_layout_matches_the_original_evaluation(tmp_path):
+    """La salida replica la estructura de `experiment.py`."""
+    from scripts.compare_operators import (budget_label, ge_column_name,
+                                          write_ge_layout,
+                                          write_operator_catalog)
+
+    assert budget_label(300, 105) == "30k"
+    assert ge_column_name("MOEAD", False, "ox") == "MOEAD_ox_NM_MOEAD"
+    assert ge_column_name("NSGAII", True, "llamea") == "NSGAII_llamea_WM_NSGAII"
+
+    class Args:
+        mo_generations = 300
+        mo_population_size = 105
+        repeats = 2
+        paths = ["/tmp/KC11-2fl-1rl.txt"]
+
+    operators = [("ox", None, "classic", "ox"), ("llamea", None, "llamea", "code")]
+    protocols = [("MOEAD", False)]
+    values = {("MOEAD", "ox", 0): [0.5], ("MOEAD", "ox", 1): [0.6],
+              ("MOEAD", "llamea", 0): [0.7], ("MOEAD", "llamea", 1): [0.8]}
+    # La repeticion mediana de "ox" es la 1 (0.6 > 0.5): ahi debe estar el frente.
+    front = np.array([[0.0, 0.0], [1.0, 1.0]])
+    fronts = {("MOEAD", "ox", 1, 0): front,
+              ("MOEAD", "llamea", 1, 0): front}
+    frames = [np.array([[0.0, 0.0], [1.0, 1.0]])]
+
+    write_ge_layout(str(tmp_path), Args(), fronts, values, frames, operators,
+                    protocols)
+    csv_path = tmp_path / "MOEAD" / "30k" / "KC11-2fl-1rl.csv"
+    assert csv_path.is_file()
+    lines = csv_path.read_text().strip().splitlines()
+    assert lines[0] == ("Experiment,MOEAD_ox_NM_MOEAD,MOEAD_llamea_NM_MOEAD")
+    assert lines[1] == "1,0.5,0.7"
+    assert (tmp_path / "run_metrics" / "evaluation_KC11-2fl-1rl.json").is_file()
+    front = (tmp_path / "MOEAD" / "30k" / "fronts" / "KC11-2fl-1rl"
+             / "MOEAD_ox_NM_MOEAD.pof")
+    assert front.is_file()
+
+    catalog = write_operator_catalog(str(tmp_path), operators)
+    text = open(catalog, encoding="utf-8").read()
+    assert "ox: classic:ox" in text
+    assert "llamea: code" in text
