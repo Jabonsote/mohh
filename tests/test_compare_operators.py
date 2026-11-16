@@ -47,8 +47,8 @@ def test_failed_front_counts_as_zero_or_is_excluded():
 def test_shared_frame_ignores_failed_front_but_uses_the_rest():
     protocols = [("MOEAD", False)]
     fronts = {
-        ("MOEAD", "a", 0, 0): np.empty((0, 0)),
-        ("MOEAD", "b", 0, 0): np.array([[0.0, 1.0], [1.0, 0.0]]),
+        ("MOEAD", "a", 0, None, 0): np.empty((0, 0)),
+        ("MOEAD", "b", 0, None, 0): np.array([[0.0, 1.0], [1.0, 0.0]]),
     }
     frames = compare.shared_frame(fronts, _operators(), protocols, 1, 1,
                                   [None])
