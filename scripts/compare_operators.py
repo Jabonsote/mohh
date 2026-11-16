@@ -479,7 +479,8 @@ def pairwise_design(fronts, rows, protocols, n_instances, repeats, failures=None
                 frames.append(_frame_from_points(pieces))
             subset = [(ours, None, "llamea", None), (base, None, "classic", None)]
             values = hv_values(fronts, subset, protocols, frames, repeats,
-                               failures=failures, fail_policy=fail_policy)
+                               [None], failures=failures,
+                               fail_policy=fail_policy)
             scores = per_run_scores(values, subset, protocols, repeats)
             if not any(value is not None for value in scores[ours]) or \
                     not any(value is not None for value in scores[base]):
@@ -563,7 +564,8 @@ def group_contrasts(fronts, rows, protocols, n_instances, repeats, groups,
             pieces = [p for p in pieces if p is not None and len(p)]
             frames.append(_frame_from_points(pieces))
         values = hv_values(fronts, subset, protocols, frames, repeats,
-                            failures=failures, fail_policy=fail_policy)
+                            [None], failures=failures,
+                            fail_policy=fail_policy)
         scores = per_run_scores(values, subset, protocols, repeats)
         left_scores = _group_scores(scores, members_left)
         right_scores = _group_scores(scores, members_right)
