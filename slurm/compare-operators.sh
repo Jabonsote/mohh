@@ -105,9 +105,11 @@ conda activate "$SLURM_SUBMIT_DIR/.conda-env"
 
 export FITNESS_WORKERS
 echo "FITNESS_WORKERS=$FITNESS_WORKERS  OMP_NUM_THREADS=$OMP_NUM_THREADS"
+echo "presupuestos: con GE_PROTOCOL=1, 10k/30k/50k en la misma corrida"
 echo "SPLIT=$SPLIT INSTANCES=$INSTANCES REPEATS=$REPEATS GE_PROTOCOL=$GE_PROTOCOL"
 
 ARGS=(
+    --fitness-workers "$FITNESS_WORKERS"
     --split "$SPLIT"
     --instances "$INSTANCES"
     --repeats "$REPEATS"
