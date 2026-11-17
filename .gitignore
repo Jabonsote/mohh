@@ -31,6 +31,12 @@ exp-*/
 .conda-env/
 # Papers de referencia (32 MB de PDFs): se quedan fuera del repo.
 docs/llamea-prompts/pdfs/
+*.pdf
+
+# Las corridas que generan los conjuntos de referencia: regenerables con
+# generate_reference_sets_pop.py (~75 s). Los conjuntos (P*) si se versionan.
+references_moea/**/runs/
+references_original/**/runs/
 # Nota de trabajo, no material del proyecto.
 best.md
 
