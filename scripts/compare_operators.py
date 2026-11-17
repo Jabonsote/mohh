@@ -333,7 +333,13 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
                 for index, instance in enumerate(instances):
                     todo = [(protocol, name, rep, label, index)
                             for label in labels
-                            if (protocol, name, rep, label, index) not in fronts]
+                            if (protocol, name, rep, label, index) not in fronts
+                            # Un fallo ya registrado no se re-ejecuta: casi
+                            # siempre es un timeout de 300 s del MOEA, y
+                            # reintentar el mismo par consume horas de CPU
+                            # para volver a fallar igual. Si se quiere
+                            # reintentar, hay que borrar `failures.json`.
+                            and (protocol, name, rep, label, index) not in failures]
                     if not todo:
                         continue
                     tasks.append((todo, source, kind, instance, seed, solver,
@@ -398,9 +404,18 @@ def _frame_from_points(pieces):
     return comprobate_frame(union)
 
 
+def _log(message):
+    """Log de progreso con hora: las fases largas (marcos, HV) tardan minutos
+    y sin esto el proceso parece colgado."""
+    print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
+
+
 def shared_frame(fronts, operators, protocols, n_instances, repeats, labels):
     """Marco por instancia y presupuesto: frente consolidado de todo."""
     frames = {}
+    total = len(labels) * n_instances
+    done = 0
+    started = time.time()
     for label in labels:
         for index in range(n_instances):
             pieces = [fronts.get((protocol_name(solver, mutation), name, rep,
@@ -410,6 +425,13 @@ def shared_frame(fronts, operators, protocols, n_instances, repeats, labels):
                       for rep in range(repeats)]
             pieces = [p for p in pieces if p is not None and len(p)]
             frames[(label, index)] = _frame_from_points(pieces)
+            done += 1
+            if done % 5 == 0 or done == total:
+                elapsed = time.time() - started
+                pending = total - done
+                _log(f"  marcos consolidados: {done}/{total} "
+                     f"({elapsed:.0f}s, "
+                     f"{elapsed / done * pending:.0f}s restantes)")
     return frames
 
 
@@ -1449,10 +1471,14 @@ def main():
                                       labels=labels, out_dir=out_dir)
     print(f"MOEA terminado en {time.time() - start:.1f}s; calculando HV...")
 
+    _log("FASE 1/5: marcos consolidados (comprobate + vmin/vmax)")
     frames_all = shared_frame(fronts, operators, protocols, len(args.paths),
                               args.repeats, labels)
+    _log(f"FASE 1/5 lista: {len(frames_all)} marcos")
+    _log("FASE 2/5: hipervolumenes de cada (protocolo, operador, repeticion)")
     values = hv_values(fronts, operators, protocols, frames_all, args.repeats,
                        labels, failures=failures, fail_policy=args.fail_policy)
+    _log("FASE 2/5 lista")
 
     # Guardar los frentes ANTES del analisis: si el analisis falla, el MOEA no
     # se repite (el mismo comando + --load-fronts reutiliza los frentes). Con
@@ -1476,6 +1502,7 @@ def main():
     if args.budget not in labels:
         raise SystemExit(f"--budget {args.budget!r} no se evaluo "
                          f"(presupuestos: {', '.join(labels)})")
+    _log("FASE 3/5: emparejamiento por parejas (marco propio de cada par)")
     values_all, fronts_all = values, fronts
     values_flat = {(protocol, name, rep): row
                    for (protocol, name, rep, label), row in values.items()
@@ -1598,6 +1625,7 @@ def main():
         }
         with open(os.path.join(out_dir, "evaluation.json"), "w") as handle:
             json.dump(result, handle, indent=2)
+        _log("FASE 5/5: escribiendo CSV, artefactos por instancia y evaluation.json")
         write_csvs(out_dir, args, rows, comparisons, pairwise_results, values,
                    operators, protocols, group_results)
         write_instance_artifacts(out_dir, args, fronts, values, frames, operators,

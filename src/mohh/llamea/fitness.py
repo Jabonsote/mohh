@@ -736,9 +736,18 @@ def _nondominated(points):
 
     `MO.non_dominated_sorting_vectorized` recorre la matriz en Python; con el
     marco consolidado de una busqueda larga eso es demasiado lento. Aqui se
-    resuelve con broadcasting de numpy, con la misma semantica: `q` esta
+    resuelve con un barrido tras ordenar, con la misma semantica: `q` esta
     dominado si existe `p` con `p >= q` en todos los objetivos y `p > q` en
     alguno.
+
+    Por que no el broadcasting de la version anterior: aquel construye una
+    matriz `n x n x k` de booleanos (2.4 GB con los 28 000 puntos que
+    consolida una instancia del GE) y la fase "calculando HV..." de
+    `scripts/compare_operators.py` la paga ~120 veces (marcos compartidos +
+    marcos por pareja), con lo que esa fase tardaba horas. El barrido cuesta
+    `O(n log n)` y devuelve EXACTAMENTE el mismo conjunto y el mismo orden
+    (ver `tests/test_llamea_nondominated.py`, que lo compara con la
+    implementacion de referencia O(n^2)).
     """
     from mohh.core.utilities.algorithm.MO import sign
 
@@ -746,12 +755,28 @@ def _nondominated(points):
     if len(array) <= 1:
         return array
     adjusted = array * sign
-    dominates = (
-        np.all(adjusted[:, None, :] >= adjusted[None, :, :], axis=2)
-        & np.any(adjusted[:, None, :] > adjusted[None, :, :], axis=2)
-    )
-    np.fill_diagonal(dominates, False)
-    return array[~dominates.any(axis=0)]
+    k = adjusted.shape[1]
+    # En el espacio `adjusted` el "mejor" es el MAYOR (`sign` vale -1 para
+    # minimizacion): un punto `p` esta dominado si existe `F` con `F >= p` en
+    # todos los objetivos y `F > p` en alguno.
+    order = np.lexsort([adjusted[:, j] for j in range(k - 1, -1, -1)])
+    sorted_p = adjusted[order]
+    front = []
+    for i in range(len(sorted_p)):
+        p = sorted_p[i]
+        if front:
+            f = sorted_p[front]
+            if np.any(np.all(f >= p, axis=1) & np.any(f > p, axis=1)):
+                continue                      # p esta dominado por el frente
+            kill = np.all(p >= f, axis=1) & np.any(p > f, axis=1)
+            if np.any(kill):
+                front = [idx for idx, dead in zip(front, kill) if not dead]
+        front.append(i)
+    # En el orden original de entrada, como la version de broadcasting
+    # (`array[~dominates.any(axis=0)]`): el marco sale byte a byte igual.
+    mask = np.zeros(len(array), dtype=bool)
+    mask[order[front]] = True
+    return array[mask]
 
 
 def comprobate_frame(points):
