@@ -13,14 +13,18 @@ ofrece lo que pide el analisis:
 * test de Wilcoxon pareado entre cada configuracion y una de referencia, con
   correccion de Holm para la familia de comparaciones.
 
-HV se maximiza, asi que antes de rankear se negan los valores para que "mejor"
-sea siempre "menor". Las otras tres metricas ya son de minimizacion.
+La DIRECCION de cada indicador sale de `mohh.core.indicators.directions`: HV
+se maximiza, IGD+, DELTA_P y R2 se minimizan. Antes de rankear o comparar se
+niegan los valores de maximizacion para que "mejor" sea siempre "menor", y
+`metric` es quien dice que indicador se esta mirando.
 """
 
 import numpy as np
 import pandas as pd
 
 from scipy import stats
+
+from mohh.core.indicators.directions import indicator_minimization
 
 __all__ = [
     "average_ranks",
@@ -32,19 +36,25 @@ __all__ = [
 ]
 
 
+def _es_minimizacion(metric) -> bool:
+    """Direccion del indicador, tolerando variantes de mayusculas."""
+    return indicator_minimization(str(metric).strip().upper())
+
+
 def average_ranks(frame: pd.DataFrame, metric: str = "HV") -> pd.DataFrame:
     """
     Rango promedio por configuracion, calculado instancia por instancia.
 
     @param frame: DataFrame `instancia x configuracion` con el valor del
         indicador.
-    @param metric: nombre del indicador; se usa solo para invertir HV.
+    @param metric: nombre del indicador; fija la direccion con la que se
+        rankea (1 = el mejor de esa instancia).
     @return: DataFrame con una fila por instancia y una columna por
         configuracion con su rango promedio (1 = el mejor de esa instancia).
     """
     valores = frame.copy()
 
-    if str(metric).upper() == "HV":
+    if not _es_minimizacion(metric):
         # Maximizacion: negar para que el menor valor sea el mejor.
         valores = -valores
 
@@ -56,7 +66,7 @@ def friedman_test(frame: pd.DataFrame, metric: str = "HV"):
     Test de Friedman sobre las instancias (bloques).
 
     @param frame: DataFrame `instancia x configuracion`.
-    @param metric: indicador, solo para invertir HV.
+    @param metric: indicador; fija la direccion con la que se rankea.
     @return: (estadistico, p_valor) o (nan, nan) si no se puede calcular.
     """
     rangos = average_ranks(frame, metric)
@@ -156,8 +166,8 @@ def critical_difference_diagram(
     """
     Diagrama de diferencias criticas de Nemenyi.
 
-    @param frame: DataFrame `instancia x configuracion`.
-    @param metric: indicador, para invertir HV.
+    @param frame: DataFrame `instancia x configuracion` (bloques x metodos).
+    @param metric: indicador; fija la direccion con la que se rankea.
     @param alpha: nivel de significacion.
     @param title: titulo del grafico.
     @param path: si se indica, se guarda la figura en esa ruta.
@@ -170,16 +180,28 @@ def critical_difference_diagram(
 
     rangos = average_ranks(frame, metric)
     promedios = rangos.mean(axis=0).sort_values()
-    cd = nemenyi_cd(rangos.shape[0], rangos.shape[1], alpha)
+    n_bloques, k_metodos = rangos.shape
+    cd = nemenyi_cd(n_bloques, k_metodos, alpha)
     _, p_friedman = friedman_test(frame, metric)
 
-    n = rangos.shape[0]
+    # El eje de rangos va de 1 a k = numero de METODOS comparados (columnas),
+    # nunca de bloques (filas): con `shape[0]` la figura salia estirada hasta
+    # el numero de instancias/individuos (1100) y todos los puntos quedaban
+    # apretados contra el borde izquierdo.
     etiquetas = list(promedios.index)
     valores = promedios.to_numpy(dtype=float)
+    limite = max(float(valores.max()), float(k_metodos)) + 0.5
+    # Los rangos son >= 1: sin este tope, `valores.min() - cd` podia bajar a
+    # rangos negativos (p. ej. CD=30 con 6 bloques) y dejaba media figura
+    # vacia a la izquierda.
+    inferior = max(min(float(valores.min()) - cd, 1.0) - 0.5, 0.5)
 
-    fig, ax = plt.subplots(figsize=(max(8, len(etiquetas) * 0.8), 4.5))
+    # La ALTURA crece con el numero de etiquetas (una por fila); el ancho se
+    # mantiene razonable, que es lo contrario de lo que hacia antes.
+    figura_alta = max(3.5, min(0.32 * len(etiquetas) + 1.5, 18.0))
+    fig, ax = plt.subplots(figsize=(11.0, figura_alta))
 
-    ax.set_xlim(min(valores.min() - cd, 1) - 0.5, n + 0.5)
+    ax.set_xlim(inferior, limite)
     ax.set_ylim(0, len(etiquetas))
 
     for i, etiqueta in enumerate(etiquetas):
@@ -198,12 +220,32 @@ def critical_difference_diagram(
                 break
 
     ax.axvline(1, color="gray", linestyle=":", linewidth=1)
-    ax.axvline(n, color="gray", linestyle=":", linewidth=1)
+    ax.axvline(k_metodos, color="gray", linestyle=":", linewidth=1)
     ax.set_yticks(range(len(etiquetas)))
-    ax.set_yticklabels(etiquetas)
-    ax.set_xlabel("Rango promedio (1 = el mejor)")
+    ax.set_yticklabels(etiquetas, fontsize=max(6.0, min(10.0, 220 / max(
+        len(etiquetas), 1))))
+    ax.set_xlabel("Rango promedio (1 = mejor)")
     titulo = title or f"Diferencias criticas - {metric}"
-    ax.set_title(f"{titulo} (CD={cd:.2f}, Friedman p={p_friedman:.2e})")
+    # Si el CD supera la diferencia maxima posible entre rangos (k - 1), no
+    # puede haber NI UNA pareja significativa: se dice en el titulo en vez de
+    # dejar una figura que parece dar un resultado.
+    # Titulo super simple: solo QUE se compara. El CD y el p-valor de
+    # Friedman van a consola, y en el titulo solo se queda el aviso cuando el
+    # resultado no discrimina (CD >= k-1: imposible que haya pareja
+    # significativa).
+    inviable = cd >= (k_metodos - 1) and k_metodos > 1
+    nota = " (sin parejas significativas)" if inviable else ""
+    ax.set_title(f"{titulo}{nota}")
+    if path:
+        aviso = "; CD >= k-1, no hay pareja significativa" if inviable else ""
+        # `p=0.00e+00` es underflow de la distribucion de Friedman, no un
+        # p-valor de cero: se escribe como cota.
+        texto_p = ("p<1e-16" if (not np.isfinite(p_friedman)
+                                 or p_friedman < 1e-16)
+                   else f"p={p_friedman:.2e}")
+        print(f"  nota: CD {titulo}: CD={cd:.2f}, Friedman {texto_p} "
+              f"({n_bloques} bloques x {k_metodos} metodos){aviso}",
+              flush=True)
     ax.invert_yaxis()
     ax.grid(axis="x", linestyle=":", alpha=0.5)
     fig.tight_layout()
@@ -242,7 +284,12 @@ def boxplot_configs(
             for col in frame.columns]
     etiquetas = list(frame.columns)
 
-    fig, ax = plt.subplots(figsize=(max(8, len(etiquetas) * 0.7), 4.5))
+    # Boxplot horizontal: las etiquetas van en el eje Y, asi que la ALTURA es
+    # la que tiene que crecer con el numero de configuraciones (antes crecia
+    # el ancho y con 89 configuraciones salia una figura de 60 pulgadas con
+    # las etiquetas apiladas).
+    figura_alta = max(4.0, min(0.34 * len(etiquetas) + 1.5, 18.0))
+    fig, ax = plt.subplots(figsize=(10.0, figura_alta))
     # matplotlib >= 3.9 renombro `labels` a `tick_labels`; se usa el nombre
     # nuevo, que es el que sigue vivo en las versiones actuales del entorno.
     ax.boxplot(data, tick_labels=etiquetas, vert=False, patch_artist=True,
@@ -280,12 +327,14 @@ def wilcoxon_vs_reference(
     """
     Wilcoxon pareado de cada configuracion contra una de referencia.
 
-    Los valores de HV se niegan para que en todos los casos "menor" sea mejor y
-    la hipotesis alternativa sea siempre la misma (la configuracion mejora).
+    Los valores de maximizacion (HV) se niegan para que en todos los casos
+    "menor" sea mejor y la hipotesis alternativa sea siempre la misma (la
+    configuracion mejora). `metric` fija la direccion: sin el, todos los
+    indicadores se tratarian como si fueran de maximizacion.
 
     @param frame: DataFrame `instancia x configuracion`.
     @param reference: nombre de la columna de referencia.
-    @param metric: indicador, solo para invertir HV.
+    @param metric: indicador; fija la direccion con la que se comparan.
     @return: DataFrame con una fila por configuracion: `n`, `statistic`,
         `p_raw`, `p_holm`, `better` (si la media de diferencias es negativa) y
         `mean_diff`.
@@ -293,7 +342,7 @@ def wilcoxon_vs_reference(
     if reference not in frame.columns:
         raise ValueError(f"la referencia '{reference}' no esta en el DataFrame")
 
-    datos = -frame if str(metric).upper() == "HV" else frame
+    datos = -frame if not _es_minimizacion(metric) else frame
     base = datos[reference]
 
     filas = []

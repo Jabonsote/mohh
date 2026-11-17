@@ -4,11 +4,10 @@ __pycache__/
 results/*
 !results/analysis_scripts/
 !results/analysis_scripts/**
-!results/larger_RESULTS.md
-!results/references_moea_counts.md
-!results/README.md
 !results/figure_values/
 !results/figure_values/**
+!results/generation_comparison/
+!results/generation_comparison/**
 results_*/
 temporal*/
 analysis_express*/
@@ -51,3 +50,6 @@ eval_debug_*.tar.gz
 # Aunque analysis_scripts se versiona, sus cachés no.
 results/analysis_scripts/**/__pycache__/
 results/analysis_scripts/**/*.pyc
+
+# disposable experiment folder
+experimentos_001_002/

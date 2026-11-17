@@ -31,6 +31,9 @@ import pandas as pd
 
 
 # Indicadores cuyo mejor valor conocido es el minimo.
+# Debe coincidir con `mohh.core.indicators.directions.MINIMIZATION_METRICS`
+# (el modulo no importa `mohh` a nivel de modulo para seguir siendo
+# independiente; `tests/test_indicator_directions.py` comprueba la igualdad).
 _MINIMIZATION_METRICS = {"IGD+", "DELTA_P", "R2"}
 
 # Alias aceptados para cada indicador.

@@ -15,8 +15,8 @@ Así los valores de generaciones distintas son comparables entre sí dentro de
 cada experimento.
 
 Uso:
-    python results/analysis_scripts/evaluate_generations.py \
-        results/experiments_larger/Experiment_001
+    python evaluate_generations.py \
+        results/baseline/Experiment_001
 """
 
 from __future__ import annotations
@@ -199,7 +199,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Indicadores comparables por generación (estilo mohh-evaluate).")
     parser.add_argument("experiment")
-    parser.add_argument("--references", default="references_moea/train/reference_sets")
+    parser.add_argument(
+        "--references",
+        default="references_moea/train/reference_sets_pop",
+        help="P* con N = poblacion de MOEAD (reference_sets_pop)")
     parser.add_argument("--output", default=None)
     parser.add_argument("--metrics", nargs="+", default=list(INDICATORS),
                         choices=list(INDICATORS))

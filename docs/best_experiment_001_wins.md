@@ -1,7 +1,6 @@
 # Best de Experiment_001: victorias vs CX y PMX
 
 `NM` = sin mutación. `WM` = con `Swap_Mutation`.
-Victorias por instancia sobre 20, usando la media de 31 réplicas.
 
 | MOEA | Mut | Budget | vs CX | vs PMX |
 |---|---|---|---|---|

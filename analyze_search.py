@@ -14,7 +14,8 @@ QUE HACE, PASO A PASO
    los P* de test. No se ejecuta ningun algoritmo: solo se vuelven a evaluar las
    soluciones que la busqueda ya encontro. Asi se mide generalizacion de verdad,
    con el mismo objeto y no con una poblacion distinta.
-4. Escribe tablas por generacion, por instancia y por generacion x instancia.
+4. Escribe tablas por generacion, por instancia y por generacion x instancia,
+   con la columna `direction` de cada indicador.
 5. Dibuja:
    - boxplot de los individuos de cada generacion (dispersion de la poblacion),
    - boxplot train frente a test en escala normalizada,
@@ -37,6 +38,34 @@ con el mismo numero de instalaciones `n` (una permutacion de tamano `n` se
 puede reevaluar en cualquier instancia con `n` instalaciones) y omite los test
 que no tengan ningun train de ese tamano. `summary.json` deja constancia en
 `test_skipped` y `pairing`.
+
+DIRECCION DE CADA INDICADOR
+
+`HV` se MAXIMIZA; `IGD+`, `DELTA_P` y `R2` se MINIMIZAN. El registro unico es
+`mohh.core.indicators.directions` y esta volcado en
+`00_config/indicators_direction.md` y en `summary.json
+(indicator_directions)`. En concreto:
+
+- las figuras normalizadas usan **1 = mejor** (en las metricas de minimizacion
+  la escala 0-1 se refleja), asi que en todas mas arriba es mejor;
+- los rangos, Friedman y diagramas de diferencias criticas aplican la
+  direccion (1 = mejor);
+- `mejor_por_generacion` toma el maximo para HV y el minimo para el resto;
+- en las tablas CSV la columna `direction` dice que signo tiene "mejor".
+
+Implementacion: HV e IGD+ usan las versiones **oficiales de pymoo**
+(`pymoo.indicators.hv.HV`, `pymoo.indicators.igd_plus.IGDPlus`); DELTA_P y R2
+no tienen equivalente oficial y se calculan con el codigo del repositorio.
+
+CAJA DE NORMALIZACION DE IGD+/DELTA_P/R2
+
+Es la del PROPIO P*, calculada una sola vez en `load_references` y sin
+ampliarla con los frentes medidos (antes usaba `pooled_reference_sets`, y
+entonces cada experimento tenia su propia escala: los mismos individuos daban
+IGD+ 0.53 en este script y 1.96 en `analyze_gen`). Con la caja fija, esos tres
+indicadores son comparables entre train, test y cualquier otra corrida que
+use los mismos P*, y coinciden con los de `analyze_gen`. El HV sigue
+necesitando `--hv-scale` para ser comparable entre experimentos.
 
 COMO LEERLO, Y COMO NO LEERLO
 
@@ -85,6 +114,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
 from mohh.analysis.indicators_all import (INDICATORS, compute_indicators,
+                                          indicator_minimization,
                                           load_references)
 from mohh.analysis.io_utils import (iter_experiment_individuals,
                                      load_experiment, write_json)
@@ -92,13 +122,40 @@ from mohh.analysis.hv_scale import (HvScale, HvScaleError, load_hv_scale,
                                     load_hv_scale_from_evaluation,
                                     conflictos_escala, restringir_escala,
                                     save_hv_scale, instancias_sin_escala)
+from mohh.core.indicators.directions import (
+    DIRECTIONS, aggregation_for_metric, axis_hint, direction_label)
 from mohh.core.indicators.reference_sets import (
-    NADIR_MARGIN, ReferenceSet, pooled_reference_sets)
+    NADIR_MARGIN, ReferenceSet)
 from analyze_gen import diagnostico_saturacion
+
+
+#: Paleta UNICA de split para todas las figuras: mismo color, mismo
+#: significado. Antes los boxplots por generacion usaban un azul propio
+#: (#9ecae1) y las figuras train/test otros dos (#3182bd/#e6550d).
+PALETA_SPLIT = {"train": "#3182bd", "test": "#e6550d"}
 
 
 class AnalisisSearchError(RuntimeError):
     """Falta algo para poder seguir la busqueda."""
+
+
+def _orienta_mejor(metrica, valores):
+    """
+    Pone 1 = mejor en una escala ya normalizada a [0, 1].
+
+    La normalizacion min-max deja 0 en el minimo crudo. En las metricas de
+    minimizacion (IGD+, DELTA_P, R2) el minimo crudo es el BUENO, asi que sin
+    reflejar la curva se lee al reves: subir seria empeorar. En HV el 1 ya es
+    el bueno. Con este reflejo TODAS las figuras normalizadas se leen igual:
+    mas arriba es mejor.
+
+    @param metrica: nombre del indicador.
+    @param valores: serie/matriz normalizada a [0, 1] (NaN se conserva).
+    @return: la misma escala orientada a 1 = mejor.
+    """
+    if indicator_minimization(metrica):
+        return 1.0 - valores
+    return valores
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +398,123 @@ def _frentes_entrenamiento(individuo):
             if np.asarray(frente).size}
 
 
+def _caja_degenerada(referencia):
+    """
+    True si la caja de normalizacion del P* se colapsa.
+
+    Un P* de un solo punto, o con algun objetivo constante, tiene `span` 0 en
+    ese eje y cae al valor de convenio 1.0: los valores normalizados quedan en
+    la escala CRUDA de los objetivos (~1e5) y no son comparables con nada.
+    """
+    frente = np.asarray(referencia.front, dtype=float)
+    if frente.shape[0] <= 1:
+        return True
+    return bool(np.any(frente.max(axis=0) <= frente.min(axis=0)))
+
+
+def _extremos_medidos(frentes_por_individuo):
+    """`{instancia: (min, max)}` sobre todos los puntos medidos de un split."""
+    extremos = {}
+    for por_instancia in frentes_por_individuo.values():
+        for instancia, frente in por_instancia.items():
+            frente = np.atleast_2d(np.asarray(frente, dtype=float))
+            if not frente.size:
+                continue
+            bajo, alto = frente.min(axis=0), frente.max(axis=0)
+            if instancia in extremos:
+                extremos[instancia] = (np.minimum(extremos[instancia][0], bajo),
+                                       np.maximum(extremos[instancia][1], alto))
+            else:
+                extremos[instancia] = (bajo, alto)
+    return extremos
+
+
+def _rescatar_cajas_degeneradas(referencias, extremos, split, verbose=True):
+    """
+    Amplia SOLO las cajas degeneradas de P* con los frentes medidos.
+
+    La caja de IGD+/DELTA_P/R2 es la del propio P* (fija y compartida), y asi
+    sigue siendo para todas las instancias con recorrido. Pero cuando el P* es
+    un punto (frente verdaderamente de un punto, p. ej. `KC10-2fl-2un`) la caja
+    se colapsa y el indicador sale en escala cruda: para ESAS instancias se
+    usa la union de P* con los frentes medidos, que es el rescate que ya
+    documenta `pooled_reference_sets`. El `front` de referencia no cambia.
+
+    @param referencias: dict nombre -> `ReferenceSet`.
+    @param extremos: `{instancia: (min, max)}` de lo medido en este split.
+    @param split: 'train' o 'test', para los mensajes.
+    @return: (referencias a usar, instancias rescatadas).
+    """
+    salida = dict(referencias)
+    rescatadas = []
+    for nombre, referencia in sorted(referencias.items()):
+        if not _caja_degenerada(referencia):
+            continue
+        extremo = extremos.get(nombre)
+        if extremo is None:
+            if verbose:
+                print(f"  AVISO {split}: P* de {nombre} tiene caja degenerada "
+                      f"y no hay frentes medidos con los que ampliarla; sus "
+                      f"indicadores saldran en escala cruda.", flush=True)
+            continue
+        bajo = np.minimum(referencia.front.min(axis=0), extremo[0])
+        alto = np.maximum(referencia.front.max(axis=0), extremo[1])
+        span = alto - bajo
+        span = np.where(span > 0, span, 1.0)
+        salida[nombre] = ReferenceSet(
+            name=nombre, front=referencia.front, ideal=bajo,
+            nadir=alto + NADIR_MARGIN * span, span=span)
+        rescatadas.append(nombre)
+
+    if rescatadas and verbose:
+        print(f"  nota {split}: {len(rescatadas)} P* con caja degenerada "
+              f"({', '.join(rescatadas)}) medidos con la caja "
+              f"P* + frentes medidos.", flush=True)
+    return salida, rescatadas
+
+
+def _completar_escala_hv(escala, bounds, split, verbose=True, excluir=None):
+    """
+    Rellena con la MISMA receta de `mohh-evaluate` lo que la escala congelada
+    no cubre.
+
+    La escala congelada (la de la evaluacion final o la compartida entre
+    experimentos) trae las instancias que esa evaluacion midio: en la practica
+    las de test. Train no tiene evaluacion, asi que sus `vmin/vmax` se calculan
+    aqui con el mismo protocolo (frente no dominado consolidado de TODOS los
+    individuos + `ref_point` 1.1, exactamente `experiment.py`). Asi train y
+    test se miden con la misma receta y con el MISMO nadir, que es el de la
+    evaluacion final.
+
+    @param escala: `HvScale` congelada.
+    @param bounds: `{instancia: (vmin, vmax)}` consolidados de este split.
+    @param split: 'train' o 'test', para los mensajes.
+    @param excluir: instancias que hay que recalcular AUNQUE ya esten en la
+        escala. Hace falta cuando un nombre existe en los dos splits con
+        matrices distintas (p. ej. `KC64-2fl-1rl` en train y en test): la
+        entrada de la evaluacion describe la de TEST, no la de train.
+    @return: (escala completa, instancias rellenadas).
+    """
+    excluir = set(excluir or ())
+    faltan = [nombre for nombre in bounds
+              if nombre not in escala.bounds or nombre in excluir]
+    if not faltan:
+        return escala, []
+
+    completada = HvScale(
+        {**escala.bounds, **{n: bounds[n] for n in faltan}},  # los nuevos pisan
+        ref_point=escala.ref_point,
+        source=f"{escala.source}+consolidado:{split}",
+        usados=list(escala.usados))
+    if verbose:
+        print(f"  AVISO escala {split}: {len(faltan)} instancia(s) sin "
+              f"evaluacion final; se completan con el consolidado de esta "
+              f"corrida y el MISMO nadir ref_point="
+              f"{escala.ref_point} ({faltan[:6]}"
+              f"{'...' if len(faltan) > 6 else ''})", flush=True)
+    return completada, faltan
+
+
 def _consolidar(actual, nuevos):
     """Frente no dominado de `actual` + `nuevos` (minimizacion)."""
     from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
@@ -360,12 +534,19 @@ def _recolectar_escalas_train(ruta_experimento, instancias, verbose=True,
     Primera pasada de train con memoria acotada.
 
     En vez de guardar los ~1100 frentes de cada instancia, se consolidan por
-    lotes de individuos. Devuelve los frentes no dominados consolidados por
-    instancia y los minimos/maximos de todos los puntos (para la caja pooled).
+    lotes de individuos. Devuelve:
+
+    * los frentes no dominados consolidados por instancia, que es de donde
+      sale la escala `vmin/vmax` del HV;
+    * los extremos (min/max por objetivo) de TODOS los puntos medidos, que
+      solo se usan para rescatar un P* con caja degenerada (`_rescatar_...`);
+    * el numero de individuos leidos.
+
+    La caja de normalizacion de IGD+/DELTA_P/R2 sale del propio P*
+    (`load_references`), fija y comun a todos los experimentos.
     """
     consolidado = {}
-    pooled_min = {}
-    pooled_max = {}
+    extremos = {}
     buffer = {}
     total = 0
 
@@ -381,40 +562,20 @@ def _recolectar_escalas_train(ruta_experimento, instancias, verbose=True,
         total += 1
         for instancia, frente in _frentes_entrenamiento(individuo).items():
             if frente.size:
-                bajo = frente.min(axis=0)
-                alto = frente.max(axis=0)
-                if instancia in pooled_min:
-                    pooled_min[instancia] = np.minimum(
-                        pooled_min[instancia], bajo)
-                    pooled_max[instancia] = np.maximum(
-                        pooled_max[instancia], alto)
+                bajo, alto = frente.min(axis=0), frente.max(axis=0)
+                if instancia in extremos:
+                    extremos[instancia] = (
+                        np.minimum(extremos[instancia][0], bajo),
+                        np.maximum(extremos[instancia][1], alto))
                 else:
-                    pooled_min[instancia] = bajo
-                    pooled_max[instancia] = alto
+                    extremos[instancia] = (bajo, alto)
             buffer.setdefault(instancia, []).append(frente)
         if (i + 1) % chunk == 0:
             volcar()
             if verbose and (i + 1) % 200 == 0:
                 print(f"    {i + 1} individuos (train, escala)", flush=True)
     volcar()
-    return consolidado, pooled_min, pooled_max, total
-
-
-def _referencias_pooled(referencias, pooled_min, pooled_max):
-    """Escala de P* ampliada con los extremos de los frentes medidos."""
-    salida = {}
-    for nombre, referencia in referencias.items():
-        bajo = np.minimum(referencia.front.min(axis=0),
-                          pooled_min.get(nombre, referencia.front.min(axis=0)))
-        alto = np.maximum(referencia.front.max(axis=0),
-                          pooled_max.get(nombre, referencia.front.max(axis=0)))
-        span = alto - bajo
-        span = np.where(span > 0, span, 1.0)
-        nadir = alto + NADIR_MARGIN * span
-        salida[nombre] = ReferenceSet(
-            name=nombre, front=referencia.front, ideal=bajo,
-            nadir=nadir, span=span)
-    return salida
+    return consolidado, extremos, total
 
 
 def _medir_train_streaming(ruta_experimento, instancias, nombres, born,
@@ -564,36 +725,27 @@ def combinar_escalas(escalas):
 def medir_split(experimento, nombres, frentes_por_individuo, escala,
                 referencias, metricas):
     """
-    Mide los individuos con las escalas de HV y de referencia ya congeladas.
+    Mide los individuos con la escala de HV ya congelada.
 
-    Las dos escalas se derivan del MISMO conjunto de frentes (todos los
-    individuos del split), asi que son identicas para todos ellos y los valores
-    son comparables entre individuos y entre generaciones.
+    * **HV**: escala `vmin/vmax` del frente consolidado de TODOS los
+      individuos del split, asi que es identica para todos ellos y los valores
+      son comparables entre individuos y entre generaciones.
+    * **IGD+, DELTA_P, R2**: caja de normalizacion del PROPIO P*, sin tocar.
+      Es la misma caja en train y en test, y la misma que usa `analyze_gen`,
+      de modo que los valores son comparables entre experimentos. Antes la caja
+      se ampliaba con los frentes medidos (`pooled_reference_sets`) y entonces
+      cada experimento tenia su propia escala: los mismos individuos daban
+      IGD+ 0.53 en un script y 1.96 en otro.
 
     @param experimento: `Experiment`.
     @param nombres: lista de individuos.
     @param frentes_por_individuo: salida de `frentes_de_split`.
     @param escala: `HvScale` de este split.
-    @param referencias: dict nombre -> `ReferenceSet`.
+    @param referencias: dict nombre -> `ReferenceSet` (caja fija del P*).
     @param metricas: metricas a calcular.
-    @return: (tabla larga, referencias efectivamente usadas).
+    @return: tabla larga de indicadores.
     """
     contextos = escala.contexts()
-
-    # Escala de las metricas relativas a P*: la caja de la union de P* con
-    # todos los frentes que se miden en este split. Se calcula una vez y se
-    # reutiliza para todos los individuos, que es lo que hace comparables sus
-    # valores. Sin esto, un P* de un solo punto (KC10-2fl-2un, KC20-2fl-2un)
-    # deja `span` en 1 y los indicadores salen en la escala cruda de los
-    # objetivos: IGD+ del orden de 1e5 y DELTA_P siempre igual a 1.
-    frentes_consolidados = {}
-    for por_instancia in frentes_por_individuo.values():
-        for instancia, frente in por_instancia.items():
-            if instancia in contextos:
-                frentes_consolidados.setdefault(instancia, []).append(frente)
-
-    referencias_usadas = pooled_reference_sets(referencias,
-                                                frentes_consolidados)
 
     filas = []
     for nombre in nombres:
@@ -606,7 +758,7 @@ def medir_split(experimento, nombres, frentes_por_individuo, escala,
         # `require_references=False` porque una instancia puede quedarse sin
         # frente medido y entonces sus indicadores de referencia salen como
         # NaN en vez de abortar el resto del split. HV no depende de P*.
-        medidas = compute_indicators(frentes, references=referencias_usadas,
+        medidas = compute_indicators(frentes, references=referencias,
                                      metrics=metricas, hv_context=contextos,
                                      require_references=False)
 
@@ -630,7 +782,7 @@ def medir_split(experimento, nombres, frentes_por_individuo, escala,
             "ningun individuo pudo medirse; revisa que las referencias "
             "correspondan a las instancias del split")
 
-    return pd.DataFrame(filas), referencias_usadas
+    return pd.DataFrame(filas)
 
 
 # ---------------------------------------------------------------------------
@@ -775,11 +927,15 @@ def figura_boxplot_por_generacion(largo, metricas, directorio, split):
         for elemento in caja["medians"]:
             elemento.set_color("black")
             elemento.set_linewidth(1.2)
-        caja["boxes"][0].set_facecolor("#9ecae1")
+        # Color del SPLIT, el mismo que en el resto de figuras (antes todas
+        # las cajas eran un azul propio que no significaba nada).
+        color = PALETA_SPLIT.get(split, "#3182bd")
+        for parche in caja["boxes"]:
+            parche.set_facecolor(color)
 
-        eje.set_title(f"{metrica}")
-        eje.set_xlabel("generacion de nacimiento")
-        eje.set_ylabel(metrica)
+        eje.set_title(metrica)
+        eje.set_xlabel("generacion")
+        eje.set_ylabel(f"{metrica} {axis_hint(metrica)}")
         eje.grid(axis="y", alpha=0.3)
 
         guardar(figura, os.path.join(
@@ -791,10 +947,16 @@ def figura_train_test(largo, metricas, directorio):
     Boxplot train frente a test, en escala normalizada por instancia.
 
     Train y test son instancias distintas, asi que sus valores absolutos no se
-    comparan. Se normaliza cada valor dentro de su instancia y de su metrica
-    (0 = minimo de esa instancia, 1 = maximo) para comparar la FORMA de las
-    distribuciones: si la caja de test esta mas abajo, el entrenamiento no
+    comparan. Se normaliza cada valor dentro de su PAR (split, instancia) y de
+    su metrica (0 = minimo de ese par, 1 = maximo) para comparar la FORMA de
+    las distribuciones: si la caja de test esta mas abajo, el entrenamiento no
     esta transfiriendo.
+
+    El `split` hace falta en el `groupby`: un nombre puede existir en los dos
+    splits con matrices distintas (`KC64-2fl-1rl` en `mqap`), y con un
+    `groupby("instance")` su rango train (hasta 0.89 de HV) se aplicaba
+    tambien a test (cuyos valores llegan a 0.006), aplastando la caja de test
+    contra el suelo.
 
     @param largo: tabla larga con las filas de ambos splits.
     @param metricas: metricas a dibujar.
@@ -806,21 +968,23 @@ def figura_train_test(largo, metricas, directorio):
             continue
 
         normalizado = grupo.copy()
-        limites = grupo.groupby("instance")["value"].transform(
+        claves = (["split", "instance"] if "split" in grupo.columns
+                  else ["instance"])
+        limites = grupo.groupby(claves)["value"].transform(
             lambda s: s.max() - s.min())
-        normalizado["norm"] = (grupo["value"] -
-                               grupo.groupby("instance")["value"].transform("min")) \
-            / limites.replace(0, np.nan)
+        normalizado["norm"] = _orienta_mejor(metrica, (
+            grupo["value"] -
+            grupo.groupby(claves)["value"].transform("min"))
+            / limites.replace(0, np.nan))
 
         datos, etiquetas, colores = [], [], []
-        paleta = {"train": "#3182bd", "test": "#e6550d"}
         for split in ("train", "test"):
             valores = normalizado.loc[normalizado["split"] == split,
                                       "norm"].dropna().to_numpy()
             if valores.size:
                 datos.append(valores)
                 etiquetas.append(split)
-                colores.append(paleta[split])
+                colores.append(PALETA_SPLIT[split])
 
         if not datos:
             continue
@@ -832,7 +996,7 @@ def figura_train_test(largo, metricas, directorio):
             parche.set_facecolor(color)
 
         eje.set_title(f"{metrica} train-test")
-        eje.set_ylabel("valor normalizado (0-1)")
+        eje.set_ylabel("normalizado (1 = mejor)")
         eje.grid(axis="y", alpha=0.3)
 
         guardar(figura, os.path.join(directorio,
@@ -841,13 +1005,15 @@ def figura_train_test(largo, metricas, directorio):
 
 def mejor_por_generacion(largo):
     """
-    El mejor individuo de cada generacion: el minimo, porque todos los
-    indicadores se minimizan.
+    El mejor individuo de cada generacion, con la DIRECCION correcta: el maximo
+    para HV y el minimo para IGD+, DELTA_P y R2 (ver
+    `mohh.core.indicators.directions`).
 
     Es la trayectoria de la mejor solucion encontrada hasta cada generacion. La
     media la arrastran todos los individuos de esa generacion, incluidos los que
-    ya no aportan nada, asi que baja mas despacio y no deja distinguir si la
-    busqueda sigue avanzando o si se estanca. El minimo si lo dice.
+    ya no aportan nada, asi que se mueve mas despacio y no deja distinguir si la
+    busqueda sigue avanzando o si se estanca. El mejor de la generacion si lo
+    dice.
 
     @param largo: tabla larga.
     @return: DataFrame con una fila por (split, metrica, instancia,
@@ -863,8 +1029,9 @@ def mejor_por_generacion(largo):
 
     filas = []
     for metrica, grupo in largo.groupby("metric", sort=True):
-        # HV se maximiza; IGD+, DELTA_P y R2 se minimizan.
-        agregacion = "max" if str(metrica).upper() == "HV" else "min"
+        # La direccion la fija el registro unico de indicadores: HV se
+        # maximiza, IGD+/DELTA_P/R2 se minimizan.
+        agregacion = aggregation_for_metric(metrica)
         tabla = (grupo.groupby(claves)["value"]
                  .agg(agregacion).reset_index()
                  .rename(columns={"value": "mejor"}))
@@ -890,7 +1057,6 @@ def figura_boxplot_generacion_train_test(largo, metricas, directorio):
     @param directorio: carpeta de figuras.
     """
     mejores = mejor_por_generacion(largo)
-    paleta = {"train": "#3182bd", "test": "#e6550d"}
 
     for metrica in metricas:
         parte = mejores[mejores["metric"] == metrica]
@@ -898,11 +1064,14 @@ def figura_boxplot_generacion_train_test(largo, metricas, directorio):
             continue
 
         normalizado = parte.copy()
-        limites = parte.groupby("instance")["mejor"].transform(
+        claves = (["split", "instance"] if "split" in parte.columns
+                  else ["instance"])
+        limites = parte.groupby(claves)["mejor"].transform(
             lambda s: s.max() - s.min())
-        normalizado["norm"] = (parte["mejor"] -
-                               parte.groupby("instance")["mejor"]
-                               .transform("min")) / limites.replace(0, np.nan)
+        normalizado["norm"] = _orienta_mejor(metrica, (
+            parte["mejor"] -
+            parte.groupby(claves)["mejor"]
+            .transform("min")) / limites.replace(0, np.nan))
 
         # Una instancia cuyo mejor valor no cambia entre generaciones tiene
         # rango 0 y al normalizar sale NaN, asi que se queda fuera de la caja.
@@ -942,7 +1111,7 @@ def figura_boxplot_generacion_train_test(largo, metricas, directorio):
                                patch_artist=True, showfliers=False,
                                manage_ticks=False)
             for parche in caja["boxes"]:
-                parche.set_facecolor(paleta[split])
+                parche.set_facecolor(PALETA_SPLIT[split])
             for mediana in caja["medians"]:
                 mediana.set_color("black")
                 mediana.set_linewidth(1.1)
@@ -951,9 +1120,9 @@ def figura_boxplot_generacion_train_test(largo, metricas, directorio):
         eje.set_xticklabels([str(g) for g in generaciones])
         eje.set_title(f"{metrica} mejor train-test")
         eje.set_xlabel("generacion")
-        eje.set_ylabel("normalizado")
+        eje.set_ylabel("normalizado (1 = mejor)")
 
-        mangos = [Line2D([], [], color=paleta[s], linewidth=8, label=s)
+        mangos = [Line2D([], [], color=PALETA_SPLIT[s], linewidth=8, label=s)
                   for s in ("train", "test") if s in series]
         eje.legend(handles=mangos, fontsize=8)
         eje.grid(axis="y", alpha=0.3)
@@ -962,23 +1131,30 @@ def figura_boxplot_generacion_train_test(largo, metricas, directorio):
             directorio, f"cajas/generacion_train_test_{metrica}.png"))
 
 
-def _normaliza_por_instancia(matriz):
+def _normaliza_por_instancia(matriz, metrica):
     """
-    Normaliza cada fila a [0, 1] dentro de su propia instancia.
+    Normaliza cada fila a [0, 1] dentro de su propia instancia, con 1 = mejor.
 
     Se normaliza por instancia porque los valores absolutos de una instancia
-    aplastan visualmente a las demas. Una instancia constante (rango 0) no tiene
-    nada que normalizar: se deja en 0, que es su valor, en vez de en NaN, que
-    la hacia desaparecer de la figura sin avisar. Es el caso de las instancias
-    `un` con HV, donde el mejor valor es 0 en todas las generaciones.
+    aplastan visualmente a las demas. Despues se refleja si el indicador es de
+    minimizacion, para que en TODAS las figuras mas arriba sea mejor (ver
+    `_orienta_mejor`).
+
+    Una instancia constante (rango 0) no tiene nada que normalizar: se deja en
+    0, en vez de en NaN, que la hacia desaparecer de la figura sin avisar. Es
+    el caso de las instancias `un` con HV, donde el mejor valor es 0 en todas
+    las generaciones. Se enmascara DESPUES del reflejo para que siga saliendo
+    en 0 y no parezca el mejor valor.
 
     @param matriz: DataFrame instancia x generacion.
+    @param metrica: nombre del indicador (fija la direccion del reflejo).
     @return: (matriz normalizada, numero de instancias constantes).
     """
     rango = matriz.max(axis=1) - matriz.min(axis=1)
     constante = rango <= 0
     normalizado = matriz.sub(matriz.min(axis=1), axis=0).div(
         rango.replace(0, np.nan), axis=0)
+    normalizado = _orienta_mejor(metrica, normalizado)
     normalizado = normalizado.mask(constante, 0.0)
     return normalizado, int(constante.sum())
 
@@ -1043,17 +1219,20 @@ def figura_diferencias_criticas_juntas(largo, metricas, directorio):
         matriz = matriz_generaciones(largo, metrica)
         if not matriz.empty and matriz.shape[0] >= 2 and matriz.shape[1] >= 2:
             ruta = os.path.join(directorio, "generaciones",
-                                f"junto_{metrica}.png")
+                                f"cd_generacion_junto_{metrica}.png")
             os.makedirs(os.path.dirname(ruta), exist_ok=True)
-            critical_difference_diagram(matriz, metric=metrica, title=metrica,
-                                        path=ruta)
+            critical_difference_diagram(
+                matriz, metric=metrica,
+                title=f"{metrica} por generacion (train+test)", path=ruta)
 
         matriz = matriz_instancias(largo, metrica)
         if not matriz.empty and matriz.shape[1] >= 2:
-            ruta = os.path.join(directorio, "instancias", f"junto_{metrica}.png")
+            ruta = os.path.join(directorio, "instancias",
+                                f"cd_instancia_junto_{metrica}.png")
             os.makedirs(os.path.dirname(ruta), exist_ok=True)
-            critical_difference_diagram(matriz, metric=metrica, title=metrica,
-                                        path=ruta)
+            critical_difference_diagram(
+                matriz, metric=metrica,
+                title=f"{metrica} por instancia (train+test)", path=ruta)
 
 
 def figura_diferencias_criticas(largo, metricas, directorio, split):
@@ -1063,12 +1242,17 @@ def figura_diferencias_criticas(largo, metricas, directorio, split):
     Dos familias, porque el diagrama necesita bloques y metodos y aqui las dos
     particiones dan para las dos:
 
-    - `generaciones/<split>_<metrica>`: metodos = generaciones, bloques =
-      instancias. Dice en que generacion la mejora del promedio pasa a ser
-      estadisticamente significativa.
-    - `instancias/<split>_<metrica>`: metodos = instancias, bloques =
-      individuos. Dice que instancias son estadisticamente mas o menos distintas
-      entre si, que es la pregunta de las particiones con escalas distintas.
+    - `generaciones/cd_generacion_<split>_<metrica>`: metodos = generaciones,
+      bloques = instancias. Dice en que generacion la mejora del promedio pasa
+      a ser estadisticamente significativa.
+    - `instancias/cd_instancia_<split>_<metrica>`: metodos = instancias,
+      bloques = individuos. Dice que instancias son estadisticamente mas o
+      menos distintas entre si, que es la pregunta de las particiones con
+      escalas distintas.
+
+    El prefijo `cd_` y `mapa_` (en `calor/`) dejan el nombre de archivo
+    autocontenido: sin el, `train_HV.png` significaba tres cosas distintas
+    segun la carpeta (curva, mapa o diagrama CD).
 
     Un CD por instancia suelta NO se puede dibujar: con una sola instancia hay
     un unico bloque y el CD de Nemenyi sale tan grande que ninguna diferencia
@@ -1085,10 +1269,11 @@ def figura_diferencias_criticas(largo, metricas, directorio, split):
         matriz = matriz_generaciones(largo, metrica)
         if not matriz.empty and matriz.shape[0] >= 2 and matriz.shape[1] >= 2:
             ruta = os.path.join(directorio, "generaciones",
-                                f"{split}_{metrica}.png")
+                                f"cd_generacion_{split}_{metrica}.png")
             os.makedirs(os.path.dirname(ruta), exist_ok=True)
-            critical_difference_diagram(matriz, metric=metrica, title=metrica,
-                                        path=ruta)
+            critical_difference_diagram(
+                matriz, metric=metrica,
+                title=f"{metrica} por generacion ({split})", path=ruta)
         elif not matriz.empty:
             print(f"  nota: {metrica} sin CD de generaciones en {split}: "
                   f"hacen falta 2 instancias y 2 generaciones y hay "
@@ -1097,10 +1282,11 @@ def figura_diferencias_criticas(largo, metricas, directorio, split):
         matriz = matriz_instancias(largo, metrica)
         if not matriz.empty and matriz.shape[1] >= 2:
             ruta = os.path.join(directorio, "instancias",
-                                f"{split}_{metrica}.png")
+                                f"cd_instancia_{split}_{metrica}.png")
             os.makedirs(os.path.dirname(ruta), exist_ok=True)
-            critical_difference_diagram(matriz, metric=metrica, title=metrica,
-                                        path=ruta)
+            critical_difference_diagram(
+                matriz, metric=metrica,
+                title=f"{metrica} por instancia ({split})", path=ruta)
 
 
 def figura_trayectorias(largo, tablas, metricas, directorio, split):
@@ -1128,7 +1314,7 @@ def figura_trayectorias(largo, tablas, metricas, directorio, split):
         if matriz is None or matriz.empty:
             continue
 
-        normalizado, constantes = _normaliza_por_instancia(matriz)
+        normalizado, constantes = _normaliza_por_instancia(matriz, metrica)
         if constantes:
             print(f"  nota: {metrica} trayectorias {split}, "
                   f"{constantes} instancia(s) constantes dibujadas en 0",
@@ -1150,7 +1336,7 @@ def figura_trayectorias(largo, tablas, metricas, directorio, split):
 
         eje.set_title(f"{metrica} media")
         eje.set_xlabel("generacion")
-        eje.set_ylabel("normalizado")
+        eje.set_ylabel("normalizado (1 = mejor)")
         eje.grid(alpha=0.3)
         # 80 instancias no caben en una leyenda: colorbar ordenada.
         sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
@@ -1170,7 +1356,8 @@ def figura_trayectorias(largo, tablas, metricas, directorio, split):
 
         bruto = parte.pivot(index="instance", columns="generation",
                             values="mejor")
-        norm_mejor, constantes_mejor = _normaliza_por_instancia(bruto)
+        norm_mejor, constantes_mejor = _normaliza_por_instancia(bruto,
+                                                                 metrica)
         if constantes_mejor:
             print(f"  nota: {metrica} trayectorias mejor {split}, "
                   f"{constantes_mejor} instancia(s) constantes dibujadas en 0",
@@ -1188,12 +1375,16 @@ def figura_trayectorias(largo, tablas, metricas, directorio, split):
 
         eje.set_title(f"{metrica} mejor")
         eje.set_xlabel("generacion")
-        eje.set_ylabel("normalizado")
+        eje.set_ylabel("normalizado (1 = mejor)")
         eje.grid(alpha=0.3)
         sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array([])
-        cbar = figura.colorbar(sm, ax=eje, pad=0.015, fraction=0.035)
         cbar.set_label("instancia (orden alfabético)", fontsize=7)
+        # Mismo criterio que la figura de media: una leyenda que diga que
+        # dibuja la linea (aqui, el mejor individuo de cada generacion).
+        eje.legend(handles=[Line2D([], [], color="black", linewidth=2.4,
+                                   label="mejor por generacion")],
+                   loc="best", fontsize=8)
 
         guardar(figura, os.path.join(
             directorio, f"trayectorias/mejor_{split}_{metrica}.png"))
@@ -1229,6 +1420,7 @@ def figura_trayectorias_por_instancia(largo, metricas, directorio, split):
                                     figsize=(3.2 * columnas, 2.6 * filas),
                                     squeeze=False, sharex=True)
 
+        constantes = 0
         for indice, instancia in enumerate(instancias):
             eje = ejes[indice // columnas][indice % columnas]
             parte = grupo[grupo["instance"] == instancia]
@@ -1238,10 +1430,30 @@ def figura_trayectorias_por_instancia(largo, metricas, directorio, split):
                             (mejores["instance"] == instancia)]
             mejor = mejor.set_index("generation")["mejor"].sort_index()
 
-            eje.plot(medias.index, medias.to_numpy(), color="#3182bd",
+            # Escala 0-1 del PROPIO panel, con las DOS curvas usando el mismo
+            # rango (para que "mejor" siempre quede por encima de "media").
+            # Antes cada panel llevaba valores crudos y la familia entera de
+            # `trayectorias/` mezclaba escalas: 4 graficas normalizadas y esta
+            # con valores originales.
+            pares = [serie for serie in (medias, mejor) if not serie.empty]
+            rango = (max(s.max() for s in pares) - min(s.min() for s in pares)
+                     if pares else 0.0)
+            if rango > 0:
+                bajo = min(s.min() for s in pares)
+                medias = _orienta_mejor(metrica, (medias - bajo) / rango)
+                if not mejor.empty:
+                    mejor = _orienta_mejor(metrica, (mejor - bajo) / rango)
+            else:
+                constantes += 1
+                medias = medias * 0.0
+                if not mejor.empty:
+                    mejor = mejor * 0.0
+
+            eje.plot(medias.index, medias.to_numpy(), color=PALETA_SPLIT["train"],
                      linewidth=1.4, label="media")
             if not mejor.empty:
-                eje.plot(mejor.index, mejor.to_numpy(), color="#e6550d",
+                eje.plot(mejor.index, mejor.to_numpy(),
+                         color=PALETA_SPLIT["test"],
                          linewidth=1.4, label="mejor")
 
             eje.set_title(instancia, fontsize=8)
@@ -1249,13 +1461,21 @@ def figura_trayectorias_por_instancia(largo, metricas, directorio, split):
             if indice == 0:
                 eje.legend(fontsize=7)
 
+        if constantes:
+            print(f"  nota: {metrica} trayectorias instancia {split}, "
+                  f"{constantes} instancia(s) constante(s) dibujada en 0",
+                  flush=True)
+
         for indice in range(len(instancias), filas * columnas):
             ejes[indice // columnas][indice % columnas].axis("off")
 
-        figura.suptitle(f"{metrica} instancias", fontsize=11)
+        figura.suptitle(f"{metrica} por instancia", fontsize=11)
         figura.supxlabel("generacion")
-        figura.supylabel("valor")
-        figura.tight_layout()
+        figura.supylabel("normalizado (1 = mejor)")
+        # `rect` reserva sitio para el titulo y las etiquetas externas: sin el,
+        # `tight_layout` las coloca encima del titulo del primer panel y de las
+        # etiquetas de la fila inferior.
+        figura.tight_layout(rect=[0.04, 0.04, 0.99, 0.95])
 
         guardar(figura, os.path.join(
             directorio, f"trayectorias/instancia_{split}_{metrica}.png"))
@@ -1278,22 +1498,31 @@ def figura_mapa_calor(tablas, metricas, directorio, split):
         if matriz is None or matriz.empty:
             continue
 
-        datos = matriz.to_numpy(dtype=float)
+        # Normalizado POR FILA (cada instancia en su propio rango, 1 = mejor):
+        # con valores crudos la barra de color la fijaban las instancias de
+        # mayor escala y el resto del mapa salia todo morado.
+        datos, constantes = _normaliza_por_instancia(matriz, metrica)
+        if constantes:
+            print(f"  nota: {metrica} calor {split}, {constantes} "
+                  f"instancia(s) constante(s) dibujadas en 0", flush=True)
         figura, eje = plt.subplots(
             figsize=(max(7, matriz.shape[1] * 0.3), max(3, matriz.shape[0] * 0.4)))
-        imagen = eje.imshow(datos, aspect="auto", cmap="viridis")
-        figura.colorbar(imagen, ax=eje, label=f"{metrica} (media)")
+        imagen = eje.imshow(datos.to_numpy(dtype=float), aspect="auto",
+                            cmap="viridis")
+        figura.colorbar(imagen, ax=eje, label="normalizado (1 = mejor)")
 
         eje.set_xticks(range(matriz.shape[1]))
         eje.set_xticklabels([str(c) for c in matriz.columns], fontsize=7,
                              rotation=90)
         eje.set_yticks(range(matriz.shape[0]))
         eje.set_yticklabels(matriz.index, fontsize=7)
-        eje.set_title(f"{metrica} calor")
+        # Titulo propio: con "por generacion" se confundia con el diagrama CD
+        # de generaciones, que ahora se titula "X por generacion (split)".
+        eje.set_title(f"{metrica} mapa")
         eje.set_xlabel("generacion")
 
         guardar(figura, os.path.join(directorio,
-                                     f"calor/{split}_{metrica}.png"))
+                                     f"calor/mapa_{split}_{metrica}.png"))
 
 
 # ---------------------------------------------------------------------------
@@ -1305,15 +1534,16 @@ def validar_referencias(referencias, minimo=1, verbose=True):
     """
     Comprueba que los P* cargados no estan vacios y avisa si alguno es un punto.
 
-    Un P* con un solo punto NO invalida los indicadores: desde la escala
-    poolingada (`pooled_reference_sets`) la caja de normalizacion sale de la
-    union de P* con los frentes medidos, de modo que IGD+, R2 y DELTA_P siguen
-    estar bien definidos y en escala ~[0, 1]. Antes esta funcion descartaba esas
-    instancias y se quedaban solo con HV; ahora la regla es la misma para todas
-    y no se descarta ninguna.
+    La caja de normalizacion de IGD+/DELTA_P/R2 es la del PROPIO P* (fija,
+    comun a todos los experimentos), asi que el tamano del P* importa:
 
-    Lo que si es un error real es un P* vacio, porque entonces no hay ningun
-    punto de referencia contra el que medir.
+    * un P* vacio es un error real: no hay punto de referencia contra el que
+      medir, y la instancia se descarta;
+    * un P* de UN solo punto colapsa la escala (el span pasa a 1 por
+      convencion) y los indicadores salen en la escala cruda de los objetivos,
+      incomparable entre instancias. Se acepta pero se avisa: hay que
+      regenerar esa referencia con el tamano de la poblacion de MOEAD
+      (`generate_reference_sets_pop.py`).
 
     @param referencias: dict nombre -> `ReferenceSet`.
     @param minimo: numero minimo de puntos; 1 = acepta P* de un punto.
@@ -1334,14 +1564,14 @@ def validar_referencias(referencias, minimo=1, verbose=True):
             validas[nombre] = referencia
 
     if unitarios and verbose:
-        print(f"  nota: {len(unitarios)} P* con un unico punto "
-              f"({', '.join(sorted(unitarios))}). Un P* de un punto significa "
-              f"que el ground set del que sale tiene un punto; ese caso solo se "
-              f"acepta aqui si esta confirmado. Si no lo esta, la referencia "
-              f"puede estar incompleta (ver extract.py). La escala de "
-              f"normalizacion se amplia a los valores medidos en vez de salir "
-              f"solo de P* (asi IGD+/R2/DELTA_P no salen en escala bruta y "
-              f"los cuatro indicadores se calculan tambien ahi).",
+        print(f"  AVISO: {len(unitarios)} P* con un unico punto "
+              f"({', '.join(sorted(unitarios))}). Su caja se colapsa (span=1), "
+              f"asi que aqui se amplia con los frentes medidos de ese split "
+              f"(summary.json -> reference_box_degenerate_pooled) y sus "
+              f"indicadores quedan legibles. Si el frente real ES de un punto "
+              f"(esta confirmado en el manifiesto), no hay nada mas que "
+              f"extraer: esas instancias no son comparables con las de caja "
+              f"normal y hay que leerlas aparte.",
               flush=True)
 
     if descartadas and verbose:
@@ -1381,10 +1611,56 @@ def preparar_split(nombres_instancias, directorio_datos, directorio_referencias,
     return referencias, problemas, descartadas
 
 
+def escribir_direccion_indicadores(salida, metricas):
+    """
+    Escribe `00_config/indicators_direction.md`: que indicador se MAXIMIZA y
+    cual se MINIMIZA, y de donde sale cada uno.
+
+    @param salida: carpeta del analisis.
+    @param metricas: indicadores calculados en esta corrida.
+    """
+    proveniencia = {
+        "HV": "pymoo (`pymoo.indicators.hv.HV`), oficial",
+        "IGD+": "pymoo (`pymoo.indicators.igd_plus.IGDPlus`), oficial",
+        "DELTA_P": "implementacion local (no existe en pymoo ni en moocore)",
+        "R2": "implementacion local (moocore `r2_exact` solo soporta m=2)",
+    }
+    lineas = [
+        "# Direccion de cada indicador", "",
+        "Registro unico: `mohh.core.indicators.directions`. Cualquier tabla o "
+        "figura de este analisis se lee con esta regla.", "",
+        "| indicador | direccion | una curva que SUBE significa | "
+        "implementacion |", "|---|---|---|---|",
+    ]
+    for metrica in metricas:
+        sube = "mejora" if indicator_minimization(metrica) else "empeora"
+        lineas.append(
+            f"| {metrica} | {direction_label(metrica)} | {sube} | "
+            f"{proveniencia.get(metrica, '-')} |")
+
+    lineas.extend([
+        "", "Notas de lectura:", "",
+        "- Las figuras normalizadas a [0, 1] usan **1 = mejor**: en las "
+        "metricas de minimizacion la escala se refleja, asi que mas arriba es "
+        "mejor en todas.",
+        "- Los rangos promedio, Friedman y diagramas de diferencias criticas "
+        "ya aplican la direccion (1 = mejor).",
+        "- El mejor de cada generacion (`mejor_por_generacion`) toma el maximo "
+        "para HV y el minimo para el resto.",
+        "- DELTA_P puede saturar en su techo de 1.0; cuando lo hace el aviso "
+        "aparece en consola y en `summary.json`.",
+        "",
+    ])
+    ruta = os.path.join(salida, "00_config", "indicators_direction.md")
+    os.makedirs(os.path.dirname(ruta), exist_ok=True)
+    with open(ruta, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lineas))
+
+
 def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
              datos_train="datasets/mqap/train", datos_test="datasets/mqap/test",
-             referencias_train="set-reference/train/reference_sets",
-             referencias_test="set-reference/test/reference_sets",
+             referencias_train="references_moea/train/reference_sets_pop",
+             referencias_test="references_moea/test/reference_sets_pop",
              figuras=True, verbose=True, escala_hv=None, guardar_escala=None):
     """
     Analiza una corrida completa en train y test.
@@ -1463,6 +1739,8 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
     escalas_referencia = {}
     descartados_por_split = {}
     degeneradas_por_split = {}
+    rellenos_por_split = {}
+    rescatadas_por_split = {}
 
     # --- train: dos pasadas, sin retener los 1100 individuos completos -----
     if verbose:
@@ -1475,7 +1753,7 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
 
     if verbose:
         print("  [train] primera pasada (escala)", flush=True)
-    consolidado, pooled_min, pooled_max, total = _recolectar_escalas_train(
+    consolidado, extremos_train, total = _recolectar_escalas_train(
         ruta_experimento, instancias_train, verbose=verbose)
     if total != len(nombres):
         raise AnalisisSearchError(
@@ -1484,26 +1762,37 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
     bounds = {instancia: (frente.min(axis=0), frente.max(axis=0))
               for instancia, frente in consolidado.items()}
     if escala_hv is not None:
-        # Escala congelada compartida: la misma para las dos particiones y para
-        # cualquier otra corrida que la reutilice.
-        escala_train_full = escala_hv
+        # Escala congelada (evaluacion final o compartida entre experimentos),
+        # completada con la misma receta para las instancias que la evaluacion
+        # no cubrio (train).
+        escala_train_full, rellenos_train = _completar_escala_hv(
+            escala_hv, bounds, "train", verbose,
+            # Un nombre compartido con test describe en la escala la instancia
+            # de TEST (la evaluacion solo corrio test); la de train se recalcula.
+            excluir=sorted(emparejamiento))
     else:
         escala_train_full = HvScale(bounds, source="consolidado")
+        rellenos_train = []
     escala_train, degeneradas_train = preparar_escala_split(
         escala_train_full, instancias_train, "train", verbose,
         strict=escala_hv is not None)
     escalas["train"] = escala_train
     degeneradas_por_split["train"] = degeneradas_train
-    referencias_usadas_train = _referencias_pooled(
-        referencias_train_set, pooled_min, pooled_max)
-    escalas_referencia["train"] = referencias_usadas_train
-    del consolidado, pooled_min, pooled_max
+    rellenos_por_split["train"] = rellenos_train
+    # Caja de IGD+/DELTA_P/R2: la del propio P* (`load_references`), igual en
+    # train y en test y igual que en `analyze_gen`. Sin pooling, salvo para
+    # los P* con caja degenerada, que no tienen otra escala posible.
+    referencias_train_set, rescatadas_train = _rescatar_cajas_degeneradas(
+        referencias_train_set, extremos_train, "train", verbose)
+    escalas_referencia["train"] = referencias_train_set
+    rescatadas_por_split["train"] = rescatadas_train
+    del consolidado, extremos_train
 
     if verbose:
         print("  [train] segunda pasada (medida)", flush=True)
     largo_train = _medir_train_streaming(
         ruta_experimento, instancias_train, nombres, born,
-        escala_train.contexts(), referencias_usadas_train, metricas,
+        escala_train.contexts(), referencias_train_set, metricas,
         verbose=verbose)
     largo_train["split"] = "train"
     largos["train"] = largo_train
@@ -1526,23 +1815,35 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
         print("  [test] reevaluando individuos", flush=True)
     frentes_test = frentes_de_split(experimento, nombres, problemas_test,
                                     emparejamiento, verbose)
+    escala_local_test = escala_hv_por_instancia(frentes_test)
     if escala_hv is not None:
-        escala_test_full = escala_hv
+        # Misma receta que la evaluacion final, rellenando lo que esta no cubrio.
+        escala_test_full, rellenos_test = _completar_escala_hv(
+            escala_hv, escala_local_test.bounds, "test", verbose)
     else:
-        escala_test_full = escala_hv_por_instancia(frentes_test)
+        escala_test_full = escala_local_test
+        rellenos_test = []
     escala_test, degeneradas_test = preparar_escala_split(
         escala_test_full, instancias_test, "test", verbose,
         strict=escala_hv is not None)
     escalas["test"] = escala_test
     degeneradas_por_split["test"] = degeneradas_test
-    largo_test, referencias_usadas_test = medir_split(
+    rellenos_por_split["test"] = rellenos_test
+    referencias_test_set, rescatadas_test = _rescatar_cajas_degeneradas(
+        referencias_test_set, _extremos_medidos(frentes_test), "test", verbose)
+    escalas_referencia["test"] = referencias_test_set
+    rescatadas_por_split["test"] = rescatadas_test
+    largo_test = medir_split(
         experimento, nombres, frentes_test, escala_test, referencias_test_set,
         metricas)
-    escalas_referencia["test"] = referencias_usadas_test
     largo_test["split"] = "test"
     largos["test"] = largo_test
 
     largo = pd.concat(largos.values(), ignore_index=True)
+    # La direccion viaja con los datos: HV es de maximizacion, el resto de
+    # minimizacion. Cualquiera que lea el CSV solo tiene que mirar esta
+    # columna para saber que signo tiene "mejor".
+    largo["direction"] = largo["metric"].map(direction_label)
     largo.to_csv(os.path.join(tablas_dir, "individual_split.csv"), index=False)
 
     for split, escala in escalas.items():
@@ -1589,6 +1890,10 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
             "ref_point": escala.ref_point,
             "instances": len(escala),
             "shared": escala_hv is not None,
+            # Instancias sin evaluacion final que se completaron con el
+            # consolidado de esta corrida y el MISMO nadir (1.1).
+            "gap_filled_from_consolidated":
+                rellenos_por_split.get(nombre_split, []),
             "degenerate_excluded": degeneradas_por_split.get(nombre_split, []),
         }
 
@@ -1599,10 +1904,25 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
                "test_skipped": sorted(set(test_names) - set(emparejamiento)),
                "pairing": "auto-por-tamano",
                "metrics": list(metricas),
+               # Caja de IGD+/DELTA_P/R2: solo P*, sin pooling. Es la misma en
+               # train, en test y en cualquier otro experimento que use los
+               # mismos P*, asi que esos tres indicadores SI son comparables
+               # entre corridas (el HV solo lo es con --hv-scale comun).
+               "reference_box": "pstar_only",
+               "reference_box_note": (
+                   "ideal/nadir/span calculados unicamente desde el P*; sin "
+                   "ampliar con frentes medidos (pooled_reference_sets), "
+                   "igual que analyze_gen"),
+               "indicators_comparable_across_experiments": True,
+               "indicator_directions": dict(DIRECTIONS),
                "convergence": {},
                "saturation": {},
                "hv_comparable_across_experiments": escala_hv is not None,
+               "hv_nadir_ref_point": [escala.ref_point
+                                      for escala in escalas.values()],
                "hv_scale": resumen_hv,
+               "hv_scale_gap_filled": rellenos_por_split,
+               "reference_box_degenerate_pooled": rescatadas_por_split,
                "referencias_descartadas": descartados_por_split,
                "escala_referencias": resumen_referencias}
 
@@ -1612,10 +1932,18 @@ def ejecutar(ruta_experimento, salida, metricas=tuple(INDICATORS),
               "comparar corridas congela una con --hv-scale o "
               "--hv-from-evaluation.", flush=True)
 
+    escribir_direccion_indicadores(salida, metricas)
+
     for split, parte in largos.items():
-        tabla_por_generacion(parte).to_csv(
+        por_generacion = tabla_por_generacion(parte)
+        por_generacion.insert(1, "direction",
+                              por_generacion["metric"].map(direction_label))
+        por_generacion.to_csv(
             os.path.join(tablas_dir, f"por_generacion_{split}.csv"), index=False)
-        tabla_por_instancia(parte).to_csv(
+        por_instancia = tabla_por_instancia(parte)
+        por_instancia.insert(1, "direction",
+                             por_instancia["metric"].map(direction_label))
+        por_instancia.to_csv(
             os.path.join(tablas_dir, f"por_instancia_{split}.csv"), index=False)
 
         convergencia = resumen_convergencia(parte)
@@ -1683,10 +2011,16 @@ def parse_args(argv=None):
                             help="metricas separadas por comas")
     analizador.add_argument("--train-data", default="datasets/mqap/train")
     analizador.add_argument("--test-data", default="datasets/mqap/test")
-    analizador.add_argument("--train-references",
-                            default="references_moea/train/reference_sets")
-    analizador.add_argument("--test-references",
-                            default="references_moea/test/reference_sets")
+    analizador.add_argument(
+        "--train-references",
+        default="references_moea/train/reference_sets_pop",
+        help="P* de train; por defecto los de tamano = poblacion de MOEAD "
+             "(reference_sets_pop). Los de reference_sets/ son los de 100 "
+             "puntos, de versiones anteriores.")
+    analizador.add_argument(
+        "--test-references",
+        default="references_moea/test/reference_sets_pop",
+        help="P* de test; ver --train-references.")
     analizador.add_argument("--no-figuras", action="store_true",
                             help="solo escribir tablas, sin dibujar")
     analizador.add_argument("--hv-scale", action="append", default=None,

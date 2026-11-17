@@ -194,7 +194,7 @@ instancias de test entre varios jobs:
 
 ```bash
 # dataset nuevo (20 test)
-mohh-evaluate results/experiments_larger/Experiment_001 \
+mohh-evaluate results/baseline/Experiment_001 \
     --dataset-path /LUSTRE/$USER/proyectos/SDD/results/dataset_larger/mqap \
     --n-experiments 31
 
@@ -208,7 +208,7 @@ Por defecto se ejecutan **todas** las `.txt` de `test/`. También se puede
 limitar:
 
 ```bash
-mohh-evaluate results/experiments_larger/Experiment_001 \
+mohh-evaluate results/baseline/Experiment_001 \
     --dataset-path .../results/dataset_larger/mqap \
     --instances KC100-5fl-1un KC31-3fl-1un
 ```
@@ -218,7 +218,7 @@ Para un job array, una tarea por instancia:
 ```bash
 N=$(find /LUSTRE/$USER/proyectos/SDD/results/dataset_larger/mqap/test \
         -maxdepth 1 -name '*.txt' | wc -l)
-EXPERIMENT=/LUSTRE/$USER/proyectos/SDD/results/experiments_larger/Experiment_001 \
+EXPERIMENT=/LUSTRE/$USER/proyectos/SDD/results/baseline/Experiment_001 \
 DATASET_PATH=/LUSTRE/$USER/proyectos/SDD/results/dataset_larger/mqap \
 sbatch --array=0-$((N-1)) slurm/mohh-evaluate-array.slrm
 ```

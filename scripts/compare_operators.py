@@ -334,11 +334,9 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
                     todo = [(protocol, name, rep, label, index)
                             for label in labels
                             if (protocol, name, rep, label, index) not in fronts
-                            # Un fallo ya registrado no se re-ejecuta: casi
-                            # siempre es un timeout de 300 s del MOEA, y
-                            # reintentar el mismo par consume horas de CPU
-                            # para volver a fallar igual. Si se quiere
-                            # reintentar, hay que borrar `failures.json`.
+                            # Un fallo registrado no se re-ejecuta (son
+                            # timeouts de 300 s del MOEA). Para reintentarlos
+                            # hay que borrar `failures.json`.
                             and (protocol, name, rep, label, index) not in failures]
                     if not todo:
                         continue
@@ -405,8 +403,7 @@ def _frame_from_points(pieces):
 
 
 def _log(message):
-    """Log de progreso con hora: las fases largas (marcos, HV) tardan minutos
-    y sin esto el proceso parece colgado."""
+    """Log de progreso con hora: sin esto las fases largas parecen colgadas."""
     print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
 

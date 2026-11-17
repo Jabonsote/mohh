@@ -29,7 +29,7 @@ if ROOT not in sys.path:
 
 SPEC = importlib.util.spec_from_file_location(
     "generation_comparison",
-    os.path.join(ROOT, "results", "analysis_scripts", "generation_comparison.py"),
+    os.path.join(ROOT, "generation_comparison.py"),
 )
 generation_comparison = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(generation_comparison)

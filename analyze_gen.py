@@ -23,9 +23,10 @@ Ejemplos:
     # metricas contra las referencias de train
     python analyze_gen.py results/R2/Experiment_001
 
-    # explicita donde estan las referencias
+    # explicita donde estan las referencias (por defecto los P* con
+    # N = poblacion de MOEAD)
     python analyze_gen.py results/R2/Experiment_001 \\
-        --references set-reference/train/reference_sets
+        --references references_moea/train/reference_sets_pop
 
     # solo las piezas que interesen, sin estadisticas ni diagramas
     python analyze_gen.py results/R2/Experiment_001 \\
@@ -71,6 +72,7 @@ from mohh.analysis.indicators_all import (
     IndicatorsError,
     compute_indicators,
     fit_hv_contexts,
+    indicator_minimization,
     load_references,
 )
 from mohh.analysis.io_utils import load_experiment, write_json
@@ -625,14 +627,17 @@ def escribir_estadisticas(largo, metricas, layout, etiqueta, con_figuras=True,
         frame.to_csv(layout.sub(layout.statistics,
                                 f"values_{etiqueta}_{metrica}.csv"))
 
-        # Wilcoxon contra la columna con mejor media: mayor para HV, menor para
-        # las metricas de minimizacion.
-        referencia = (frame.mean(axis=0).idxmax() if metrica == "HV"
+        # Wilcoxon contra la columna con mejor media. La direccion la fija
+        # `metric`: HV se maximiza, IGD+/DELTA_P/R2 se minimizan; sin `metric`
+        # la funcion asumiria maximizacion para todo y `better` saleria
+        # invertido para las metricas de minimizacion.
+        referencia = (frame.mean(axis=0).idxmax()
+                      if not indicator_minimization(metrica)
                       else frame.mean(axis=0).idxmin())
 
         if frame.shape[0] >= 6:
-            wilcoxon = stats_mod.wilcoxon_vs_reference(frame,
-                                                       reference=referencia)
+            wilcoxon = stats_mod.wilcoxon_vs_reference(
+                frame, reference=referencia, metric=metrica)
             wilcoxon.to_csv(layout.sub(
                 layout.statistics,
                 f"wilcoxon_{etiqueta}_{metrica}.csv"), index=False)
@@ -1054,8 +1059,9 @@ def construir_parser():
     parser.add_argument("experiment",
                         help="ruta del experimento (results/.../Experiment_NNN)")
     parser.add_argument(
-        "--references", default="references_moea/train/reference_sets",
-        help="carpeta con las referencias P* (.pof)")
+        "--references", default="references_moea/train/reference_sets_pop",
+        help="carpeta con las referencias P* (.pof); por defecto los de "
+             "tamano = poblacion de MOEAD (reference_sets_pop)")
     parser.add_argument(
         "--output", default=None,
         help="carpeta de salida; por defecto '<experimento>/analysis'")

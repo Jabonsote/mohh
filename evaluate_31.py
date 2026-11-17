@@ -32,9 +32,10 @@ Uso:
     # evaluacion real, reanudable
     python evaluate_31.py --split test --budgets 10k 30k
 
-Las referencias P* de cada split deben existir. Para `train` estan en
-`set-reference/train/reference_sets`; para `test` en
-`set-reference/test/reference_sets`.
+Las referencias P* de cada split deben existir. Por defecto se buscan en
+`references_moea/<split>/reference_sets_pop` (P* con N = poblacion de MOEAD),
+y si no estan, en `references_moea/<split>/reference_sets` (version antigua de
+100 puntos).
 """
 
 import argparse
@@ -1187,8 +1188,8 @@ def main(argv=None):
         if len(splits) > 1 and args.references:
             raise EvaluacionError(
                 "--references no se puede usar con varios splits: cada uno usa "
-                "las suyas en 'set-reference/<split>/reference_sets'. Deja el "
-                "flag para un solo split.")
+                "las suyas en 'references_moea/<split>/reference_sets_pop'. "
+                "Deja el flag para un solo split.")
 
         # --- salida y cache -------------------------------------------------
         if args.output:
@@ -1341,12 +1342,16 @@ def evaluar_split(args, split, presupuestos, fenotipos, modelos, cache,
     if args.references:
         directorio_ref = args.references
     else:
-        candidato = os.path.join("references_moea", split, "reference_sets")
-        if os.path.isdir(candidato):
-            directorio_ref = candidato
-        else:
-            directorio_ref = os.path.join(
-                "set-reference", split, "reference_sets")
+        # Primero los P* con N = poblacion de MOEAD; si no estan, los
+        # antiguos de 100 puntos; y en ultimo caso los del pipeline externo.
+        candidato = None
+        for dirname in ("reference_sets_pop", "reference_sets"):
+            ruta = os.path.join("references_moea", split, dirname)
+            if os.path.isdir(ruta):
+                candidato = ruta
+                break
+        directorio_ref = candidato or os.path.join(
+            "set-reference", split, "reference_sets")
 
     necesita = any(m in ("IGD+", "DELTA_P", "R2") for m in args.metrics)
 

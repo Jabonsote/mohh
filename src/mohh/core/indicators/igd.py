@@ -1,18 +1,24 @@
 """
 IGD e IGD+ para problemas de minimizacion multiobjetivo.
 
+Implementacion oficial de `pymoo` (`pymoo.indicators.igd.IGD` y
+`pymoo.indicators.igd_plus.IGDPlus`), que a su vez delegan el calculo en
+`moocore`. Aqui solo se mantiene la validacion de entradas y la escala por
+objetivo, para no cambiar el contrato que ya usan `ReferenceFitness` y
+`compute_indicators`.
+
 Convencion (importante)
 -----------------------
 Todos los problemas del proyecto (mQAP) son de MINIMIZACION, luego la
-direccion de preferencia es "menor es mejor". La mayoria de la literatura de
-Falcon-Cardona (RSEHH / RSEIterative) trabaja con MAXIMIZACION, y `pymoo`
-implementa sus indicadores en esa convencion. Aqui se implementa la version de
-minimizacion:
+direccion de preferencia es "menor es mejor". `pymoo` devuelve el valor CRUDO
+del indicador: no invierte el signo ni asume ninguna direccion, asi que la
+lectura "menor es mejor" la impone este proyecto (ver
+`mohh.core.indicators.directions`). Definiciones:
 
     IGD(A, P)     = (1/|P|) * sum_{p in P} min_{a in A} ||p - a||_2
     IGD+(A, P)    = (1/|P|) * sum_{p in P} min_{a in A} ||max(0, a - p)||_2
 
-`A` es el frente de aproximacion (la poblacion del individual's) y `P` el
+`A` es el frente de aproximacion (la poblacion del individuo) y `P` el
 conjunto de referencia. El minimo se toma SIEMPRE sobre `A`, de modo que un
 individuo con mas soluciones (mejor cobertura) obtiene un valor menor: es
 decir, IGD e IGD+ son "menor es mejor", como debe ser un indicador de
@@ -26,6 +32,9 @@ y penaliza tambien cuando el frente es mejor que la referencia.
 """
 
 import numpy as np
+
+from pymoo.indicators.igd import IGD
+from pymoo.indicators.igd_plus import IGDPlus
 
 __all__ = ["igd", "igd_plus"]
 
@@ -54,18 +63,32 @@ def _check(front, reference):
     return front, reference
 
 
-def _pairwise(front, reference):
-    """Distancias de cada punto de referencia a cada punto del frente.
-
-    Devuelve una matriz de forma (|reference|, |front|).
+def _aplicar_norm(front, reference, norm):
     """
-    # diff[i, j, k] = reference[i, k] - front[j, k]
-    return reference[:, None, :] - front[None, :, :]
+    Escala ambos conjuntos por objetivo.
+
+    Dividir `front` y `reference` por `norm` es equivalente a dividir las
+    distancias por `norm`, que es lo que hacia la version previa, pero asi el
+    calculo lo hace pymoo y no hay dos caminos distintos.
+    """
+    if norm is None:
+        return front, reference
+
+    factor = np.asarray(norm, dtype=float)
+    if factor.shape != (front.shape[1],):
+        raise ValueError(
+            f"norm debe tener una entrada por objetivo: {factor.shape} vs "
+            f"{front.shape[1]}"
+        )
+    if not np.all(np.isfinite(factor)) or np.any(factor <= 0):
+        raise ValueError("norm debe ser finito y estrictamente positivo")
+
+    return front / factor, reference / factor
 
 
 def igd(front, reference, norm=None):
     """
-    Inverted Generational Distance (minimizacion).
+    Inverted Generational Distance (minimizacion), via `pymoo.indicators.igd`.
 
     @param front: (n, m) frente de aproximacion.
     @param reference: (r, m) conjunto de referencia.
@@ -73,18 +96,15 @@ def igd(front, reference, norm=None):
     @return: escalar >= 0. Menor es mejor.
     """
     front, reference = _check(front, reference)
+    front, reference = _aplicar_norm(front, reference, norm)
 
-    diff = _pairwise(front, reference)
-    if norm is not None:
-        diff = diff / np.asarray(norm, dtype=float)
-    dist = np.sqrt(np.sum(diff ** 2, axis=2))
-
-    return float(np.mean(np.min(dist, axis=1)))
+    return float(IGD(reference)(front))
 
 
 def igd_plus(front, reference, norm=None):
     """
-    IGD+ weakly preference-based (minimizacion).
+    IGD+ weakly preference-based (minimizacion), via
+    `pymoo.indicators.igd_plus`.
 
     Solo penaliza el error en el sentido de la preferencia: si `front` tiene
     objetivos estrictamente peores que `p` en alguna dimension, la distancia
@@ -96,12 +116,6 @@ def igd_plus(front, reference, norm=None):
     @return: escalar >= 0. Menor es mejor.
     """
     front, reference = _check(front, reference)
+    front, reference = _aplicar_norm(front, reference, norm)
 
-    # max(0, a - p): penaliza solo cuando el frente es peor que la referencia.
-    diff = _pairwise(front, reference) * -1.0
-    diff = np.maximum(diff, 0.0)
-    if norm is not None:
-        diff = diff / np.asarray(norm, dtype=float)
-    dist = np.sqrt(np.sum(diff ** 2, axis=2))
-
-    return float(np.mean(np.min(dist, axis=1)))
+    return float(IGDPlus(reference)(front))

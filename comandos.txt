@@ -61,6 +61,23 @@ echo "RUN=$RUN"
 echo "SEARCH_JOB=$SEARCH_JOB"
 
 # ----------------------------------------------------------------------------
+# 4b. Busqueda LLaMEA con otro modelo top cuantizado en A10
+#     coder30b-awq-a10: Qwen3-Coder-30B-A3B AWQ (~18 GB, 8k) - el mas potente
+#     Alternativas si se queda corta la memoria:
+#       a10-quant  (Qwen2.5-Coder-14B AWQ, ~10 GB)
+#       qwen3-8b-awq (Qwen3-8B AWQ, ~6 GB, 16k)
+# ----------------------------------------------------------------------------
+RUN_QWEN="llamea_qwen30b_a10_$(date +%Y%m%d_%H%M%S)"
+
+OUT=$(PROFILE=coder30b-awq-a10 GENERATIONS=1000 EVAL_TEST=0 THINKING=off \
+  EXPERIMENT_NAME="$RUN_QWEN" bash slurm/llamea-all.sh)
+
+echo "$OUT"
+SEARCH_JOB=$(printf '%s\n' "$OUT" | awk '$1 == "job:" {print $2; exit}')
+echo "RUN=$RUN_QWEN"
+echo "SEARCH_JOB=$SEARCH_JOB"
+
+# ----------------------------------------------------------------------------
 # 5. Evaluacion final GE con 31 ejecuciones, encadenada a la busqueda
 #    MAX_CONCURRENT=2 por QOSMaxNodePerUserLimit
 # ----------------------------------------------------------------------------

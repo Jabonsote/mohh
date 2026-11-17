@@ -732,22 +732,13 @@ def _consolidated_frame(*point_sets):
 
 
 def _nondominated(points):
-    """Filtra los puntos no dominados (misma regla que `MO.py`, vectorizada).
+    """Filtra los puntos no dominados (misma regla que `MO.py`).
 
-    `MO.non_dominated_sorting_vectorized` recorre la matriz en Python; con el
-    marco consolidado de una busqueda larga eso es demasiado lento. Aqui se
-    resuelve con un barrido tras ordenar, con la misma semantica: `q` esta
-    dominado si existe `p` con `p >= q` en todos los objetivos y `p > q` en
-    alguno.
-
-    Por que no el broadcasting de la version anterior: aquel construye una
-    matriz `n x n x k` de booleanos (2.4 GB con los 28 000 puntos que
-    consolida una instancia del GE) y la fase "calculando HV..." de
-    `scripts/compare_operators.py` la paga ~120 veces (marcos compartidos +
-    marcos por pareja), con lo que esa fase tardaba horas. El barrido cuesta
-    `O(n log n)` y devuelve EXACTAMENTE el mismo conjunto y el mismo orden
-    (ver `tests/test_llamea_nondominated.py`, que lo compara con la
-    implementacion de referencia O(n^2)).
+    Barrido tras ordenar lexicograficamente: `O(n log n)` en vez de la matriz
+    `n x n x k` de booleanos, que con los ~28 000 puntos que consolida una
+    instancia ocupaba 2.4 GB por llamada. El conjunto y el orden son los
+    mismos que daba la version de broadcasting
+    (`tests/test_llamea_nondominated.py`).
     """
     from mohh.core.utilities.algorithm.MO import sign
 

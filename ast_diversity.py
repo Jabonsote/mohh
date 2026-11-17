@@ -28,8 +28,8 @@ La figura tiene dos paneles: diversidad media por pares y proporción de AST
 Uso:
 
     python larger_pipeline/ast_diversity.py \\
-        results/experiments_larger/Experiment_001 \\
-        --output results/experiments_larger/Experiment_001/analysis
+        results/baseline/Experiment_001 \\
+        --output results/baseline/Experiment_001/analysis
 """
 
 from __future__ import annotations
@@ -425,7 +425,7 @@ def construir_parser() -> argparse.ArgumentParser:
                     "generación.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("experiment",
-                        help="carpeta results/experiments_larger/Experiment_NNN")
+                        help="carpeta results/baseline/Experiment_NNN")
     parser.add_argument("--output", default=None,
                         help="carpeta de salida; por defecto "
                              "<experimento>/analysis")
