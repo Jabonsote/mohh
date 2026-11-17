@@ -135,6 +135,26 @@ Modelo ausente: `python scripts/mohh_models.py download <modelo>`.
 OOM: baja `MAX_MODEL_LEN` o `GPU_MEM_UTIL`.
 El wrapper se ejecuta en el login, no dentro de SLURM.
 
+### Activar el env en el login (y anadir paquetes)
+
+El env de conda esta en `<repo>/.conda-env` y NO trae `bin/activate` (eso es
+de virtualenv). La receta es la misma que usan los jobs:
+
+```bash
+cd /LUSTRE/$USER/mohh
+module load python/miniforge
+eval "$(conda shell.bash hook)"
+conda activate "$PWD/.conda-env"
+
+# anadir paquetes SIN reinstalar el proyecto (el backend es hatchling y un
+# `pip install -e .` con un pip viejo falla; solo hacen falta los nuevos):
+pip install "crystalbleu>=0.2" "nltk>=3.9"
+python -c "import crystalbleu, nltk; print('ok')"
+```
+
+Sin `crystalbleu`, el CrystalBLEU del resumen de la busqueda sale null (el
+hilo lo reporta en `llamea.log` con un WARNING).
+
 ## Comparar GE vs LLaMEA (prueba estadistica)
 
 `scripts/compare_operators.py` corre el mismo arnés para los tres tipos de
