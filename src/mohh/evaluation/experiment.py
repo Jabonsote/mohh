@@ -243,23 +243,13 @@ def normalize_values(data: np.ndarray, vmin: float, vmax: float):
     return (data - vmin) / (vmax - vmin)
 
 
-def boundaries_from_points(points):
-    """``vmin``/``vmax`` de todos los puntos evaluados de una instancia.
-
-    Usar todos los puntos (no solo el frente no dominado) evita que un frente
-    peor quede fuera de la caja de normalización y produzca HV = 0.
-    """
-    array = np.asarray(list(points), dtype=float)
-    return array.min(axis=0), array.max(axis=0)
-
-
 def clip_to_nadir(front, nadir_point):
-    """Acota un frente normalizado a ``[0, nadir]`` antes del HV.
+    """Acota el frente normalizado a ``[0, nadir]`` antes del HV.
 
-    Un operador LLaMEA puede devolver un hijo invalido para un par concreto y
-    producir objetivos fuera de la caja (p. ej. ceros o valores enormes). Sin
-    este clip, pymoo puede devolver HV gigantes (se observo 94132 en KC18).
-    El clip no cambia los HV normales: solo corrige puntos fuera de [0, 1.1].
+    Un operador puede devolver un hijo invalido y sacar un objetivo de la caja
+    de normalizacion; sin el clip el HV se va (se observo 94132 en KC18). Con
+    los limites del marco (vmin/vmax del frente no dominado consolidado) el
+    clip no cambia ningun HV de los operadores validos.
     """
     return np.clip(np.asarray(front, dtype=float), 0.0, nadir_point)
 
@@ -551,10 +541,11 @@ def run_experiments(experiment_path, results_paths, operators,
             best_front = comprobate(best_front, consolidated[label])
             metrics.stop("metrics_nds")
 
-            # El marco se construye con TODOS los puntos evaluados, no solo
-            # con el frente no dominado. Asi ningun frente queda fuera de la
-            # caja [vmin, vmax] y el HV no se vuelve 0 artificialmente.
-            min_val, max_val = boundaries_from_points(consolidated[label])
+            # Limites del marco: los del frente no dominado consolidado, como
+            # en el original. Con todos los puntos evaluados la caja crece
+            # (hasta x78 de HV) y la comparacion con el original deja de ser
+            # valida.
+            min_val, max_val = np.min(best_front, axis=0), np.max(best_front, axis=0)
             boundaries[label] = [min_val, max_val]
 
             best_fronts[label] = best_front

@@ -8,7 +8,7 @@ import pytest
 
 from mohh.core.utilities.algorithm.MO import compute_hypervolume
 from mohh.evaluation.algorithms import MOEA_Decomposition, NSGAII, SMS_MOEA
-from mohh.evaluation.experiment import boundaries_from_points, normalize_values
+from mohh.evaluation.experiment import normalize_values
 from mohh.evaluation.experiment import build_solver
 from mohh.llamea.operator import LLMOperator
 
@@ -23,22 +23,33 @@ def _load_script(name):
     return module
 
 
-def test_boundaries_from_points_include_dominated_points():
+def test_limites_del_marco_son_del_frente_no_dominado():
+    """Regla del original: vmin/vmax salen del frente no dominado consolidado.
+
+    Los puntos dominados no entran en la caja. Si entraran, la caja creceria
+    y el HV de cada operador cambiaria (hasta x78 de diferencia en las
+    instancias de test), con lo que la comparacion con el original dejaria de
+    ser valida.
+    """
+    from mohh.llamea.fitness import comprobate_frame
+
     good = {(0.0, 2.0), (1.0, 1.0), (2.0, 0.0)}
     bad = {(10.0, 10.0)}
-    vmin, vmax = boundaries_from_points(good | bad)
+    frame = comprobate_frame(np.array(sorted(good), dtype=float))
+    vmin, vmax = frame.min(axis=0), frame.max(axis=0)
     np.testing.assert_allclose(vmin, [0.0, 0.0])
-    np.testing.assert_allclose(vmax, [10.0, 10.0])
+    np.testing.assert_allclose(vmax, [2.0, 2.0])
 
+    # el punto dominado queda fuera de la caja: su HV es 0
     normalized_bad = normalize_values(np.array([[10.0, 10.0]]), vmin, vmax)
-    hv = compute_hypervolume(np.array([1.1, 1.1]), normalized_bad)
-    assert hv > 0.0
+    assert np.all(normalized_bad > 1.1)
+    assert compute_hypervolume(np.array([1.1, 1.1]), normalized_bad) == 0.0
 
-    # Marco antiguo (solo el frente no dominado): el punto malo queda fuera.
-    vmin_old, vmax_old = boundaries_from_points(good)
-    normalized_old = normalize_values(np.array([[10.0, 10.0]]), vmin_old, vmax_old)
-    assert np.all(normalized_old > 1.1)
-    assert compute_hypervolume(np.array([1.1, 1.1]), normalized_old) == 0.0
+    # con todos los puntos la caja crecia y ese HV pasaria a ser positivo
+    todos = np.array(sorted(good | bad), dtype=float)
+    vmin_t, vmax_t = todos.min(axis=0), todos.max(axis=0)
+    normalized_todos = normalize_values(np.array([[10.0, 10.0]]), vmin_t, vmax_t)
+    assert compute_hypervolume(np.array([1.1, 1.1]), normalized_todos) > 0.0
 
 
 def test_build_solver_accepts_llamea_operator(tmp_path):
