@@ -12,6 +12,7 @@ import os
 import random
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -329,7 +330,10 @@ def _schedule_code_diversity(state, pool):
                 sample = codes[::step][:CODE_DIVERSITY_SAMPLE]
                 value = float(crystalbleu_diversity(sample))
         except Exception:  # noqa: BLE001 - la metrica no puede tumbar la corrida
-            value = None
+            # Sin loguearlo, una instalacion sin `crystalbleu` dejaba el valor
+            # en null toda la corrida sin pista alguna (paso en glm-gptoss2).
+            logger.warning("CrystalBLEU falla (muestra %d codigos):\n%s",
+                           len(codes), traceback.format_exc())
         finally:
             with state["diversity_lock"]:
                 state["code_diversity"] = value
@@ -740,6 +744,22 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
     # El CrystalBLEU se mide en segundo plano: se espera al hilo para que el
     # resumen final tenga el valor (si no, sale `null`).
     diversity_pool.shutdown(wait=True)
+    # Si el hilo del CrystalBLEU no consiguio valor (p. ej. sin `crystalbleu`
+    # instalado o por un fallo puntual), se calcula AQUI, en el proceso
+    # principal: es el artefacto final, merece los minutos.
+    if state["code_diversity"] is None and len(state["codes"]) > 1:
+        try:
+            from mohh.analysis.code_diversity import crystalbleu_diversity
+
+            step = max(1, len(state["codes"]) // CODE_DIVERSITY_SAMPLE)
+            sample = state["codes"][::step][:CODE_DIVERSITY_SAMPLE]
+            state["code_diversity"] = float(crystalbleu_diversity(sample))
+            state["code_diversity_n"] = len(state["codes"])
+            logger.info("CrystalBLEU (final): %.4f sobre %d codigos",
+                        state["code_diversity"], len(sample))
+        except Exception:  # noqa: BLE001 - no puede tumbar la corrida
+            logger.warning("CrystalBLEU final falla:\n%s",
+                           traceback.format_exc())
     # Resumen consolidado final (tokens, exitosos/fallos, diversidad, mejor).
     _write_json(summary_path, _summary(args, exp_dir, evaluator, llm, state))
     logger.info("Fin: best fitness=%s en iteracion %s", best_fitness, best_generation)

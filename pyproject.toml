@@ -25,6 +25,9 @@ llamea = [
     "llamea==1.4.0",
     "openai>=1.99.1,<2",
     "huggingface_hub>=0.24",
+    # La busqueda reporta la diversidad de codigo (search_summary.json).
+    "crystalbleu>=0.2",
+    "nltk>=3.9",
 ]
 # Servidor de inferencia en GPU (solo en la maquina/nodo con GPU). Pesado.
 vllm = [
