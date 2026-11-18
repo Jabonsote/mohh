@@ -85,6 +85,75 @@ def test_load_operator_reads_a_ge_operator(tmp_path):
     assert callable(namespace["crossover"])
 
 
+def test_load_operator_reads_the_project_crossovers():
+    from mohh.evaluation.operators.crossover import CX_Cross, PMX_Cross
+
+    name, namespace, kind, source = compare.load_operator(
+        "pmx=project:PMX_Cross")
+    assert name == "pmx"
+    assert namespace is None
+    assert kind == "project"
+    assert source == "PMX_Cross"
+
+    operator = compare.project_crossover(source)
+    assert isinstance(operator, PMX_Cross)
+    assert operator.n_offsprings == 2
+
+    _, _, kind_cx, source_cx = compare.load_operator("cx=project:CX_Cross")
+    assert kind_cx == "project"
+    assert isinstance(compare.project_crossover(source_cx), CX_Cross)
+
+
+def test_load_operator_rejects_an_unknown_project_crossover():
+    with pytest.raises(SystemExit):
+        compare.load_operator("x=project:SBX")
+
+
+def test_project_pmx_returns_two_valid_permutations():
+    from types import SimpleNamespace
+
+    from mohh.evaluation.operators.crossover import PMX_Cross
+
+    np.random.seed(0)
+    problem = SimpleNamespace(n_var=7)
+    parent1 = np.arange(7)
+    parent2 = np.array([3, 4, 5, 6, 0, 1, 2])
+    X = np.array([[parent1], [parent2]])
+    offspring = PMX_Cross(prob=1.0)._do(problem, X)
+    assert offspring.shape == (2, 1, 7)
+    assert sorted(offspring[0, 0]) == list(range(7))
+    assert sorted(offspring[1, 0]) == list(range(7))
+    assert not np.array_equal(offspring[0, 0], offspring[1, 0])
+
+
+def test_operator_catalog_keeps_the_project_prefix(tmp_path):
+    compare.write_operator_catalog(
+        tmp_path, [("pmx", None, "project", "PMX_Cross")])
+    content = (tmp_path / "operators.txt").read_text(encoding="utf-8")
+    assert "pmx: project:PMX_Cross" in content
+
+
+def test_solve_task_injects_the_project_crossover(monkeypatch):
+    from mohh.evaluation.operators.crossover import PMX_Cross
+
+    captured = {}
+
+    def fake_snapshots(instance, namespace, **kwargs):
+        captured["namespace"] = namespace
+        captured["crossover"] = kwargs.get("crossover")
+        return {}
+
+    monkeypatch.setattr(compare, "solve_front_snapshots", fake_snapshots)
+    key = ("MOEAD", "pmx", 0, "30k", 0)
+    task = ([(key)], "PMX_Cross", "project", object(), 42, "MOEAD", False,
+            0, {}, None)
+    result = compare._solve_task(task)
+    assert captured["namespace"] is None
+    assert isinstance(captured["crossover"], PMX_Cross)
+    assert captured["crossover"].n_offsprings == 2
+    assert result[0][0] == key
+
+
 def test_load_operator_rejects_unknown_ge_label(tmp_path):
     path = tmp_path / "MOEAD_operators.txt"
     path.write_text("Best: reverse(y)\n", encoding="utf-8")

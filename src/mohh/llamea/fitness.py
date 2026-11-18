@@ -61,7 +61,8 @@ class EarlyStop(BaseException):
 # aplica el `eval_timeout` de LLaMEA.
 OPERATOR_CALL_TIMEOUT = 10.0   # segundos por llamada de validacion (n <= 100)
 COMPILE_TIMEOUT = 30.0         # segundos para `exec` del codigo del LLM (código de módulo)
-INSTANCE_TIMEOUT = 300.0       # segundos por instancia del MOEA interno (configurable)
+INSTANCE_TIMEOUT = 300.0       # busqueda LLaMEA; `None` desactiva el limite.
+                              # La comparacion de operadores usa `None`.
 
 #: Nombre de fichero ficticio con el que se compila el codigo del LLM. Se
 #: registra en `linecache` para que el traceback muestre la linea exacta que
@@ -516,13 +517,18 @@ EVAL_BUDGETS = {"10k": 10500, "30k": 31500, "50k": 52500}
 
 
 def solve_front_snapshots(instance, namespace, seed, model_name, mutation,
-                          instance_timeout, budgets=None):
+                          instance_timeout, budgets=None, crossover=None):
     """Como `_solve_front_namespace`, pero con los snapshots del original.
 
     Corre el MOEA hasta el ultimo presupuesto y devuelve ``{label: frente}``
     con el frente de la poblacion al alcanzar cada uno (10k/30k/50k). Una
     sola corrida da los tres presupuestos: el coste no se multiplica (correr
     hasta 500 generaciones cuesta ~1.7x una a 300).
+
+    ``crossover`` permite inyectar un operador pymoo ya construido (por
+    ejemplo ``PMX_Cross`` del proyecto) en vez de envolver ``namespace`` en
+    ``LLMOperator``. Es lo que usa ``compare_operators.py`` para el tipo
+    ``project:``.
     """
     from pymoo.core.callback import Callback
 
@@ -556,7 +562,8 @@ def solve_front_snapshots(instance, namespace, seed, model_name, mutation,
     generations = max(budget // population_size for budget in budgets.values())
 
     solver = MOSolver(seed=seed)
-    solver.crossover = LLMOperator(namespace, prob=1.0)
+    solver.crossover = (crossover if crossover is not None
+                        else LLMOperator(namespace, prob=1.0))
     _load_mutation(solver, model_name, mutation)
     solver.load_instance(instance)
     # El solver usa `params["MO_GENERATIONS"]` como terminacion: el snapshot
@@ -588,12 +595,16 @@ def _params_size():
 
 
 def _solve_front_namespace(instance, namespace, seed, model_name, mutation,
-                           instance_timeout):
+                           instance_timeout, crossover=None):
     """Corre el MOEA interno sobre una instancia y devuelve su frente.
 
     Es la unidad de trabajo comun de la busqueda secuencial y del pool de
     instancias. No modifica la instancia recibida: ``MOSolver.load_instance``
     copia el problema y la poblacion inicial.
+
+    ``crossover`` permite inyectar un operador pymoo ya construido (por
+    ejemplo ``PMX_Cross`` del proyecto) en vez de envolver ``namespace`` en
+    ``LLMOperator``.
     """
     from mohh.generation.algorithm.multiobjective import MOSolver
     from mohh.llamea.operator import LLMOperator
@@ -601,9 +612,10 @@ def _solve_front_namespace(instance, namespace, seed, model_name, mutation,
     # Semilla determinista por corrida (igual que el worker GE).
     np.random.seed(seed)
     solver = MOSolver(seed=seed)
-    # El operador del LLM se inyecta directamente en el solver; la ruta GE
+    # El operador se inyecta directamente en el solver; la ruta GE
     # (load_operator -> HH_Operator) no se toca.
-    solver.crossover = LLMOperator(namespace, prob=1.0)
+    solver.crossover = (crossover if crossover is not None
+                        else LLMOperator(namespace, prob=1.0))
     _load_mutation(solver, model_name, mutation)
     solver.load_instance(instance)
     solver.start_model(model_name=model_name)

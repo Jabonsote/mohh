@@ -48,6 +48,12 @@ Uso:
         --group base=ox,pmx --group llamea=llamea \
         --contrast llamea:base --ge-protocol
 
+    # Panel clasico exacto del proyecto original (dos hijos complementarios):
+    python scripts/compare_operators.py \
+        --operator pmx=project:PMX_Cross --operator cx=project:CX_Cross \
+        --operator llamea=results/searches/<exp>/llamea_best_operator.py \
+        --split test --repeats 31 --name llamea_vs_pmx_cx_original --ge-protocol
+
     # Tabla final con el protocolo GE completo (caro):
     python scripts/compare_operators.py ... --ge-protocol
 
@@ -70,6 +76,7 @@ import numpy as np
 
 from mohh.core.utilities.algorithm.MO import compute_hypervolume
 from mohh.core.utilities.instance_utils import instance_paths
+from mohh.evaluation.operators.crossover import CX_Cross, PMX_Cross
 from mohh.llamea.fitness import (
     EVAL_BUDGETS,
     NADIR_FACTOR,
@@ -94,6 +101,29 @@ from mohh.llamea.statistics import (
 )
 
 
+#: Cruces del proyecto original, tal cual los usa `experiment.py`.
+#: No son operadores nativos de pymoo: son subclases de `Crossover` definidas
+#: en `mohh/evaluation/operators/crossover.py`. Producen **dos hijos
+#: complementarios con el mismo corte/inicio**, a diferencia del contrato
+#: `LLMOperator` (un hijo + `child[::-1]`).
+PROJECT_CROSSOVERS = {
+    "PMX_Cross": PMX_Cross,
+    "CX_Cross": CX_Cross,
+}
+
+
+def project_crossover(source):
+    """Instancia un cruce del proyecto por nombre (`PMX_Cross`, `CX_Cross`)."""
+    try:
+        cls = PROJECT_CROSSOVERS[source]
+    except KeyError:
+        raise SystemExit(
+            f"cruce del proyecto desconocido: {source!r} "
+            f"(disponibles: {', '.join(sorted(PROJECT_CROSSOVERS))})"
+        ) from None
+    return cls(prob=1.0)
+
+
 def load_operator(spec):
     """`nombre=ruta.py`, `nombre=classic:ox`, `nombre=ge:Best@archivo`.
 
@@ -105,7 +135,18 @@ def load_operator(spec):
     `classic2:ox` es el clasico devolviendo **dos** hijos, `(ox(x, y), ox(y, x))`:
     el mismo contrato que un operador que devuelve una tupla. Comparar un
     operador de dos hijos contra clasicos de un solo hijo no es justo, porque el
-    arnes (`LLMOperator`) usa `child[::-1]` como segundo descendiente.
+    arnes (`LLMOperator`) usa `child[::-1]` como segundo descendiente. Ojo:
+    `classic2` llama dos veces al operador de un hijo, con cortes/inicios
+    independientes; no reproduce el corte unico del original.
+
+    `project:PMX_Cross` / `project:CX_Cross` carga la clase real del proyecto
+    (`mohh.evaluation.operators.crossover`) y la asigna directamente al solver,
+    sin `LLMOperator`. Es la unica forma de obtener el original exacto: dos
+    hijos complementarios con el mismo corte/inicio. Los operadores GE tambien
+    devuelven dos hijos, asi que con ellos el contrato coincide; el operador
+    descubierto por LLaMEA devuelve uno solo y `LLMOperator` usa
+    `child[::-1]` como segundo, asi que con LLaMEA el contrato no es identico
+    (para eso esta `classic:`).
 
     `ge:<etiqueta>@<archivo_operators.txt>` es un operador de la evolucion
     gramatical: la expresion de la linea `<etiqueta>: <expresion>` del archivo.
@@ -116,6 +157,14 @@ def load_operator(spec):
     name = name.strip()
     if not name or not source:
         raise SystemExit(f"--operator debe ser nombre=fuente, no {spec!r}")
+    if source.startswith("project:"):
+        key = source.split(":", 1)[1].strip()
+        if key not in PROJECT_CROSSOVERS:
+            raise SystemExit(
+                f"cruce del proyecto desconocido: {key!r} "
+                f"(disponibles: {', '.join(sorted(PROJECT_CROSSOVERS))})"
+            )
+        return name, None, "project", key
     if source.startswith("classic:"):
         key = source.split(":", 1)[1].strip()
         if key not in REFERENCE_OPERATORS:
@@ -215,6 +264,7 @@ def _solve_task(task):
         # el MOEA corra con MO_GENERATIONS, MO_POPULATION_SIZE y las
         # direcciones de referencia correctos.
         init_params(**(overrides or {}))
+        operator = None
         if kind == "classic":
             ns = namespace_for(REFERENCE_OPERATORS[source])
         elif kind == "classic2":
@@ -226,6 +276,11 @@ def _solve_task(task):
             ns = namespace_for(two_children)
         elif kind == "ge":
             ns = ge_namespace(source)
+        elif kind == "project":
+            # Cruce real del proyecto: dos hijos complementarios con el mismo
+            # corte/inicio. Se asigna directo, sin `LLMOperator`.
+            ns = None
+            operator = project_crossover(source)
         else:
             ns = compile_operator(source)
         if isinstance(keys[0], tuple) and len(keys[0]) == 5:
@@ -233,12 +288,14 @@ def _solve_task(task):
             snaps = solve_front_snapshots(
                 instance, ns, seed=seed, model_name=model_name,
                 mutation=mutation, instance_timeout=instance_timeout,
+                crossover=operator,
             )
             empty = np.empty((0, 0), dtype=float)
             return [(key, snaps.get(key[3], empty), None) for key in keys]
         front = _solve_front_namespace(
             instance, ns, seed=seed, model_name=model_name,
             mutation=mutation, instance_timeout=instance_timeout,
+            crossover=operator,
         )
         if front is None:
             raise RuntimeError("el MOEA no devolvio un frente")
@@ -281,14 +338,15 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
     repeticion), esos se reutilizan: sirve para agregar operadores a una
     comparacion ya corrida sin repetir el MOEA de los demas.
 
-    Un fallo se guarda como frente vacio. Asi ``hv_values`` puede contarlo
+    Una excepcion se guarda como frente vacio. Asi ``hv_values`` puede contarla
     como HV 0 en el par (o abortar con ``--fail-policy abort``) en vez de
-    eliminar la repeticion entera.
+    eliminar la repeticion entera. No hay timeout por instancia: el MOEA ya
+    esta acotado por generaciones y un limite fijo mataba corridas largas en
+    instancias dificiles, perdiendo el frente ya calculado.
     """
     labels = labels or [None]
     fronts = {} if existing is None else dict(existing)
     failures = {} if stored_failures is None else dict(stored_failures)
-    instance_timeout = 300  # s por corrida del MOEA, como el original
     # Las instancias como objetos `Instance` (picklable para el worker) y los
     # overrides de Params: los workers arrancan con el singleton vacio
     # (forkserver) y necesitan MO_GENERATIONS/MO_POPULATION_SIZE y las
@@ -298,6 +356,7 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
         paths, mo_generations=max(EVAL_BUDGETS[label] // 105 for label in labels),
         mo_population_size=105, seed=args.seed,
         model_name=protocols[0][0], mutation=protocols[0][1], normalize=False,
+        instance_timeout=None,
     )
     instances = evaluator._ensure_instances()
     instance_timeout = evaluator.instance_timeout
@@ -335,8 +394,8 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
                             for label in labels
                             if (protocol, name, rep, label, index) not in fronts
                             # Un fallo registrado no se re-ejecuta (son
-                            # timeouts de 300 s del MOEA). Para reintentarlos
-                            # hay que borrar `failures.json`.
+                            # excepciones del MOEA, no timeouts). Para
+                            # reintentarlas hay que borrar `failures.json`.
                             and (protocol, name, rep, label, index) not in failures]
                     if not todo:
                         continue
@@ -346,6 +405,15 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
 
     if not tasks:
         return fronts, failures
+
+    save_checkpoints = bool(out_dir) and getattr(args, "save_fronts", True)
+
+    def checkpoint():
+        """Vuelca frentes + fallos sin esperar al final de la tanda."""
+        if not save_checkpoints:
+            return
+        save_fronts(out_dir, fronts)
+        save_failures(out_dir, failures)
 
     total = sum(len(task[0]) for task in tasks)
     workers = args.fitness_workers
@@ -376,6 +444,8 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
                           f"({100.0 * done_count / len(tasks):4.1f} %)  "
                           f"faltan {pending}  "
                           f"ETA {eta / 60:.0f} min   ", end="", flush=True)
+                if done_count % CHECKPOINT_EVERY == 0:
+                    checkpoint()
             print("", flush=True)
     else:
         for task in tasks:
@@ -383,6 +453,9 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
                 fronts[key] = front
                 if error:
                     failures[key] = error
+            if len(fronts) % CHECKPOINT_EVERY == 0:
+                checkpoint()
+    checkpoint()
     return fronts, failures
 
 
@@ -407,21 +480,118 @@ def _log(message):
     print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
 
-def shared_frame(fronts, operators, protocols, n_instances, repeats, labels):
-    """Marco por instancia y presupuesto: frente consolidado de todo."""
+def _safe_frame(pieces, context=""):
+    """`_frame_from_points` que no aborta el analisis si el marco es degenerado.
+
+    Un marco degenerado (todos los puntos iguales en algun objetivo, NaN) deja
+    los HV de esa instancia a ``None``; el resto de la comparacion sigue.
+    """
+    try:
+        return _frame_from_points(pieces)
+    except Exception as error:  # noqa: BLE001 - se registra y se excluye
+        _log(f"  AVISO: marco degenerado {context}: "
+             f"{type(error).__name__}: {error}")
+        return None
+
+
+# Cada cuantas tareas se vuelca el checkpoint de frentes. Con frentes de
+# ~105 x K floats el npz comprimido es pequeño; 25 tareas acotan la perdida a
+# unos minutos de MOEA en el peor caso.
+CHECKPOINT_EVERY = 25
+
+
+def _fronts_payload(fronts):
+    return {
+        f"{protocol}|{name}|{rep}|{label}|{index}": np.asarray(front)
+        for (protocol, name, rep, label, index), front in fronts.items()
+        if front is not None and len(front)
+    }
+
+
+def save_fronts(out_dir, fronts):
+    """Escribe ``fronts.npz`` de forma atomica (tmp + rename)."""
+    if not out_dir:
+        return
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "fronts.npz")
+    tmp = path + ".tmp.npz"
+    try:
+        np.savez_compressed(tmp, **_fronts_payload(fronts))
+        os.replace(tmp, path)
+    except Exception as error:  # noqa: BLE001 - el checkpoint no debe abortar
+        print(f"AVISO: no se pudo guardar {path}: {error}", flush=True)
+
+
+def save_failures(out_dir, failures):
+    """Escribe ``failures.json`` de forma atomica."""
+    if not out_dir:
+        return
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "failures.json")
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as handle:
+            json.dump({"|".join(str(part) for part in key): reason
+                       for key, reason in failures.items()}, handle, indent=2)
+        os.replace(tmp, path)
+    except Exception as error:  # noqa: BLE001
+        print(f"AVISO: no se pudo guardar {path}: {error}", flush=True)
+
+
+def save_json(out_dir, name, payload):
+    """Escribe un JSON auxiliar (degenerate.json, hv_problems.json)."""
+    if not out_dir:
+        return
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, name)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as handle:
+        json.dump(payload, handle, indent=2, default=str)
+    os.replace(tmp, path)
+
+
+def shared_frame(fronts, operators, protocols, n_instances, repeats, labels,
+                 out_dir=None):
+    """Marco por instancia y presupuesto: frente consolidado de todo.
+
+    Un fallo al construir el marco (p. ej. un frente degenerado que hace
+    fallar la NDS) se registra y deja ``None`` para esa instancia: el HV de
+    todos sus operadores sera ``None`` (exclusion) en vez de abortar el
+    analisis entero.
+    """
     frames = {}
+    degenerate = {}
     total = len(labels) * n_instances
     done = 0
     started = time.time()
     for label in labels:
         for index in range(n_instances):
-            pieces = [fronts.get((protocol_name(solver, mutation), name, rep,
-                                  label, index))
-                      for solver, mutation in protocols
-                      for name, _ns, _kind, _src in operators
-                      for rep in range(repeats)]
-            pieces = [p for p in pieces if p is not None and len(p)]
-            frames[(label, index)] = _frame_from_points(pieces)
+            try:
+                pieces = [fronts.get((protocol_name(solver, mutation), name, rep,
+                                      label, index))
+                          for solver, mutation in protocols
+                          for name, _ns, _kind, _src in operators
+                          for rep in range(repeats)]
+                pieces = [p for p in pieces if p is not None and len(p)]
+                frame = _frame_from_points(pieces)
+                # Un marco con un objetivo sin rango normaliza dividiendo por
+                # cero (HV NaN): se excluye entero, como en experiment.py.
+                if frame is not None and len(frame):
+                    span = (np.asarray(frame.max(axis=0), dtype=float)
+                            - np.asarray(frame.min(axis=0), dtype=float))
+                    if not np.all(np.isfinite(span)) or np.any(span <= 0):
+                        degenerate[f"{label}|{index}"] = (
+                            f"marco degenerado (span={span.tolist()})")
+                        frame = None
+            except Exception as error:  # noqa: BLE001 - se registra y sigue
+                frame = None
+                degenerate[f"{label}|{index}"] = (
+                    f"{type(error).__name__}: {error}")
+            if frame is None:
+                degenerate.setdefault(
+                    f"{label}|{index}",
+                    "sin puntos o marco degenerado (vmin == vmax)")
+            frames[(label, index)] = frame
             done += 1
             if done % 5 == 0 or done == total:
                 elapsed = time.time() - started
@@ -429,11 +599,14 @@ def shared_frame(fronts, operators, protocols, n_instances, repeats, labels):
                 _log(f"  marcos consolidados: {done}/{total} "
                      f"({elapsed:.0f}s, "
                      f"{elapsed / done * pending:.0f}s restantes)")
+    if degenerate:
+        _log(f"  AVISO: {len(degenerate)} marco(s) degenerados/excluidos")
+        save_json(out_dir, "degenerate.json", degenerate)
     return frames
 
 
 def hv_values(fronts, operators, protocols, frames, repeats, labels,
-              failures=None, fail_policy="zero"):
+              failures=None, fail_policy="zero", problems=None):
     """HV de cada (operador, repeticion, instancia) en el marco comun.
 
     ``frame is None`` significa que la instancia no tiene escala (``vmin ==
@@ -441,8 +614,13 @@ def hv_values(fronts, operators, protocols, frames, repeats, labels,
     ``experiment.py``. Un frente vacio es un fallo del operador en esa
     instancia: con ``fail_policy="zero"`` cuenta como HV 0 (peor caso); con
     ``"exclude"`` se elimina el par; con ``"abort"`` se detiene la comparacion.
+
+    ``problems`` (dict opcional) acumula las celdas que no pudieron
+    calcularse: un fallo de HV no aborta el analisis, se excluye y se reporta
+    en ``hv_problems.json``.
     """
     failures = failures or {}
+    problems = problems if problems is not None else {}
     values = {}
     # `frames` puede ser un dict por presupuesto (claves (label, index)) o una
     # lista aplanada al presupuesto de analisis (claves por indice).
@@ -477,18 +655,33 @@ def hv_values(fronts, operators, protocols, frames, repeats, labels,
                         else:
                             row.append(None)
                         continue
-                    vmin, vmax = frame.min(axis=0), frame.max(axis=0)
-                    if np.any(vmax == vmin):
+                    try:
+                        vmin, vmax = frame.min(axis=0), frame.max(axis=0)
+                        if np.any(vmax == vmin):
+                            problems[
+                                "|".join(str(part) for part in key)
+                            ] = "marco degenerado (vmax == vmin)"
+                            row.append(None)
+                            continue
+                        normalized = normalize_front(front, (vmin, vmax))
+                        if not np.all(np.isfinite(normalized)):
+                            problems[
+                                "|".join(str(part) for part in key)
+                            ] = "frente normalizado no finito"
+                            row.append(None)
+                            continue
+                        normalized = clip_to_reference_box(normalized)
+                        hv = float(compute_hypervolume(
+                            np.full(normalized.shape[1], NADIR_FACTOR),
+                            normalized
+                        ))
+                        if not np.isfinite(hv):
+                            raise ValueError(f"HV no finito ({hv})")
+                        row.append(hv)
+                    except Exception as error:  # noqa: BLE001 - se excluye la celda
+                        problems["|".join(str(part) for part in key)] = (
+                            f"{type(error).__name__}: {error}")
                         row.append(None)
-                        continue
-                    normalized = normalize_front(front, (vmin, vmax))
-                    if not np.all(np.isfinite(normalized)):
-                        row.append(None)
-                        continue
-                    normalized = clip_to_reference_box(normalized)
-                    row.append(float(compute_hypervolume(
-                        np.full(normalized.shape[1], NADIR_FACTOR), normalized
-                    )))
                 suffix = (label,) if is_dict else ()
                 values[(protocol, name, rep, *suffix)] = row
     return values
@@ -517,58 +710,54 @@ def pairwise_design(fronts, rows, protocols, n_instances, repeats, failures=None
     el de todas. Evita que un tercer operador muy bueno aplaste a los demas a HV
     ~0 (el marco compartido se vuelve degenerado cuando uno domina la envolvente).
     """
-    classics = [r["operator"] for r in rows if r["kind"] == "classic" and r.get("runs")]
-    others = [r["operator"] for r in rows
-              if r["kind"] in ("llamea", "ge") and r.get("runs")]
     results = []
-    for ours in others:
-        for base in classics:
-            frames = []
-            for index in range(n_instances):
-                pieces = [fronts.get(
-                              (protocol_name(solver, mutation), name, rep, index))
-                          for solver, mutation in protocols
-                          for name in (ours, base)
-                          for rep in range(repeats)]
-                pieces = [p for p in pieces if p is not None and len(p)]
-                frames.append(_frame_from_points(pieces))
-            subset = [(ours, None, "llamea", None), (base, None, "classic", None)]
-            values = hv_values(fronts, subset, protocols, frames, repeats,
-                               [None], failures=failures,
-                               fail_policy=fail_policy)
-            scores = per_run_scores(values, subset, protocols, repeats)
-            if not any(value is not None for value in scores[ours]) or \
-                    not any(value is not None for value in scores[base]):
-                continue
-            summary = paired_summary(scores[ours], scores[base])
-            if summary["pairs"] == 0:
-                continue
-            per_instance_operator = []
-            per_instance_baseline = []
-            for index in range(n_instances):
-                ours_rep = [values[(protocol_name(solver, mutation), ours, rep)][index]
-                            for solver, mutation in protocols
-                            for rep in range(repeats)
-                            if values[(protocol_name(solver, mutation), ours, rep)][index]
-                            is not None]
-                base_rep = [values[(protocol_name(solver, mutation), base, rep)][index]
-                            for solver, mutation in protocols
-                            for rep in range(repeats)
-                            if values[(protocol_name(solver, mutation), base, rep)][index]
-                            is not None]
-                per_instance_operator.append(
-                    float(np.mean(ours_rep)) if ours_rep else None
-                )
-                per_instance_baseline.append(
-                    float(np.mean(base_rep)) if base_rep else None
-                )
-            summary.update({
-                "operator": ours,
-                "baseline": base,
-                "per_instance_operator": per_instance_operator,
-                "per_instance_baseline": per_instance_baseline,
-            })
-            results.append(summary)
+    for ours, base in _comparison_pairs(rows):
+        frames = []
+        for index in range(n_instances):
+            pieces = [fronts.get(
+                          (protocol_name(solver, mutation), name, rep, index))
+                      for solver, mutation in protocols
+                      for name in (ours, base)
+                      for rep in range(repeats)]
+            pieces = [p for p in pieces if p is not None and len(p)]
+            frames.append(_safe_frame(pieces, f"par {ours} vs {base} inst={index}"))
+        subset = [(ours, None, "llamea", None), (base, None, "classic", None)]
+        values = hv_values(fronts, subset, protocols, frames, repeats,
+                           [None], failures=failures,
+                           fail_policy=fail_policy)
+        scores = per_run_scores(values, subset, protocols, repeats)
+        if not any(value is not None for value in scores[ours]) or \
+                not any(value is not None for value in scores[base]):
+            continue
+        summary = paired_summary(scores[ours], scores[base])
+        if summary["pairs"] == 0:
+            continue
+        per_instance_operator = []
+        per_instance_baseline = []
+        for index in range(n_instances):
+            ours_rep = [values[(protocol_name(solver, mutation), ours, rep)][index]
+                        for solver, mutation in protocols
+                        for rep in range(repeats)
+                        if values[(protocol_name(solver, mutation), ours, rep)][index]
+                        is not None]
+            base_rep = [values[(protocol_name(solver, mutation), base, rep)][index]
+                        for solver, mutation in protocols
+                        for rep in range(repeats)
+                        if values[(protocol_name(solver, mutation), base, rep)][index]
+                        is not None]
+            per_instance_operator.append(
+                float(np.mean(ours_rep)) if ours_rep else None
+            )
+            per_instance_baseline.append(
+                float(np.mean(base_rep)) if base_rep else None
+            )
+        summary.update({
+            "operator": ours,
+            "baseline": base,
+            "per_instance_operator": per_instance_operator,
+            "per_instance_baseline": per_instance_baseline,
+        })
+        results.append(summary)
     return results
 
 
@@ -617,7 +806,7 @@ def group_contrasts(fronts, rows, protocols, n_instances, repeats, groups,
                       for name in members_left + members_right
                       for rep in range(repeats)]
             pieces = [p for p in pieces if p is not None and len(p)]
-            frames.append(_frame_from_points(pieces))
+            frames.append(_safe_frame(pieces, f"{left} vs {right} inst={index}"))
         values = hv_values(fronts, subset, protocols, frames, repeats,
                             [None], failures=failures,
                             fail_policy=fail_policy)
@@ -657,23 +846,38 @@ def summarize(scores, operators):
     return rows
 
 
-def pairwise(scores, operators, rows):
-    """Cada operador no clasico (LLaMEA o GE) contra cada clasico.
+def _comparison_pairs(rows):
+    """Pares a contrastar: todo par de operadores evaluados, menos el par
+    clasico-clasico (esa comparacion es la del panel, no del operador
+    evaluado).
 
-    El contraste es pareado por repeticion: el clasico y el evaluado comparten
+    Antes solo se contrastaban los operadores no clasicos (LLaMEA o GE) contra
+    los clasicos, de modo que una comparacion LLaMEA-vs-GE (la del paper) no
+    salia: `contrastes.csv` se quedaba vacio.
+    """
+    evaluados = [r for r in rows if r.get("runs")]
+    pairs = []
+    for i, a in enumerate(evaluados):
+        for b in evaluados[i + 1:]:
+            if a["kind"] == "classic" and b["kind"] == "classic":
+                continue
+            pairs.append((a["operator"], b["operator"]))
+    return pairs
+
+
+def pairwise(scores, operators, rows):
+    """Cada operador evaluado contra los demas evaluados (claseicos incluidos).
+
+    El contraste es pareado por repeticion: los dos operadores comparten
     semilla, poblacion inicial y marco, asi que la diferencia es del operador.
     """
-    classics = [r["operator"] for r in rows if r["kind"] == "classic" and r.get("runs")]
-    others = [r["operator"] for r in rows
-              if r["kind"] in ("llamea", "ge") and r.get("runs")]
     comparisons = []
-    for ours in others:
-        for base in classics:
-            summary = paired_summary(scores[ours], scores[base])
-            if summary["pairs"] == 0:
-                continue
-            summary.update({"operator": ours, "baseline": base})
-            comparisons.append(summary)
+    for ours, base in _comparison_pairs(rows):
+        summary = paired_summary(scores[ours], scores[base])
+        if summary["pairs"] == 0:
+            continue
+        summary.update({"operator": ours, "baseline": base})
+        comparisons.append(summary)
     return comparisons
 
 
@@ -789,7 +993,7 @@ def write_operator_catalog(out_dir, operators):
     path = os.path.join(out_dir, "operators.txt")
     with open(path, "w", encoding="utf-8") as handle:
         for name, _ns, kind, source in operators:
-            if kind in ("classic", "classic2"):
+            if kind in ("classic", "classic2", "project"):
                 text = f"{kind}:{source}"
             else:
                 text = source
@@ -1146,13 +1350,16 @@ def write_report(path, name, args, rows, comparisons, frames, scores, values,
               + (", ".join(degenerate) if degenerate else "ninguna"), ""]
     if failures:
         if args.fail_policy == "zero":
-            policy_note = "Un fallo cuenta como HV 0 en el par; no se descarta la instancia."
+            policy_note = ("Un fallo cuenta como HV 0; no se descarta la "
+                           "instancia.")
         elif args.fail_policy == "exclude":
-            policy_note = "Un fallo descarta ese par (usa `zero` para el peor caso)."
+            policy_note = ("Un fallo descarta esa celda; la media de cada "
+                           "operador usa sus celdas completadas (no pareado).")
         else:
             policy_note = "Un fallo aborta la comparacion."
-        lines += [f"- Fallos de evaluacion contabilizados: {len(failures)} "
-                  f"(politica `{args.fail_policy}`). {policy_note}", ""]
+        lines += [f"- Celdas de fallo contabilizadas: {len(failures)} "
+                  f"(politica `{args.fail_policy}`). {policy_note} "
+                  "Una corrida que falla deja una celda por presupuesto.", ""]
         for key, reason in sorted(failures.items()):
             index = key[-1] if len(key) == 5 else key[3]
             operator, rep = key[1], key[2]
@@ -1301,6 +1508,9 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--operator", action="append", required=False,
                         help="nombre=ruta.py (LLaMEA), nombre=classic:ox, "
+                             "nombre=classic2:ox (dos hijos), "
+                             "nombre=project:PMX_Cross|CX_Cross (cruce real "
+                             "del proyecto), "
                              "nombre=ge:Etiqueta@archivo_operators.txt (GE). "
                              "Repetible.")
     parser.add_argument("--ge-operators", action="append", default=[],
@@ -1466,30 +1676,30 @@ def main():
                                       existing,
                                       stored_failures=existing_failures,
                                       labels=labels, out_dir=out_dir)
-    print(f"MOEA terminado en {time.time() - start:.1f}s; calculando HV...")
+    print(f"MOEA terminado en {time.time() - start:.1f}s")
+
+    # Los frentes se guardan ANTES de calcular el HV: si el analisis falla
+    # (marco degenerado, HV no finito, excepcion de pymoo), el MOEA no se
+    # repite (mismo comando + --load-fronts). Con snapshots, las claves llevan
+    # el presupuesto (protocolo|op|rep|label|inst).
+    if args.save_fronts:
+        save_fronts(out_dir, fronts)
+    save_failures(out_dir, failures)
+    _log("frentes guardados; calculando HV...")
 
     _log("FASE 1/5: marcos consolidados (comprobate + vmin/vmax)")
     frames_all = shared_frame(fronts, operators, protocols, len(args.paths),
-                              args.repeats, labels)
+                              args.repeats, labels, out_dir=out_dir)
     _log(f"FASE 1/5 lista: {len(frames_all)} marcos")
     _log("FASE 2/5: hipervolumenes de cada (protocolo, operador, repeticion)")
+    hv_problems = {}
     values = hv_values(fronts, operators, protocols, frames_all, args.repeats,
-                       labels, failures=failures, fail_policy=args.fail_policy)
+                       labels, failures=failures, fail_policy=args.fail_policy,
+                       problems=hv_problems)
+    if hv_problems:
+        save_json(out_dir, "hv_problems.json", hv_problems)
+        _log(f"  AVISO: {len(hv_problems)} celda(s) sin HV (ver hv_problems.json)")
     _log("FASE 2/5 lista")
-
-    # Guardar los frentes ANTES del analisis: si el analisis falla, el MOEA no
-    # se repite (el mismo comando + --load-fronts reutiliza los frentes). Con
-    # snapshots, las claves llevan el presupuesto (protocolo|op|rep|label|inst).
-    if args.save_fronts:
-        np.savez_compressed(
-            os.path.join(out_dir, "fronts.npz"),
-            **{f"{protocol}|{name}|{rep}|{label}|{index}": np.asarray(front)
-               for (protocol, name, rep, label, index), front in fronts.items()
-               if front is not None and len(front)},
-        )
-    with open(os.path.join(out_dir, "failures.json"), "w") as handle:
-        json.dump({"|".join(str(part) for part in key): reason
-                   for key, reason in failures.items()}, handle, indent=2)
 
     # El analisis (resumen, contrastes, report) se hace sobre el presupuesto
     # `--budget`; los tres se evaluan y se escriben en el layout del original.

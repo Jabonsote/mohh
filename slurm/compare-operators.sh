@@ -11,6 +11,10 @@
 #     OPERATORS="llamea=ruta/al/mejor.py ox=classic:ox pbx=classic:pbx" \
 #       bash slurm/compare-operators.sh
 #
+# Panel original exacto (dos hijos complementarios, como experiment.py):
+#     OPERATORS="llamea=ruta/al/mejor.py pmx=project:PMX_Cross cx=project:CX_Cross" \
+#       bash slurm/compare-operators.sh
+#
 # Opciones por entorno (se exportan al job con --export=ALL):
 #   OPERATORS          lista "nombre=fuente" (separada por espacios)
 #   GROUPS             "nombre=op1,op2" (repetible): agrupa operadores
@@ -25,6 +29,8 @@
 #   SOLVER             override del solver (default MOEAD / los 3 con GE)
 #   SEED (42)          semilla base
 #   NAME               nombre del experimento de salida
+#   LOAD_FRONTS (0)    1 = reanaliza con el fronts.npz de results/evaluations/NAME
+#                      sin repetir el MOEA (minutos, no horas)
 #   CPUS (32)          CPUs del job. Ojo: Slurm no reparte cores entre
 #                      nodos, asi que CPUS no puede superar los cores de un
 #                      nodo (en `ixachi` son 52) o el job se queda en PD.
@@ -61,6 +67,7 @@ export CONTRASTS="${CONTRASTS:-}"
 export GE_PROTOCOL="${GE_PROTOCOL:-1}"
 export SEED="${SEED:-42}"
 export NAME="${NAME:-llamea_vs_clasicos}"
+export LOAD_FRONTS="${LOAD_FRONTS:-0}"
 export CPUS="${CPUS:-32}"
 export MEM="${MEM:-64G}"
 
@@ -118,6 +125,9 @@ ARGS=(
 )
 if [ "$GE_PROTOCOL" = "1" ]; then
     ARGS+=(--ge-protocol)
+fi
+if [ "${LOAD_FRONTS:-0}" = "1" ]; then
+    ARGS+=(--load-fronts)
 fi
 if [ -n "${MO_GENERATIONS:-}" ]; then
     ARGS+=(--mo-generations "$MO_GENERATIONS")
