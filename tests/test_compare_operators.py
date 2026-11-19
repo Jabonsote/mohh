@@ -296,3 +296,17 @@ def test_write_figures_creates_nm_and_wm_pngs(tmp_path):
 
     assert (folder / "Figures" / "NoMutation" / "KC11_NM.png").is_file()
     assert (folder / "Figures" / "WithMutation" / "KC11_WM.png").is_file()
+
+
+def test_ge_classic_adapters_return_both_children():
+    """CX/PMX de la GE: dos hijos complementarios, no child[::-1]."""
+    from scripts.ge_classics.cx_ge import crossover as cx
+    from scripts.ge_classics.pmx_ge import crossover as pmx
+
+    rng = np.random.default_rng(0)
+    for operator in (cx, pmx):
+        x, y = rng.permutation(11), rng.permutation(11)
+        children = operator(x, y)
+        assert isinstance(children, tuple) and len(children) == 2
+        for child in children:
+            assert sorted(child.tolist()) == list(range(11))

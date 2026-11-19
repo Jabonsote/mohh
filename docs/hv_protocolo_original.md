@@ -110,6 +110,12 @@ en la comparación:
 la GE original. Para contrastar con la GE, hay que reevaluar sus operadores
 en la misma corrida (o usar el marco de la pareja).
 
+**Consecuencia para los tres contrastes:** LLaMEA vs GE, GE vs clásicos y
+LLaMEA vs clásicos deben salir de **una sola corrida** con los cuatro
+operadores (`llamea`, `ge_best`, `cx`, `pmx`) y tres `--contrast`. Así sus HV
+comparten el marco y son comparables entre sí. El comando está en
+`docs/comparaciones_cluster.md`.
+
 ## 5. Lo que garantiza que el cálculo sea el del original
 
 | Elemento | Original | Arnés |
