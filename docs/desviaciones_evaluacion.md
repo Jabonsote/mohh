@@ -21,10 +21,13 @@ Rastreo literal de `nadir`, `ref_point` y `HV` en el repo original:
 - `MO.py:58-66` — `HV(ref_point=ref_point)` de pymoo, sin nada más.
 
 **Ojo con el número de objetivos.** El repo de GitHub tiene
-`np.array([1.1, 1.1])` (solo 2 objetivos): con pymoo eso **falla** si el frente
-tiene 3/4/5 columnas (`ValueError: 1D array must have length 5 but it has
-length 2`). Los 20 test instances tienen 2, 3, 4 y 5 objetivos
-(`head -1 datasets/mqap/test/KC*.txt`).
+`np.array([1.1, 1.1])` (solo 2 objetivos). Y su propio dataset incluye
+instancias de 3 objetivos: `datasets/mqap/test/KC30-3fl-2rl.txt` tiene
+`objectives= 3` (verificado en `raw.githubusercontent.com`). Con pymoo eso
+**falla**: `ValueError: 1D array must have length 3 but it has length 2`.
+Es decir, el código original es internamente inconsistente con sus datos:
+una réplica literal no es ejecutable. Nuestro dataset local tiene 20
+instancias con 2, 3, 4 y 5 objetivos (`KC100-5fl-1un.txt` → 5).
 
 La copia local `avance/MOHH original/src/mohh/evaluation/experiment.py:496-499`
 —que es la que produjo los resultados de referencia `experimentos_001_002/`—
