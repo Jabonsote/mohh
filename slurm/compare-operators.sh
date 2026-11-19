@@ -17,7 +17,9 @@
 #
 # Opciones por entorno (se exportan al job con --export=ALL):
 #   OPERATORS          lista "nombre=fuente" (separada por espacios)
-#   GROUPS             "nombre=op1,op2" (repetible): agrupa operadores
+#   COMPARE_GROUPS     "nombre=op1,op2" (repetible): agrupa operadores.
+#                      OJO: no usar GROUPS: es una variable especial de bash
+#                      con los GIDs del usuario y el job recibe '10008'.
 #   CONTRASTS          "grupoA:grupoB" (repetible): contraste entre grupos
 #   SPLIT (test)       train | test
 #   INSTANCES (all)    numero de instancias o 'all'
@@ -62,7 +64,13 @@ export SPLIT="${SPLIT:-test}"
 export INSTANCES="${INSTANCES:-all}"
 export REPEATS="${REPEATS:-31}"
 # Grupos and contrasts: "name=op1,op2" and "groupA:groupB" (repeatable).
-export GROUPS="${GROUPS:-}"
+# `GROUPS` no se puede usar: bash la reserva para los GIDs del usuario, asi
+# que un "GROUPS=..." del login se pierde y el job ve el GID (p. ej. 10008).
+# Se acepta el nombre viejo solo si trae '=' (es decir, no es un GID).
+export COMPARE_GROUPS="${COMPARE_GROUPS:-}"
+if [ -z "$COMPARE_GROUPS" ] && [[ "${GROUPS:-}" == *=* ]]; then
+    export COMPARE_GROUPS="$GROUPS"
+fi
 export CONTRASTS="${CONTRASTS:-}"
 export GE_PROTOCOL="${GE_PROTOCOL:-1}"
 export SEED="${SEED:-42}"
@@ -139,7 +147,7 @@ if [ -n "${SOLVER:-}" ]; then
     ARGS+=(--solver "$SOLVER")
 fi
 # Cada grupo/contraste se pasa como un argumento propio.
-for group in $GROUPS; do
+for group in $COMPARE_GROUPS; do
     ARGS+=(--group "$group")
 done
 for contrast in $CONTRASTS; do

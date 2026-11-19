@@ -178,7 +178,7 @@ los cuatro operadores: así comparten un único marco de normalización.
 OPERATORS="llamea=results/searches/glm-gptoss2/llamea_best_operator.py \
 ge_best=ge:Best@results/Experiment_002/MOEAD_operators.txt \
 cx=scripts/ge_classics/cx_ge.py pmx=scripts/ge_classics/pmx_ge.py" \
-GROUPS="base=cx,pmx ge_best=ge_best llamea=llamea" \
+COMPARE_GROUPS="base=cx,pmx ge_best=ge_best llamea=llamea" \
 CONTRASTS="llamea:ge_best ge_best:base llamea:base" \
 GE_PROTOCOL=1 INSTANCES=all REPEATS=31 CPUS=52 \
 NAME=comparacion_completa bash slurm/compare-operators.sh

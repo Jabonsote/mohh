@@ -4,6 +4,19 @@ Todas las comparaciones deben usar el **mismo protocolo GE** y producir el
 mismo árbol de resultados (`docs/estructura_resultados_ge.md`), sin importar
 qué operadores se comparen (LLaMEA vs GE, GE vs clásicos, LLaMEA vs clásicos).
 
+## Regla crítica 2: usar `COMPARE_GROUPS`, nunca `GROUPS`
+
+`GROUPS` es una variable **especial de bash** con los GIDs del usuario. Un
+`GROUPS="base=cx,pmx ..."` del login se pierde y el job recibe el GID
+(p. ej. `10008`), con este error:
+
+```
+--group debe ser nombre=op1,op2, no '10008'
+```
+
+Los comandos de abajo usan `COMPARE_GROUPS`. El wrapper acepta `GROUPS` solo
+si contiene `=` (por compatibilidad con comandos antiguos).
+
 ## Regla crítica: no pasar `SOLVER`
 
 `GE_PROTOCOL=1` activa por defecto `MOEAD,NSGAII,SMSEMOA` con ambas
@@ -23,7 +36,7 @@ operadores juntos y pedir los tres contrastes en la misma corrida:
 OPERATORS="llamea=results/searches/glm-gptoss2/llamea_best_operator.py \
 ge_best=ge:Best@results/Experiment_002/MOEAD_operators.txt \
 cx=scripts/ge_classics/cx_ge.py pmx=scripts/ge_classics/pmx_ge.py" \
-GROUPS="base=cx,pmx ge_best=ge_best llamea=llamea" \
+COMPARE_GROUPS="base=cx,pmx ge_best=ge_best llamea=llamea" \
 CONTRASTS="llamea:ge_best ge_best:base llamea:base" \
 GE_PROTOCOL=1 INSTANCES=all REPEATS=31 CPUS=52 \
 NAME=comparacion_completa bash slurm/compare-operators.sh
@@ -41,7 +54,7 @@ se van a cruzar HV entre ellas.
 ```bash
 OPERATORS="llamea=results/searches/glm-gptoss2/llamea_best_operator.py \
 cx=scripts/ge_classics/cx_ge.py pmx=scripts/ge_classics/pmx_ge.py" \
-GROUPS="base=cx,pmx llamea=llamea" CONTRASTS="llamea:base" \
+COMPARE_GROUPS="base=cx,pmx llamea=llamea" CONTRASTS="llamea:base" \
 GE_PROTOCOL=1 INSTANCES=all REPEATS=31 CPUS=52 \
 NAME=llamea_vs_cx_pmx bash slurm/compare-operators.sh
 ```
@@ -57,7 +70,7 @@ que sea estrictamente comparable con la GE:
 ```bash
 OPERATORS="llamea=results/searches/glm-gptoss2/llamea_best_operator.py \
 ge_best=ge:Best@results/Experiment_002/MOEAD_operators.txt" \
-GROUPS="base=ge_best llamea=llamea" CONTRASTS="llamea:base" \
+COMPARE_GROUPS="base=ge_best llamea=llamea" CONTRASTS="llamea:base" \
 GE_PROTOCOL=1 INSTANCES=all REPEATS=31 CPUS=52 \
 NAME=llamea_vs_ge_best_completo bash slurm/compare-operators.sh
 ```
@@ -67,7 +80,7 @@ NAME=llamea_vs_ge_best_completo bash slurm/compare-operators.sh
 ```bash
 OPERATORS="ge_best=ge:Best@results/Experiment_002/MOEAD_operators.txt \
 cx=scripts/ge_classics/cx_ge.py pmx=scripts/ge_classics/pmx_ge.py" \
-GROUPS="clasicos=cx,pmx ge_best=ge_best" CONTRASTS="ge_best:clasicos" \
+COMPARE_GROUPS="clasicos=cx,pmx ge_best=ge_best" CONTRASTS="ge_best:clasicos" \
 GE_PROTOCOL=1 INSTANCES=all REPEATS=31 CPUS=52 \
 NAME=ge_best_vs_cx_pmx bash slurm/compare-operators.sh
 ```
