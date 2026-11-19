@@ -71,12 +71,20 @@ def compute_rank(hypervolumes):
     return [average_ranks[v] for v in hypervolumes]
 ```
 
-Animación del algoritmo sobre un ejemplo numérico real: cuatro operadores con HV `[0.366, 0.411, 0.312, 0.411]`.
+Animación del algoritmo sobre un ejemplo **real** extraído de `Experiment_002/evaluation_results/MOEAD/50k/KC11-2fl-1rl.csv`, repetición 10 (cinco operadores):
 
-1. Ordenar descendente: `[0.411, 0.411, 0.366, 0.312]`.
-2. Posiciones: `[1, 2, 3, 4]`.
-3. Empate en `0.411` → promedio `(1+2)/2 = 1.5`.
-4. Resultado en el orden original: `[3, 1.5, 4, 1.5]`.
+```
+Best   = 0.6458275283603986
+Middle = 0.6458275283603986
+Worst  = 0.8782180499788266
+CX     = 0.5191730211610632
+PMX    = 0.7010592421213068
+```
+
+1. Ordenar descendente: `[0.8782 (Worst), 0.7011 (PMX), 0.6458 (Best), 0.6458 (Middle), 0.5192 (CX)]`.
+2. Posiciones: `[1, 2, 3, 4, 5]`.
+3. Empate real en `0.6458` → promedio `(3+4)/2 = 3.5`.
+4. Resultado en el orden original: `[3.5, 3.5, 1, 5, 2]`.
 
 En pantalla, una sola frase: `rank 1 = best · ties share the average position`.
 
@@ -100,6 +108,7 @@ Generation: 14 / 30
 Offspring created: 35
 Parent pairs attempted: 33
 Repeated offspring rejected: 26
+Invalid offspring rejected: 5
 ```
 
 Y, como pie de pantalla, los totales reales:
@@ -122,8 +131,8 @@ Se resalta la fila con menor media y se etiqueta `selected`. Al lado, un texto b
 ```
 lower mean rank wins
 GE internal ranking does not always separate Best from Worst:
-  Best  : 0.312 / 0.366 / 0.386
-  Worst : 0.386 / 0.411 / 0.411   (difference -0.02 at 10k)
+  Best  : 0.3116 / 0.3661 / 0.3860
+  Worst : 0.3195 / 0.3858 / 0.4107   (Best - Worst = -0.0197 at 30k)
 ```
 
 A continuación, la deriva real de diversidad de fenotipos: `CrystalBLEU 0.81 → 0.17`, con una línea decreciente limpia. Sin comentario editorial.
@@ -148,6 +157,8 @@ grammar-guided code evolution and rank-based selection.
 ## Datos reales de la corrida (incrustados; no requieres ficheros externos)
 
 - **Ranking**: `compute_rank` de `HH_auxiliars.py:6-24` del repo `AdrianMP1/MOHH-Specialized-Operators@main` (orden descendente, posiciones `i+1`, empates promediados). Se usa en `hyperheuristic.py:374`: `ranks = compute_rank(self.population.get_hypervolumes(instance_name))` y se guarda en `individual.fitness_values[instance_name]` (líneas 377-379).
+- **Parámetros reales de la corrida GE** (`generation_results/parameters.txt`): `POPULATION_SIZE=50`, `GENERATIONS=30`, `ELITE_SIZE=15`, `INIT_GENOME_LENGTH=100`, `CODON_SIZE=255`, `MAX_TREE_DEPTH=90`, `CROSSOVER=KPointCrossover` (2 puntos), `MUTATION=BitFlipMutation` (0.01), `MO_MODEL=MOEAD`, `MO_POPULATION_SIZE=105`, `MO_GENERATIONS=300`, `SEED=980094`, 80 instancias de train, 88000 ejecuciones del MOEA.
+- **Rank real observado** (`run_metrics/generation_0000.json`, sección `ranks`): `{"instance": "KC61-3fl-1un", "individual": "Individual_000001", "rank": 25.5, "hypervolume": 0.0}` — el rango 25.5 es un empate promediado, la prueba de que `compute_rank` no asigna posiciones enteras cuando hay HV repetidos.
 - **Gramática BNF** (idéntica a la ejecutada en la corrida, 8 producciones):
 
 ```
@@ -171,11 +182,11 @@ order_based(fill_first_occurring,preserve_elements,y,
     order_based(fill_first_occurring,preserve_elements,y, ...)))
 ```
 
-- **Pareto**: tres puntos reales del frente del operador Best (el frente completo tiene 13 puntos):
-  `(2.154e6, 1.532e7)`, `(2.165e6, 1.516e7)`, `(2.273e6, 1.443e7)`. Completar la curva interpolando monotónicamente entre ellos, sin puntos fuera del rango.
-- **Hipervolúmenes**: Best `0.312 / 0.366 / 0.386` (10k/30k/50k); Worst `0.386 / 0.411 / 0.411`.
+- **Pareto**: puntos reales consecutivos del frente `SMSEMOA_Best_NM_MOEAD` en la instancia `KC11-2fl-1rl`, presupuesto 50k (archivo `.../SMSEMOA/50k/fronts/KC11-2fl-1rl/SMSEMOA_Best_NM_MOEAD.pof`; el frente completo tiene **35 puntos**):
+  `(2101606, 15681360)`, `(2149966, 15653800)`, `(2153844, 15323170)`, `(2164608, 15158190)`, `(2269894, 14700260)`. Completar la curva interpolando monotónicamente entre los puntos dados, sin añadir puntos fuera del rango.
+- **Hipervolúmenes**: Best `0.3116 / 0.3661 / 0.3860` (10k/30k/50k); Worst `0.3195 / 0.3858 / 0.4107`. Medias sobre las 20 instancias, columnas `MOEAD_Best_NM_MOEAD` y `MOEAD_Worst_NM_MOEAD` de `Experiment_002/evaluation_results/MOEAD/{10k,30k,50k}/*.csv`.
 - **Contadores**: generación real `14/30`; 35 descendientes creados, 33 pares intentados, 26 descendientes repetidos rechazados. Totales: 1086 pares, 912 repetidos, 1050 creados, 197 inválidos.
-- **Diversidad**: CrystalBLEU `0.81 → 0.17`.
+- **Diversidad**: CrystalBLEU `0.8069 → 0.1719` (generaciones 0 y 29 de la corrida).
 
 ## Instrucciones de implementación
 
@@ -185,7 +196,7 @@ order_based(fill_first_occurring,preserve_elements,y,
 - La simulación es determinista: usa exclusivamente los datos incrustados; no requieres ficheros externos ni valores inventados.
 - Distingue visualmente la fase de mapeo (gramática) de la de ejecución y evaluación (MOEA/D), y resalta la etapa de ranking dentro del ciclo.
 - Usa los términos técnicos del método (genoma, codones, fenotipo, hipervolumen, rango, descendientes) sin analogías biológicas ni narración.
-- No garantices que cada generación mejore: muestra los valores reales, incluido el caso en que Worst supera a Best (diferencia -0.02).
+- No garantices que cada generación mejore: muestra los valores reales, incluido el caso en que Worst supera a Best (Best - Worst = -0.0197 en 30k).
 - No menciones OX en ninguna parte.
 - Exporta el resultado como video MP4, resolución 1920 × 1080.
 
