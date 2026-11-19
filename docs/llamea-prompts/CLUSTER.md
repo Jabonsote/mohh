@@ -159,39 +159,34 @@ hilo lo reporta en `llamea.log` con un WARNING).
 
 `scripts/compare_operators.py` corre el mismo arnés para los tres tipos de
 operador y contrasta sus HV de forma pareada (misma semilla, misma población
-inicial, mismo marco), como la evaluación gramatical. El comando vigente y el
-formato de salida están en `docs/comparaciones_cluster.md`; en resumen:
+inicial, mismo marco), como la evaluación gramatical:
 
-- **GE**: la etiqueta del `<experimento>/<MODELO>_operators.txt` (`Best`,
-  `Middle` o `Worst`) con `ge:<etiqueta>@<archivo>`.
+- **GE**: los operadores que la GE escribió, `<experimento>/<MODELO>_operators.txt`
+  (`Best:`, `Middle:`, `Worst:` con el fenotipo de la gramática).
 - **LLaMEA**: el `.py` con `def crossover(x, y)` que exporta la búsqueda
   (`llamea_best_operator.py`).
-- **Clásicos**: los adaptadores exactos de la GE,
-  `scripts/ge_classics/cx_ge.py` y `pmx_ge.py` (dos hijos del mismo corte).
-  **No se usa OX** en las comparaciones de LLaMEA.
-
-Para que los tres contrastes (LLaMEA vs GE, GE vs clásicos y LLaMEA vs
-clásicos) sean comparables entre sí, deben salir de **una sola corrida** con
-los cuatro operadores: así comparten un único marco de normalización.
+- **Clásicos**: el panel de `mohh.llamea.reference` (`ox`, `pbx`, `pmx`, `cx`,
+  `erx`).
 
 ```bash
-OPERATORS="llamea=results/searches/glm-gptoss2/llamea_best_operator.py \
-ge_best=ge:Best@results/Experiment_002/MOEAD_operators.txt \
-cx=scripts/ge_classics/cx_ge.py pmx=scripts/ge_classics/pmx_ge.py" \
-COMPARE_GROUPS="base=cx,pmx ge_best=ge_best llamea=llamea" \
-CONTRASTS="llamea:ge_best ge_best:base llamea:base" \
-GE_PROTOCOL=1 INSTANCES=all REPEATS=31 CPUS=52 \
-NAME=comparacion_completa bash slurm/compare-operators.sh
+OPERATORS="ox=classic:ox pmx=classic:pmx"
+GE_EXP=/LUSTRE/$USER/ge/Experiment_001
+LLAM=/LUSTRE/$USER/mohh/results/searches/<EXP>/llamea_best_operator.py
+
+FITNESS_WORKERS=16 python scripts/compare_operators.py \
+  --operator "$OPERATORS" \
+  --operator "llamea=$LLAM" \
+  --ge-operators "$GE_EXP" \
+  --group "base=ox,pmx" --group "ge=MOEAD_Best,MOEAD_Middle,MOEAD_Worst" \
+  --group "llamea=llamea" \
+  --contrast "base:ge" --contrast "llamea:base" \
+  --split test --instances all --repeats 31 --ge-protocol \
+  --name ge_vs_llamea
 ```
 
 Los grupos (`--group`) y sus contrastes (`--contrast`) son modulares: cada
 contraste es un test de Wilcoxon pareado (con Holm sobre la familia) entre dos
 grupos, usando el marco consolidado de los dos.
-
-**No pasar `SOLVER`**: con `GE_PROTOCOL=1` el arnés usa los tres solvers y
-ambas mutaciones, que es lo que produce el formato `evaluation_results/` del
-original. Ver `docs/hv_protocolo_original.md` (por qué los HV de corridas
-distintas no son comparables entre sí).
 
 Se guarda todo para no repetir el MOEA: `fronts.npz` (frentes crudos),
 `failures.json` (motivo de cada fallo), `hv_por_instancia/<instancia>.csv`
