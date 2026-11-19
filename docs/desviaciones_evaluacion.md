@@ -59,6 +59,12 @@ con `_nondominated` + `comprobate_frame` del arnés en 300 conjuntos aleatorios
 se construye igual: unión de todos los puntos → `unique` → NDS → pelado si
 tiene ≤2 puntos → min/max por objetivo del frente resultante.
 
+Verificación end-to-end para **K=2, 3, 4 y 5** (12 frentes aleatorios por K):
+el frente consolidado salió byte a byte igual y los HV de los 12 frentes
+coincidieron con `np.allclose` en los cuatro casos. El nadir usado fue
+`[1.1]*K` en ambos lados (el de la copia local corregida; el `[1.1, 1.1]` del
+GitHub lanza `ValueError` para K≥3).
+
 ## Coincide (sin desviación)
 
 | Elemento | Original | Arnés |
