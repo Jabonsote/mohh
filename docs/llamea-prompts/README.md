@@ -28,6 +28,7 @@ Solo para diseño, evidencia o análisis; no hace falta para lanzar una corrida:
 | [`pruebas-locales.md`](pruebas-locales.md) | Corridas locales y fallas típicas. |
 | [`prompt-metodologia-busqueda.md`](prompt-metodologia-busqueda.md) | **Prompt**: búsqueda GE y ranking (1+1, `compute_rank`, datos reales de `glm-gptoss2`). |
 | [`prompt-metodologia-evaluacion.md`](prompt-metodologia-evaluacion.md) | **Prompt**: marco de evaluación completo (HV, nadir `[1.1]^K`, marco consolidado, comparabilidad, estadística). |
+| [`prompt-video-ranking-ge.md`](prompt-video-ranking-ge.md) | **Prompt de video**: ranking original de GE (`compute_rank`), con datos reales incrustados. |
 | [`comparacion-justa.md`](comparacion-justa.md) | Evaluación pareada y resultados. |
 | [`mejoras-prompt.md`](mejoras-prompt.md) | Mejoras y plan de ablación. |
 | [`areas-de-mejora.md`](areas-de-mejora.md) | Mejoras del bucle completo. |
