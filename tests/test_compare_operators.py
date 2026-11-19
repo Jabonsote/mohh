@@ -256,3 +256,43 @@ def test_ge_layout_matches_the_original_evaluation(tmp_path):
     text = open(catalog, encoding="utf-8").read()
     assert "ox: classic:ox" in text
     assert "llamea: code" in text
+
+
+def test_initial_solutions_have_real_and_permutation(tmp_path):
+    """El layout estandar escribe las dos representaciones y las semillas."""
+    from mohh.evaluation.results_layout import write_initial_solutions
+
+    real = [np.array([[0.1, 0.9], [0.8, 0.2]])]
+    permutation = [np.array([[0, 1], [1, 0]])]
+    write_initial_solutions(str(tmp_path), "KC11", real, permutation, [42])
+
+    for kind in ("permutation", "real"):
+        folder = tmp_path / "initial_solutions" / kind / "KC11"
+        assert (folder / "experiment_001.txt").is_file()
+        assert (folder / "seeds.txt").read_text(encoding="utf-8") == "42\n"
+    perm_text = (tmp_path / "initial_solutions" / "permutation" / "KC11"
+                 / "experiment_001.txt").read_text(encoding="utf-8")
+    real_text = (tmp_path / "initial_solutions" / "real" / "KC11"
+                 / "experiment_001.txt").read_text(encoding="utf-8")
+    assert "[000, 001]" in perm_text
+    assert "[0.1000, 0.9000]" in real_text
+
+
+def test_write_figures_creates_nm_and_wm_pngs(tmp_path):
+    """Las figuras del original van en Figures/{NoMutation,WithMutation}/."""
+    import pandas as pd
+
+    from mohh.evaluation.results_layout import write_figures
+
+    folder = tmp_path / "MOEAD" / "30k"
+    folder.mkdir(parents=True)
+    pd.DataFrame({
+        "Experiment": [1, 2],
+        "MOEAD_llamea_NM_MOEAD": [0.5, 0.6],
+        "MOEAD_llamea_WM_MOEAD": [0.4, 0.55],
+    }).to_csv(folder / "KC11.csv", index=False)
+
+    write_figures(str(tmp_path), ["MOEAD"], ["30k"])
+
+    assert (folder / "Figures" / "NoMutation" / "KC11_NM.png").is_file()
+    assert (folder / "Figures" / "WithMutation" / "KC11_WM.png").is_file()

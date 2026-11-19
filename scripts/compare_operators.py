@@ -77,6 +77,14 @@ import numpy as np
 from mohh.core.utilities.algorithm.MO import compute_hypervolume
 from mohh.core.utilities.instance_utils import instance_paths
 from mohh.evaluation.operators.crossover import CX_Cross, PMX_Cross
+from mohh.evaluation.results_layout import (
+    ge_column_name,
+    random_key_population,
+    write_front,
+    write_figures,
+    write_evaluation_layout,
+    write_initial_solutions,
+)
 from mohh.llamea.fitness import (
     EVAL_BUDGETS,
     NADIR_FACTOR,
@@ -352,9 +360,16 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
     # (forkserver) y necesitan MO_GENERATIONS/MO_POPULATION_SIZE y las
     # direcciones de referencia. Con snapshots, MO_GENERATIONS es el ultimo
     # presupuesto (500), no el presupuesto de analisis.
+    # Con GE_PROTOCOL las etiquetas son 10k/30k/50k; sin el, una etiqueta
+    # arbitraria (p. ej. "1k") que no esta en EVAL_BUDGETS: usar los valores
+    # explicitos en vez de indexar y morir con KeyError.
+    generations = max(
+        EVAL_BUDGETS[label] // 105 if label in EVAL_BUDGETS else args.mo_generations
+        for label in labels)
+    population = 105 if getattr(args, "ge_protocol", False) else args.mo_population_size
     evaluator = build_evaluator(
-        paths, mo_generations=max(EVAL_BUDGETS[label] // 105 for label in labels),
-        mo_population_size=105, seed=args.seed,
+        paths, mo_generations=generations,
+        mo_population_size=population, seed=args.seed,
         model_name=protocols[0][0], mutation=protocols[0][1], normalize=False,
         instance_timeout=None,
     )
@@ -374,14 +389,17 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
     for index, instance in enumerate(instances):
         n_variables = instance.initial_solutions.shape[1]
         instance_name = os.path.splitext(os.path.basename(paths[index]))[0]
-        by_rep = [
-            _initial_permutations(
+        populations = [
+            random_key_population(
                 n_variables, population_size,
                 np.random.default_rng(args.seed + rep * 1_000 + index))
             for rep in range(args.repeats)
         ]
-        initial[index] = by_rep
-        write_initial_solutions(out_dir, instance_name, by_rep, seeds)
+        real_by_rep = [real for real, _perm in populations]
+        perm_by_rep = [perm for _real, perm in populations]
+        initial[index] = perm_by_rep
+        write_initial_solutions(out_dir, instance_name, real_by_rep,
+                                perm_by_rep, seeds)
 
     tasks = []
     for rep in range(args.repeats):
@@ -942,24 +960,6 @@ def _ci(row):
     return f"[{low:+.6f}, {high:+.6f}]"
 
 
-def write_front(front, file_path):
-    """Escribe un frente en el formato `.pof` del original.
-
-    Cabecera `# N M` y una fila por punto en notacion cientifica: el mismo
-    formato que escribe `mohh/evaluation/experiment.py`, para que los frentes
-    de esta comparacion se puedan leer con las herramientas del original.
-    """
-    array = np.asarray(front, dtype=float)
-    if array.ndim != 2:
-        return
-    n_rows, n_cols = array.shape
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    with open(file_path, "w") as handle:
-        handle.write(f"# {n_rows} {n_cols}\n")
-        for row in array:
-            handle.write(" ".join(f"{num:1.6e}" for num in row) + "\n")
-
-
 # --------------------------------------------------------------------------- #
 # Estructura de la evaluacion original (`experiment.py`)
 # --------------------------------------------------------------------------- #
@@ -975,11 +975,6 @@ def budget_label(mo_generations, mo_population_size):
     if thousands >= 1:
         return f"{thousands}k"
     return f"{mo_generations}x{mo_population_size}"
-
-
-def ge_column_name(solver, mutation, name):
-    """`<solver>_<operador>_<NM|WM>_<solver>`, como en `experiment.py`."""
-    return f"{solver}_{name}_{'WM' if mutation else 'NM'}_{solver}"
 
 
 def write_operator_catalog(out_dir, operators):
@@ -999,31 +994,6 @@ def write_operator_catalog(out_dir, operators):
                 text = source
             handle.write(f"{name}: {text}\n")
     return path
-
-
-def _initial_permutations(n_variables, population_size, rng):
-    """Una poblacion inicial de permutaciones (una por individuo)."""
-    return np.array([rng.permutation(n_variables) for _ in range(population_size)],
-                    dtype=int)
-
-
-def write_initial_solutions(out_dir, instance_name, solutions_by_rep, seeds):
-    """`initial_solutions/permutation/<instancia>/experiment_XXX.txt` + seeds.txt.
-
-    Es la estructura del original (`experiment.py`): una poblacion inicial
-    **por repeticion**, con su semilla, para poder reproducir cada corrida.
-    """
-    folder = os.path.join(out_dir, "initial_solutions", "permutation",
-                          instance_name)
-    os.makedirs(folder, exist_ok=True)
-    for rep, sols in enumerate(solutions_by_rep, start=1):
-        with open(os.path.join(folder, f"experiment_{rep:03d}.txt"), "w",
-                  encoding="utf-8") as handle:
-            for sol in sols:
-                handle.write("[" + ", ".join(f"{int(w):03d}" for w in sol) + "]\n")
-    with open(os.path.join(folder, "seeds.txt"), "w", encoding="utf-8") as handle:
-        for seed in seeds:
-            handle.write(f"{seed}\n")
 
 
 def write_run_metrics_summary(out_dir, n_instances, n_runs, n_failures,
@@ -1046,108 +1016,15 @@ def write_run_metrics_summary(out_dir, n_instances, n_runs, n_failures,
 
 def write_ge_layout(out_dir, args, fronts, values, frames, operators, protocols,
                     failures=None, labels=None):
-    """Escribe la evaluacion con la estructura del original (`experiment.py`).
+    """Delega en `mohh.evaluation.results_layout` (ver modulo para el detalle).
 
-    * `<solver>/<presupuesto>/<instancia>.csv`: una fila por repeticion y una
-      columna por operador, con el nombre `<solver>_<operador>_<NM|WM>_<solver>`
-      que usa el original. Un CSV por presupuesto (10k/30k/50k, como el
-      original).
-    * `<solver>/<presupuesto>/fronts/<instancia>/<columna>.pof` (y `_norm`):
-      el frente de la repeticion mediana; y `best_front_consolidated.pof` con
-      el marco consolidado de la instancia.
-    * `run_metrics/evaluation_<instancia>.json`: metricas por instancia.
+    Se mantiene el nombre por compatibilidad con tests y llamadores antiguos.
     """
-    failures = failures or {}
+    budgets = list(EVAL_BUDGETS)
     labels = labels or [budget_label(args.mo_generations, args.mo_population_size)]
-    solvers = []
-    for solver, _mutation in protocols:
-        if solver not in solvers:
-            solvers.append(solver)
-
-    # Columnas por solver: (solver, mutacion, protocolo, operador, columna).
-    columns = {solver: [] for solver in solvers}
-    for solver, mutation in protocols:
-        for name, _ns, _kind, _src in operators:
-            columns[solver].append((solver, mutation,
-                                    protocol_name(solver, mutation), name,
-                                    ge_column_name(solver, mutation, name)))
-
-    for solver in solvers:
-      for label in labels:
-        for index, path in enumerate(args.paths):
-            # El original nombra los ficheros sin extension (`KC11-2fl-1rl.csv`).
-            instance = os.path.splitext(os.path.basename(path))[0]
-            folder = os.path.join(out_dir, solver, label)
-            os.makedirs(folder, exist_ok=True)
-
-            # -- CSV por instancia (formato del original) --------------------
-            with open(os.path.join(folder, f"{instance}.csv"), "w",
-                      newline="", encoding="utf-8") as handle:
-                # `\n` como el original (pandas `to_csv`), no `\r\n`.
-                writer = csv.writer(handle, lineterminator="\n")
-                writer.writerow(["Experiment"]
-                                + [col for _s, _m, _p, _n, col in columns[solver]])
-                for rep in range(args.repeats):
-                    row = [rep + 1]
-                    for _s, _m, protocol, name, _col in columns[solver]:
-                        values_row = values.get((protocol, name, rep, label))
-                        if values_row is not None and index < len(values_row) \
-                                and values_row[index] is not None:
-                            row.append(f"{values_row[index]:.10g}")
-                        else:
-                            row.append("")
-                    writer.writerow(row)
-
-            # -- Frentes (repeticion mediana por operador) ------------------
-            frame = frames.get((label, index)) if isinstance(frames, dict) else (
-                frames[index] if index < len(frames) else None)
-            bounds = None
-            if frame is not None and len(frame):
-                vmin, vmax = frame.min(axis=0), frame.max(axis=0)
-                if not np.any(vmax == vmin):
-                    bounds = (vmin, vmax)
-            front_dir = os.path.join(folder, "fronts", instance)
-            for solver_p, mutation, _protocol, name, col in columns[solver]:
-                selected = _median_front(fronts, values, name, index,
-                                         [(solver_p, mutation)], args.repeats,
-                                         label=label)
-                if selected is None:
-                    continue
-                write_front(selected, os.path.join(front_dir, f"{col}.pof"))
-                if bounds is not None:
-                    write_front(clip_to_reference_box(
-                        normalize_front(selected, bounds)),
-                        os.path.join(front_dir, f"{col}_norm.pof"))
-            if frame is not None and len(frame):
-                write_front(frame, os.path.join(front_dir,
-                                                "best_front_consolidated.pof"))
-                if bounds is not None:
-                    write_front(clip_to_reference_box(
-                        normalize_front(frame, bounds)),
-                        os.path.join(front_dir,
-                                     "best_front_consolidated_norm.pof"))
-
-            # -- Metricas por instancia -------------------------------------
-            metrics = {
-                "phase": "evaluation",
-                "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "instance": instance,
-                "solver": solver,
-                "budget": label,
-                "counters": {
-                    "evaluations": len(columns[solver]) * args.repeats,
-                    "failures": sum(1 for key in failures
-                                    if key[0] in (protocol_name(solver, False),
-                                                  protocol_name(solver, True))),
-                },
-            }
-            metrics_dir = os.path.join(out_dir, "run_metrics")
-            os.makedirs(metrics_dir, exist_ok=True)
-            with open(os.path.join(metrics_dir,
-                                   f"evaluation_{instance}.json"), "w",
-                      encoding="utf-8") as handle:
-                json.dump(metrics, handle, indent=1)
-
+    return write_evaluation_layout(
+        out_dir, args.paths, budgets, operators, protocols, values, frames,
+        fronts, args.repeats, failures=failures, labels=labels)
 
 def write_instance_artifacts(out_dir, args, fronts, values, frames, operators,
                              protocols):
@@ -1587,6 +1464,17 @@ def main():
         args.mutation_both = True
     protocols = build_protocols(args)
 
+    # Validar grupos/contrastes ANTES de lanzar el MOEA: un typo aqui hacia
+    # que la corrida terminara los 7440 frentes y muriera en el analisis.
+    groups = parse_groups(args.group)
+    contrasts = parse_contrasts(args.contrast)
+    for left, right in contrasts:
+        for group in (left, right):
+            if group not in groups:
+                raise SystemExit(
+                    f"el contraste {left}:{right} usa el grupo {group!r}, que no "
+                    f"esta declarado (usa --group {group}=op1,op2)")
+
     init_params(RANDOM_SEED=args.seed)
     all_paths = instance_paths(train=args.split == "train")
     args.paths = _select_instances(all_paths, args.instances, args.seed)
@@ -1665,11 +1553,15 @@ def main():
     # Presupuestos de la evaluacion (10k/30k/50k como el original). Con
     # GE_PROTOCOL=1 los tres salen de la misma corrida (snapshots); sin el,
     # uno solo (el final).
-    labels = list(EVAL_BUDGETS) if args.ge_protocol else [budget_label(
-        args.mo_generations, args.mo_population_size)]
-    init_params(MO_GENERATIONS=max(EVAL_BUDGETS[label] // 105
-                                   for label in labels),
-                MO_POPULATION_SIZE=105)
+    if args.ge_protocol:
+        labels = list(EVAL_BUDGETS)
+        init_params(MO_GENERATIONS=max(EVAL_BUDGETS[label] // 105
+                                       for label in labels),
+                    MO_POPULATION_SIZE=105)
+    else:
+        labels = [budget_label(args.mo_generations, args.mo_population_size)]
+        init_params(MO_GENERATIONS=args.mo_generations,
+                    MO_POPULATION_SIZE=args.mo_population_size)
 
     start = time.time()
     fronts, failures = collect_fronts(operators, args.paths, args, protocols,
@@ -1730,14 +1622,6 @@ def main():
         )
         stability = rank_stability(scores, operators)
 
-        groups = parse_groups(args.group)
-        contrasts = parse_contrasts(args.contrast)
-        for left, right in contrasts:
-            for group in (left, right):
-                if group not in groups:
-                    raise SystemExit(
-                        f"el contraste {left}:{right} usa el grupo {group!r}, que no "
-                        f"esta declarado (usa --group {group}=op1,op2)")
         group_results = []
         if contrasts:
             group_results = add_holm(
@@ -1842,6 +1726,9 @@ def main():
         # el catalogo de operadores usados.
         write_ge_layout(out_dir, args, fronts_all, values_all, frames_all,
                         operators, protocols, failures, labels=labels)
+        # Figuras del original: <solver>/<budget>/Figures/{NoMutation,WithMutation}/
+        write_figures(out_dir, sorted({solver for solver, _ in protocols}),
+                      list(EVAL_BUDGETS) if args.ge_protocol else labels)
         catalog = write_operator_catalog(out_dir, operators)
         write_report(os.path.join(out_dir, "report.md"), name, args, rows,
                      comparisons, frames, scores, values, operators, protocols,
