@@ -84,7 +84,7 @@ GitHub lanza `ValueError` para K≥3).
 | Marco | unión de todos los frentes → NDS → `comprobate` | `shared_frame` + `_frame_from_points` idénticos |
 | Normalización | `(f-vmin)/(vmax-vmin)` | `normalize_front` idéntica |
 | HV | `pymoo.HV(ref_point=nadir)` | igual (`MO.py` solo añade logging) |
-| MOEAD `ref_dirs` | `n_points=105` | `n_partitions=104` → 105 direcciones (K=2, equivalente) |
+| MOEAD `ref_dirs` | `n_points=105` (K=4/5 **lanza excepción**) | elige el `n_partitions` más cercano y ajusta `pop_size`: K=2→105, K=3→105, K=4→120, K=5→126 |
 | NSGAII / SMSEMOA | `pop_size`, `sampling`, operadores | igual |
 | Parser instancias | cabecera con espacios | `=` → espacio (solo formato del dataset) |
 | Estructura de salida | `evaluation_results/` | `results_layout.py` la reproduce |
@@ -134,6 +134,24 @@ replicar exactamente la GE, hay que añadir esa opción al arnés.
   en la GE (el generador de tablas del arnés espera `_<solver>`).
 - `Figures/` las genera `results_layout.write_figures` en vez de
   `make_plots.py`, con la misma lógica de boxplots y límites ±5 %.
+
+### 4b. Población del MOEAD para K=4/5
+
+Original (`algorithms.py:139`): `get_reference_directions("uniform", K,
+n_points=self.pop_size)`. Verificado con pymoo:
+
+| K | original (`n_points=105`) | arnés (`n_partitions` más cercano) |
+|---|---|---|
+| 2 | 105 direcciones | 105 |
+| 3 | 105 direcciones | 105 |
+| 4 | **Excepción**: "n_points=105 can not be created uniformly; choose 84 or 120" | 120 |
+| 5 | **Excepción** (análogo) | 126 |
+
+Otro punto donde el original no puede ejecutarse con el dataset mixto. El
+arnés ajusta `self.pop_size = len(ref_dirs)` y rellena/recorta la población
+inicial. **No afecta a la comparabilidad interna**: todos los operadores de
+una corrida usan la misma `pop_size` en la misma instancia. Sí cambia los HV
+frente a un hipotético experimento original que sí hubiera podido correr K=4/5.
 
 ## Conclusión
 
