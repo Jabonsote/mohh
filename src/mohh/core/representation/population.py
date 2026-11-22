@@ -6,13 +6,10 @@ class Population():
 
     def __init__(self, operator) -> None:
         
-        # Store individuals
         self.individuals = []
 
-        # Initialization method
         self.initialize_operator = operator
 
-        # Keep record of the number of individuals
         self.num_individuals_created = 0
 
     def initialize_population(self, population_size: int):
@@ -22,13 +19,10 @@ class Population():
         @param population_size: Number of individuals to create.
         """
 
-        # Store data
         self.population_size = population_size
 
-        # Make use of the operator to start a population
         self.individuals = self.initialize_operator.run(self.population_size)
 
-        # Add a name to each individual
         for i in range(self.population_size):
             self.individuals[i].name = f"Individual_{self.num_individuals_created+1:06d}"
             self.num_individuals_created += 1

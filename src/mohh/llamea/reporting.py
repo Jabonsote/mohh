@@ -265,8 +265,7 @@ class ResultsExperimentLogger(ExperimentLogger):
         with open(os.path.join(self.dirname, "generation_summary.jsonl"), "a") as file:
             file.write(json.dumps(record) + "\n")
 
-        # Progreso en un archivo de una sola linea (para `tail -f` en el cluster,
-        # donde el .out de SLURM se buffea y cuesta ver el avance).
+        # Progreso en una sola línea (legible con `tail -f`).
         progress = (
             f"gen {record['generation']}  best={record['best_fitness']}  "
             f"mean={record['mean_fitness']}  valid={record['evaluated']}/"

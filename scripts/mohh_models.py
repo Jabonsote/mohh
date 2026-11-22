@@ -1,7 +1,7 @@
 """CLI de pesos persistentes de modelos (`mohh.llamea.models`).
 
-En el cluster ixachi `$HOME` y `/tmp` no son visibles desde los nodos de
-computo y se limpian; los pesos de un modelo de 14B-32B son 8-60 GB. Este CLI
+Sin `$HOME`/`/tmp` persistentes en computo; los pesos de un modelo de
+14B-32B son 8-60 GB. Este CLI
 los descarga/verifica una sola vez en la raiz persistente y de ahi los lee vLLM.
 
 Subcomandos:

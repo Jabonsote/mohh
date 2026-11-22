@@ -171,8 +171,7 @@ class OperatorEvaluator:
         self.protocols = [(name, mut) for name in names for mut in muts]
         self.instance_timeout = instance_timeout
         # Paralelismo dentro de un candidato: una tarea por instancia. Con
-        # `1` se conserva el bucle secuencial historico. El cluster lo activa
-        # con `FITNESS_WORKERS` (ver slurm/llamea-single.slrm).
+        # `1` se conserva el bucle secuencial historico.
         self.fitness_workers = max(1, int(fitness_workers or 1))
         self.normalize = normalize
         self.bounds = bounds
@@ -212,7 +211,6 @@ class OperatorEvaluator:
 
     # -- infraestructura -------------------------------------------------- #
     def __getstate__(self):
-        """Recrea las instancias en el proceso hijo al deserializar."""
         state = self.__dict__.copy()
         state["_instances"] = None
         state.pop("_fronts_lock", None)

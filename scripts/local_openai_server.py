@@ -2,8 +2,7 @@
 
 Cumple la misma interfaz que vLLM (`/v1/models`, `/v1/chat/completions`), asi
 que `mohh.llamea` se puede probar de extremo a extremo en una maquina pequena
-(por ejemplo una RTX 3060) sin instalar vLLM. En el cluster usa vLLM
-(`slurm/llamea-vllm-server.slrm`), que es mucho mas eficiente y deja el modelo
+(por ejemplo una RTX 3060) sin instalar vLLM. vLLM deja el modelo
 cargado en GPU.
 
 Requiere el extra `local-server`:

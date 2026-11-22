@@ -46,7 +46,7 @@ def _setup_logging(exp_dir):
     En el cluster los `.out`/`.err` de SLURM se buffean y un job puede morir sin
     dejar rastro. Estos dos archivos quedan dentro del experimento y `error.log`
     sobrevive incluso a un fallo temprano (servidor caido, modelo ausente), que
-    es justo lo que hay que diagnosticar cuando "el cluster no funciona".
+    es justo lo que hay que diagnosticar.
     """
     os.makedirs(exp_dir, exist_ok=True)
     logger = logging.getLogger("mohh.llamea")

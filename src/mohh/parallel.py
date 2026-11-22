@@ -2,12 +2,10 @@
 Auxiliar de paralelización simple con un pool de procesos.
 
 Ejecuta tareas independientes (corridas MOEA/D o de cualquier otro MOEA)
-sobre todos los núcleos disponibles de forma dinámica. Ninguna tarea cambia
-su lógica: el proceso principal reparte las tareas, cada worker hace
-lo que haria el proceso principal, y el proceso principal
-recoge los resultados y aplica las mismas actualizaciones de estado.
+sobre todos los núcleos disponibles de forma dinámica. Cada tarea conserva
+su lógica y el estado se actualiza igual que en la ejecución secuencial.
 
-Robustez (evaluación larga en clúster):
+Robustez:
 
 * ``on_error="raise"`` (por defecto) conserva el comportamiento histórico:
   una excepción de un worker aborta la tanda. ``on_error="record"`` la

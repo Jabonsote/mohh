@@ -30,7 +30,7 @@ Ejemplos:
     python -m mohh.llamea.run --model Qwen/Qwen2.5-1.5B-Instruct \
         --base-url http://localhost:8000/v1 --budget 100
 
-    # en el cluster, contra el nodo del job vLLM
+    # contra un servidor remoto
     python -m mohh.llamea.run --model Qwen/Qwen2.5-7B-Instruct \
         --base-url http://gpu-nodo:8000/v1 --wait-server --eval-test
 """
@@ -120,8 +120,7 @@ def run_llamea(args):
         try:
             from mohh.llamea import models as model_store
 
-            # Pesos en la raiz persistente (LUSTRE/$SCRATCH), no en $HOME:
-            # el ambiente del cluster borra el home y los nodos no lo ven.
+            # Pesos en la raiz persistente: `$HOME` no es persistente.
             model_store.configure_hf_env()
             model_store.download_model(args.model)
         except Exception:

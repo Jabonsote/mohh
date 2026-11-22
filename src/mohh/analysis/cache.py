@@ -1,18 +1,7 @@
 """
-Cache en disco para que el analisis nunca repita trabajo ya hecho.
-
-Cache de resultados caros (31 corridas por combinacion).
-resultado de cada tarea (un frente por presupuesto) en un `.npz` con un
-nombre determinista derivado de la tarea, de forma que:
-
-* relanzar el script reutiliza lo ya calculado;
-* borrar un solo `.npz` fuerza a recalcular solo esa tarea;
-* el contenido lleva dentro la huella del problema y de los parametros, de modo
-  que cambiar el presupuesto o la semilla no se confunda con un resultado
-  viejo.
-
-No se genera ningun dato aqui: solo se guarda o se recupera lo que las tareas
-ya produjeron.
+Caché determinista de resultados por tarea. Guarda cada resultado en un `.npz`
+con un nombre derivado de la tarea: relanzar el analisis reutiliza lo ya
+calculado y borrar un `.npz` recalcula solo esa tarea.
 """
 
 import hashlib

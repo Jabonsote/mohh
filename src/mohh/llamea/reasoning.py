@@ -77,5 +77,4 @@ def thinking_payload(spec: ReasoningSpec, thinking) -> dict | None:
 
 
 def resolve_path(path: str) -> ReasoningSpec:
-    """Igual que ``resolve`` pero para un id dado como texto (util en CLI)."""
     return resolve(path)

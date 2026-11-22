@@ -50,8 +50,7 @@ def init_params(**overrides):
     """Inicializa el singleton `Params` con los defaults del protocolo.
 
     Reutiliza `mohh.generation.params.params_dict` (los mismos defaults que la
-    busqueda gramatical: DATASET, PROBLEM_NAME, etc.) y aplica overrides. Es
-    idempotente y deja el entorno consistente para `Instance` y `MOSolver`.
+    busqueda gramatical: DATASET, PROBLEM_NAME, etc.) y aplica overrides.
     """
     from mohh.generation.params import params_dict
     from mohh.core.params import Params
@@ -179,7 +178,7 @@ def _solve_front_namespace(instance, namespace, seed, model_name, mutation,
     from mohh.generation.algorithm.multiobjective import MOSolver
     from mohh.shared.operators import LLMOperator
 
-    # Semilla determinista por corrida (igual que el worker GE).
+    # Semilla determinista por corrida.
     np.random.seed(seed)
     solver = MOSolver(seed=seed)
     # El operador se inyecta directamente en el solver; la ruta GE

@@ -28,8 +28,7 @@ Lo que hace este modulo
 -----------------------
 Congela la escala en un JSON reutilizable: se calcula una vez sobre el
 consolidado de los experimentos que se quieran comparar, se guarda, y todos
-miden con esos mismos `vmin/vmax` y el mismo `ref_point`. La escala queda ademas
-escrita junto a los resultados, de modo que el HV se puede auditar y rehacer.
+miden con esos mismos `vmin/vmax` y el mismo `ref_point`.
 """
 
 from __future__ import annotations
@@ -388,9 +387,7 @@ def restringir_escala(scale: "HvScale", instances: Iterable[str],
     """Copia de `scale` limitada a `instances`, conservando `ref_point`.
 
     Se usa para sanear una escala congelada antes de medir un split: quita las
-    instancias degeneradas (`instancias_sin_escala`) sin cambiar los limites de
-    las demas, de modo que todos los individuos y generaciones siguen midiendose
-    con exactamente los mismos `vmin/vmax`.
+    instancias degeneradas sin cambiar los límites.
 
     @param scale: escala de origen.
     @param instances: instancias que se quieren conservar.

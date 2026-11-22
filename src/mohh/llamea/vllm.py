@@ -4,9 +4,6 @@ El modelo **queda cargado en la GPU** del servidor (vLLM) y LLaMEA solo manda
 peticiones HTTP a `/v1`; asi el bucle evolutivo no paga la carga del modelo en
 cada iteracion. El modelo es local: `ensure_model` verifica que este descargado
 y, si falta, lo descarga al cache de HuggingFace.
-
-Pensado para el cluster: el servidor corre en un job con GPU y la busqueda en
-otro nodo apuntando a `http://<nodo-del-servidor>:8000/v1`.
 """
 
 import json

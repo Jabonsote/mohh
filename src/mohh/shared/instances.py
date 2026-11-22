@@ -5,8 +5,8 @@ import random
 
 def select_instances(paths, amount, seed):
     # `os.listdir` no garantiza orden entre sistemas de ficheros. Ordenar antes
-    # de muestrear hace que el mismo `--seed` seleccione las mismas instancias en
-    # el cluster y en local (la comparacion pareada depende de ello).
+    # de muestrear hace que el mismo `--seed` seleccione las mismas instancias,
+    # para que la comparación pareada sea estable.
     ordered = sorted(str(path) for path in paths)
     if amount == "all":
         return ordered

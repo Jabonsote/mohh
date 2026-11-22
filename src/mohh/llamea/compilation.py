@@ -26,8 +26,8 @@ class EarlyStop(BaseException):
     """Parada temprana: el mejor ranking no mejoro en `patience` evaluaciones.
 
     El evaluador la lanza desde `__call__` y `run.py` la captura para cerrar la
-    corrida con el mejor operador guardado (no se pierde nada y no se gastan
-    cientos de generaciones repitiendo el mismo anclaje).
+    corrida con el mejor operador guardado sin gastar cientos de generaciones
+    repitiendo el mismo anclaje.
 
     Hereda de `BaseException` a proposito: LLaMEA envuelve la evaluacion en
     `try/except Exception` (llamea.py, `evolve_solution`) y convertiria la
@@ -43,7 +43,7 @@ COMPILE_TIMEOUT = 30.0         # segundos para `exec` del codigo del LLM (códig
 
 #: Nombre de fichero ficticio con el que se compila el codigo del LLM. Se
 #: registra en `linecache` para que el traceback muestre la linea exacta que
-#: fallo, que es la parte mas util del feedback (ver `_exception_feedback`).
+#: fallo (ver `_exception_feedback`).
 OPERATOR_FILENAME = "<llm-operator>"
 
 

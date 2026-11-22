@@ -4,8 +4,7 @@ Lectura de los artefactos que deja una corrida de `mohh-generate`/`mohh-evaluate
 Todo lo que el analisis necesita del disco entra por aqui: los individuos con
 sus frentes por instancia, las generaciones, los operadores publicados en
 `<modelo>_operators.txt`, las poblaciones iniciales reales y los CSV de
-`mohh-evaluate`. Ninguna funcion de este modulo inventa datos: si un archivo no
-existe, lo dice con el nombre del archivo que falta.
+`mohh-evaluate`.
 """
 
 import hashlib

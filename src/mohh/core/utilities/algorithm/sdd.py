@@ -79,8 +79,7 @@ class SDD():
     """
     SDD reutilizable sobre una matriz de valores obtenidos O_i.
 
-    La clase no mantiene estado entre llamadas, de modo que la misma
-    instancia puede usarse en cada generacion del bucle evolutivo.
+    La clase no mantiene estado entre llamadas.
 
     @param metric_type: indicador de la familia {HV, R2, IGD+, Delta_p}.
     @param aggregation: como colapsar las K corridas independientes de cada

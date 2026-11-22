@@ -1,7 +1,7 @@
 """Verifica (y opcionalmente descarga) un modelo local de HuggingFace.
 
 El modelo usado por LLaMEA es local (lo sirve vLLM); este script confirma que
-ya esta en el cache de HuggingFace antes de enviar un job al cluster:
+ya esta en el cache de HuggingFace:
 
     python scripts/ensure_model.py Qwen/Qwen2.5-1.5B-Instruct
     python scripts/ensure_model.py Qwen/Qwen2.5-1.5B-Instruct --check   # no descarga

@@ -5,13 +5,10 @@ from mohh.core.utilities.instance_utils import instance_paths
 
 def execute_generation(mo_model: str, experiment_path: str, overrides: dict = None) -> str:
 
-    # First set the parameters of the experiment
     set_params(experiment_path, mo_model, overrides)
 
-    # Load params
     params = Params()
 
-    # Assemble an algorithm with its operators
     algorithm = (HyperHeuristic()
                  .load_operator("initialization", params["INITIALIZATION"])
                  .load_operator("selection", "Tournament", k=params["TOURNAMENT_SIZE"])

@@ -1,8 +1,7 @@
 """Pesos de modelos en disco **persistente** (no en `$HOME`, que se borra).
 
-En el cluster ixachi todo trabajo vive dentro de `/LUSTRE/<usuario>/` (ver
-`cluster.md` §2): `$HOME` y `/tmp` no son visibles desde los nodos de cómputo y
-se limpian. Los pesos de un modelo de 14B-32B son 8-60 GB, así que se descargan
+Los pesos requieren disco persistente: `$HOME`/`/tmp` se limpian. Los pesos de
+un modelo de 14B-32B son 8-60 GB, así que se descargan
 **una sola vez** a un directorio persistente y de ahí los lee vLLM (y
 `transformers`, para la verificación local).
 
@@ -54,7 +53,6 @@ def models_root(explicit: str | None = None) -> str:
     if lustre and os.path.isdir(lustre):
         user = os.environ.get("USER") or os.environ.get("LOGNAME") or "user"
         return os.path.join(lustre, user, "mohh-models")
-    # ixachi define /LUSTRE pero no siempre exporta $LUSTRE en el login.
     # Preferir la ruta real antes de caer en $HOME, que no es persistente.
     user = os.environ.get("USER") or os.environ.get("LOGNAME") or "user"
     cluster_lustre = os.path.join("/LUSTRE", user)

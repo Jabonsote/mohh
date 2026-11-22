@@ -359,12 +359,6 @@ class QuadraticAssignment(Problem):
 
         return total_cost // 2
 
-        # -- In other words... --
-        #total_cost = 0
-        #for i in range(len(solution)):
-        #    for j in range(len(solution)):
-        #        total_cost += self.weights[function_indx, i, j] * self.positions[solution[i], solution[j]]
-
 
 class MOSampling(Sampling):
 
