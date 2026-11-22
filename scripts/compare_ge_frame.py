@@ -78,6 +78,7 @@ from functools import lru_cache
 
 import numpy as np
 
+from mohh.comparison.engine import _fmt
 from mohh.constants import EVAL_BUDGETS, N_EXPERIMENTS
 from mohh.core.utilities.algorithm.MO import (
     compute_hypervolume,
@@ -549,12 +550,6 @@ def _comparisons(scores, rows, baseline):
         summary.update({"operator": row["operator"], "baseline": base["operator"]})
         results.append(summary)
     return add_holm(results)
-
-
-def _fmt(value, digits=6, signed=False):
-    if value is None:
-        return "-"
-    return f"{value:+.{digits}f}" if signed else f"{value:.{digits}f}"
 
 
 def _write_report(path, args, rows, comparisons, frames, operators, protocols,
