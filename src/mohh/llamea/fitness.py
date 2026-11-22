@@ -39,6 +39,14 @@ from mohh.constants import (
     OPERATOR_CALL_TIMEOUT,
     REPEAT_PENALTY,
 )
+from mohh.shared.fronts import (
+    NADIR_FACTOR,
+    _consolidated_frame,
+    _nondominated,
+    clip_to_reference_box,
+    comprobate_frame,
+    normalize_front,
+)
 
 FALLBACK_SCORE = 0.0
 
@@ -691,121 +699,7 @@ def _solve_front_task(task):
         }
 
 
-#: Punto de nadir fijo sobre frentes normalizados (alias publico de `NADIR`).
-NADIR_FACTOR = NADIR
-
-
-def normalize_front(front, bounds):
-    """Normaliza un frente con sus limites (vmin, vmax) por objetivo.
-
-    Formula **identica** a `normalize_values` del proyecto original
-    (`mohh/evaluation/experiment.py`): ``(f - vmin) / (vmax - vmin)``. Si un
-    objetivo es degenerado (``vmax == vmin``) no hay escala y el resultado es
-    NaN, igual que en el original (alli la instancia queda invalidada). Quien
-    llama debe descartar esas instancias *antes* de normalizar; ver
-    `OperatorEvaluator._hv_values`.
-    """
-    vmin = np.asarray(bounds[0], dtype=float)
-    vmax = np.asarray(bounds[1], dtype=float)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        return (np.asarray(front, dtype=float) - vmin) / (vmax - vmin)
-
-
-def clip_to_reference_box(front, nadir=NADIR_FACTOR):
-    """Recorta objetivos al caja [0, nadir] antes de calcular HV.
-
-    En el marco GE el candidato forma parte del marco, asi que sus puntos
-    normalizados ya caen en [0, 1]. En el marco estacionario (panel fijo) un
-    candidato puede ser **mejor** que el mejor punto del panel; sin recortar,
-    sus coordenadas negativas inflan el HV por encima del maximo teorico
-    ``nadir**K`` y rompen la comparacion. Recortar a 0 cuenta esa mejora como
-    el volumen completo hasta el nadir, que es el maximo que el HV puede
-    expresar; los puntos peores que el nadir aportan 0.
-    """
-    return np.clip(np.asarray(front, dtype=float), 0.0, float(nadir))
-
-
-def _consolidated_frame(*point_sets):
-    """Frente no dominado de la union de varios conjuntos de puntos.
-
-    Reproduce el `consolidated[label]` del proyecto original: el marco de
-    normalizacion de una instancia es la envolvente no dominada de **todo** lo
-    evaluado en ella. Devuelve `None` si no hay puntos.
-    """
-    from mohh.core.utilities.algorithm.MO import non_dominated_sorting_vectorized
-
-    points = [np.asarray(points, dtype=float) for points in point_sets
-              if points is not None and len(points)]
-    if not points:
-        return None
-    stacked = np.vstack(points)
-    # Como el `set` del proyecto original: los puntos repetidos no cuentan.
-    stacked = np.unique(stacked, axis=0)
-    front = np.asarray(non_dominated_sorting_vectorized(stacked)[0], dtype=float)
-    return front
-
-
-def _nondominated(points):
-    """Filtra los puntos no dominados (misma regla que `MO.py`).
-
-    Barrido tras ordenar lexicograficamente: `O(n log n)` en vez de la matriz
-    `n x n x k` de booleanos, que con los ~28 000 puntos que consolida una
-    instancia ocupaba 2.4 GB por llamada. El conjunto y el orden son los
-    mismos que daba la version de broadcasting
-    (`tests/test_llamea_nondominated.py`).
-    """
-    from mohh.core.utilities.algorithm.MO import sign
-
-    array = np.asarray(points, dtype=float)
-    if len(array) <= 1:
-        return array
-    adjusted = array * sign
-    k = adjusted.shape[1]
-    # En el espacio `adjusted` el "mejor" es el MAYOR (`sign` vale -1 para
-    # minimizacion): un punto `p` esta dominado si existe `F` con `F >= p` en
-    # todos los objetivos y `F > p` en alguno.
-    order = np.lexsort([adjusted[:, j] for j in range(k - 1, -1, -1)])
-    sorted_p = adjusted[order]
-    front = []
-    for i in range(len(sorted_p)):
-        p = sorted_p[i]
-        if front:
-            f = sorted_p[front]
-            if np.any(np.all(f >= p, axis=1) & np.any(f > p, axis=1)):
-                continue                      # p esta dominado por el frente
-            kill = np.all(p >= f, axis=1) & np.any(p > f, axis=1)
-            if np.any(kill):
-                front = [idx for idx, dead in zip(front, kill) if not dead]
-        front.append(i)
-    # En el orden original de entrada, como la version de broadcasting
-    # (`array[~dominates.any(axis=0)]`): el marco sale byte a byte igual.
-    mask = np.zeros(len(array), dtype=bool)
-    mask[order[front]] = True
-    return array[mask]
-
-
-def comprobate_frame(points):
-    """`comprobate` del original (`mohh/evaluation/experiment.py`).
-
-    "Ensure nadir is not computed from a best_front that dominates every
-    other point. Stop peeling once there's nothing left beyond the current
-    front (tiny consolidated sets).": si el frente no dominado del consolidado
-    tiene 2 puntos o menos, se peelan y se recalcula.
-    """
-    if points is None:
-        return None
-    array = np.asarray(points, dtype=float)
-    if len(array) == 0:
-        return array
-    remaining = {tuple(point) for point in array}
-    front = _nondominated(array)
-    while len(front) <= 2 and len(remaining) > len(front):
-        for point in front:
-            remaining.discard(tuple(point))
-        if not remaining:
-            break
-        front = _nondominated(np.asarray(sorted(remaining), dtype=float))
-    return front
+# Frentes, normalizacion y recorte: reexportados desde `mohh.shared.fronts`.
 
 
 def _nd_merge(left, right):

@@ -23,7 +23,7 @@ from datetime import datetime
 
 import numpy as np
 
-from mohh.llamea.fitness import clip_to_reference_box, normalize_front
+from mohh.shared.fronts import clip_to_reference_box, normalize_front
 
 PERMUTATION_FMT = "{:03d}"
 REAL_FMT = "{:.04f}"
