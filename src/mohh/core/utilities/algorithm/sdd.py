@@ -19,7 +19,7 @@ Definicion (ecuaciones del pizatron):
     SDD(h) -> Fit.  Menor SDD = mayor estabilidad; es el valor de aptitud
     que consume el bucle evolutivo (menor es mejor).
 
-El modulo es autocontenido: no importa `mohh` a nivel de modulo, de modo que
+Sin imports de `mohh` a nivel de modulo, para poder usarlo sin el paquete.
 puede usarse como libreria independiente (fitness online) o para el analisis
 posthoc de los CSV de `mohh-evaluate`.
 """
@@ -32,7 +32,7 @@ import pandas as pd
 
 # Indicadores cuyo mejor valor conocido es el minimo.
 # Debe coincidir con `mohh.core.indicators.directions.MINIMIZATION_METRICS`
-# (el modulo no importa `mohh` a nivel de modulo para seguir siendo
+# (sin imports de `mohh` para seguir siendo
 # independiente; `tests/test_indicator_directions.py` comprueba la igualdad).
 _MINIMIZATION_METRICS = {"IGD+", "DELTA_P", "R2"}
 

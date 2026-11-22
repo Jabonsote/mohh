@@ -1,7 +1,7 @@
 """
 Cache en disco para que el analisis nunca repita trabajo ya hecho.
 
-La evaluacion de 31 corridas por combinacion es cara. Este modulo guarda el
+Cache de resultados caros (31 corridas por combinacion).
 resultado de cada tarea (un frente por presupuesto) en un `.npz` con un
 nombre determinista derivado de la tarea, de forma que:
 
@@ -67,7 +67,7 @@ def cache_path(root: str, task: dict) -> str:
     Ruta del `.npz` de una tarea dentro de `root`.
 
     La estructura replica la jerarquia logica (split/instancia/solver/
-    combinacion) para que sea facil de inspeccionar, y el nombre del archivo
+    combinacion) y el nombre del archivo
     lleva la huella para que dos tareas distintas nunca se pisen.
 
     @param root: carpeta raiz de la cache.

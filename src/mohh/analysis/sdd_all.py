@@ -14,7 +14,7 @@ definicion del protocolo:
     SDD: desviacion muestral de {x_i} sobre N - 1 grados de libertad
 
 Se apoya en `mohh.core.utilities.algorithm.sdd.SDD`, que ya valida entradas y
-ordena el ranking, de modo que la convencion no se duplica aqui. Este modulo
+ordena el ranking; la convencion no se duplica aqui.
 solo aporta la construccion de la matriz por indicador y la escritura de los
 artefactos (rankings, diferencias, texto legible).
 """

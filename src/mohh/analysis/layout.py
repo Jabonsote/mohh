@@ -7,7 +7,7 @@ El repositorio guarda los experimentos en dos formatos distintos:
 * `results/<fitness>/Experiment_001/` (un subdirectorio por la fitness con la
   que se genero, por ejemplo `results/R2/Experiment_001`).
 
-Este modulo acepta cualquiera de los dos y devuelve la raiz del experimento
+Acepta ambos formatos y devuelve la raiz del experimento.
 junto con un esquema de carpetas ordenado y numerado, de forma que todos los
 artefactos del analisis queden agrupados y en un orden reproducible.
 """

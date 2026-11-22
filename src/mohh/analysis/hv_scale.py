@@ -21,7 +21,7 @@ unidades, y el `ref_point` es una constante que no depende de nadie.
 Ese esquema es correcto DENTRO de una invocacion, pero no sobrevive a la
 comparacion entre corridas: cada `mohh-evaluate` recalcula sus `boundaries` desde
 su propio consolidado y no carga nada de disco, asi que `Experiment_001` y
-`Experiment_002` medidos por separado no comparten escala. Eso es exactamente el
+`Experiment_002` medidos por separado no comparten escala:
 fallo que arrastraba el analisis offline.
 
 Lo que hace este modulo
@@ -327,7 +327,7 @@ def load_hv_scale_from_evaluation(experiment_root: str,
 
     if not bounds and candidatos:
         # Varios presupuestos escriben la misma instancia. Si discrepan, elegir
-        # uno en silencio daria una escala arbitraria: es exactamente la
+        # uno en silencio daria una escala arbitraria:
         # inconsistencia que hace incomparables los HVs, asi que se rechaza.
         inconsistentes = []
         for instancia, por_label in sorted(candidatos.items()):
