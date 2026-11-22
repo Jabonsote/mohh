@@ -33,6 +33,14 @@ from mohh.core.indicators.directions import (
 )
 from mohh.core.indicators.igd import igd, igd_plus
 from mohh.core.indicators.r2 import r2, uniform_weights
+from mohh.core.indicators.reference_sets import (
+    NADIR_MARGIN,
+    ReferenceSet,
+    ReferenceSetError,
+    load_reference_sets,
+    pooled_reference_sets,
+    read_pof,
+)
 
 __all__ = [
     "DIRECTIONS",
@@ -48,4 +56,10 @@ __all__ = [
     "non_dominated",
     "r2",
     "uniform_weights",
+    "NADIR_MARGIN",
+    "ReferenceSet",
+    "ReferenceSetError",
+    "load_reference_sets",
+    "pooled_reference_sets",
+    "read_pof",
 ]

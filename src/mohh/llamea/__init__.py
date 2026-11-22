@@ -41,7 +41,6 @@ __all__ = [
     "COMBINE_TARGET_FAMILIES",
     "make_task_prompt",
     "make_operators",
-    "TargetedCombineOperator",
     "OPERATOR_REFINE",
     "OPERATOR_REDESIGN",
     "OPERATOR_COMBINE_TEMPLATE",

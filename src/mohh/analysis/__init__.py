@@ -7,7 +7,10 @@ produjeron o lo que el usuario pidio ejecutar.
 
 __all__ = [
     "cache",
+    "code_diversity",
     "complexity",
+    "evaluation_readers",
+    "hv_scale",
     "indicators_all",
     "io_utils",
     "layout",
