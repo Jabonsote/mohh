@@ -1,15 +1,9 @@
 """Pruebas del analisis end-to-end de evaluation_results."""
-import importlib.util
 import json
-import os
 
 import numpy as np
 
-ROOT = os.path.dirname(os.path.dirname(__file__))
-SPEC = importlib.util.spec_from_file_location(
-    "analyze_e2e", os.path.join(ROOT, "scripts", "analyze_evaluation_end_to_end.py"))
-e2e = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(e2e)
+from mohh.analysis import evaluation_end_to_end as e2e
 
 
 def _make(tmp_path):

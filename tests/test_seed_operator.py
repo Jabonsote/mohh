@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from mohh.llamea.fitness import compile_operator, uses_unseeded_rng
-from scripts.seed_operator import seed_operator
+from mohh.llamea.seed import seed_operator
 
 UNSEEDED = """import numpy as np
 

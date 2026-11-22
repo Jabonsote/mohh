@@ -101,7 +101,7 @@ def test_read_ge_operators_and_budgets(tmp_path):
 
 
 def test_compare_stats_pairs_by_experiment(tmp_path):
-    module = _load_script("compare_ge_llamea_stats")
+    module = importlib.import_module("mohh.comparison.ge_llamea_stats")
     root = tmp_path / "run_metrics"
     root.mkdir()
     records = []

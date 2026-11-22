@@ -178,13 +178,13 @@ def test_evaluation_summaries(tmp_path):
         load_evaluation_summaries(tmp_path, experiment="raw", sort_paths=True),
         _original_partial(str(tmp_path)))
     pd.testing.assert_frame_equal(
-        _script("analyze_evaluation_end_to_end").load(str(tmp_path)),
+        importlib.import_module("mohh.analysis.evaluation_end_to_end").load(str(tmp_path)),
         _original_summaries(str(tmp_path)))
     pd.testing.assert_frame_equal(
-        _script("compare_ge_llamea_stats").load(str(tmp_path)),
+        importlib.import_module("mohh.comparison.ge_llamea_stats").load(str(tmp_path)),
         _original_summaries(str(tmp_path)))
     pd.testing.assert_frame_equal(
-        _script("partial_results").load_hypervolumes(str(tmp_path)),
+        importlib.import_module("mohh.analysis.partial_results").load_hypervolumes(str(tmp_path)),
         _original_partial(str(tmp_path)))
 
 
@@ -205,7 +205,7 @@ def test_hv_by_instance(tmp_path):
     pd.testing.assert_frame_equal(
         _script("critical_difference").load_hv(str(exp)), _original_hv(str(exp)))
     pd.testing.assert_frame_equal(
-        _script("wins_plot").load_hv(str(exp)),
+        importlib.import_module("mohh.analysis.wins_plot").load_hv(str(exp)),
         _original_hv(str(exp), with_experiment=False))
     operators = importlib.import_module("mohh.postanalysis.analyze_operators")
     pd.testing.assert_frame_equal(operators.load_hv(exp),
