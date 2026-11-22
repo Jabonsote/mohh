@@ -74,6 +74,7 @@ from datetime import datetime
 
 import numpy as np
 
+from mohh.constants import EVAL_BUDGETS, N_EXPERIMENTS
 from mohh.core.utilities.algorithm.MO import compute_hypervolume
 from mohh.core.utilities.instance_utils import instance_paths
 from mohh.evaluation.operators.crossover import CX_Cross, PMX_Cross
@@ -86,7 +87,6 @@ from mohh.evaluation.results_layout import (
     write_initial_solutions,
 )
 from mohh.llamea.fitness import (
-    EVAL_BUDGETS,
     NADIR_FACTOR,
     _consolidated_frame,
     _solve_front_namespace,
@@ -1453,7 +1453,7 @@ def main():
     # Defaults que dependen de --ge-protocol. Un valor explicito del usuario
     # siempre gana; `None` distingue "no lo especifique" de "quiero 30/30".
     if args.repeats is None:
-        args.repeats = 31
+        args.repeats = N_EXPERIMENTS
     if args.mo_generations is None:
         args.mo_generations = 300 if args.ge_protocol else 30
     if args.mo_population_size is None:

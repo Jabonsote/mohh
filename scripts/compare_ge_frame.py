@@ -78,6 +78,7 @@ from functools import lru_cache
 
 import numpy as np
 
+from mohh.constants import EVAL_BUDGETS, N_EXPERIMENTS
 from mohh.core.utilities.algorithm.MO import (
     compute_hypervolume,
     non_dominated_sorting_vectorized,
@@ -784,7 +785,7 @@ def main():
     parser.add_argument("--instance-names", default=None,
                         help="lista de nombres (basename) separada por comas; "
                              "tiene prioridad sobre --instances")
-    parser.add_argument("--repeats", type=int, default=31,
+    parser.add_argument("--repeats", type=int, default=N_EXPERIMENTS,
                         help="repeticiones independientes (default 31, protocolo "
                              "final; usa 2-3 para un smoke test)")
     parser.add_argument("--seed", type=int, default=42)
@@ -883,9 +884,9 @@ def main():
         overrides["DATASET"] = args.dataset
     set_params(overrides)
     params = Params()
-    if args.budget not in params["EVAL_BUDGETS"]:
+    if args.budget not in EVAL_BUDGETS:
         raise SystemExit(
-            f"budget {args.budget!r} no existe; usa {sorted(params['EVAL_BUDGETS'])}"
+            f"budget {args.budget!r} no existe; usa {sorted(EVAL_BUDGETS)}"
         )
     snapshot = {
         key: value for key, value in params.get_params().items()

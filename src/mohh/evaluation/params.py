@@ -5,6 +5,14 @@ import random
 from datetime import datetime
 from socket import gethostname
 
+import numpy as np
+
+from mohh.constants import (
+    EVAL_BUDGETS,
+    MO_GENERATIONS,
+    MO_POPULATION_SIZE,
+    N_EXPERIMENTS,
+)
 from mohh.core.params import Params
 from mohh.core.utilities.paths import project_root
 
@@ -17,16 +25,15 @@ mo_params = {
     'SOLVERS': ["MOEAD", "NSGAII", "SMSEMOA"],
 
     # Number of repeated experiments per instance/combination
-    'N_EXPERIMENTS': 31,
+    'N_EXPERIMENTS': N_EXPERIMENTS,
 
     # Evaluation budgets to snapshot during a run (label: total evaluations).
-    # 10500/31500/52500 = 105 (default MO_POPULATION_SIZE) * 100/300/500,
-    # matching the published experiments.
-    'EVAL_BUDGETS': {"10k": 10500, "30k": 31500, "50k": 52500},
+    # From mohh.constants: 105 (MO_POPULATION_SIZE) * 100/300/500.
+    'EVAL_BUDGETS': EVAL_BUDGETS,
 
     # Evolutionary parameters
-    'MO_POPULATION_SIZE': 105,
-    'MO_GENERATIONS': 500,
+    'MO_POPULATION_SIZE': MO_POPULATION_SIZE,
+    'MO_GENERATIONS': MO_GENERATIONS,
 
 
     # ----------------
@@ -112,7 +119,17 @@ misc_params = {
     # ------------
     # RUN BOOKKEEPING
     'EXPERIMENT_NAME': None,
+    # Semilla maestra. None = una sola vez por reloj (no reproducible); para
+    # un experimento publicable fijarla (CLI: --seed).
     'RANDOM_SEED': None,
+    # Reutilizar las poblaciones iniciales y las semillas de una corrida
+    # anterior (ruta a su carpeta `initial_solutions/`). Vacio = generar
+    # nuevas. Es lo que hace reproducible la corrida sin repetir el MOEA.
+    'INITIAL_POPULATION_PATH': "",
+    # Re-evaluar instancias ya marcadas como terminadas en `.done/`.
+    'FORCE_RERUN': False,
+    # Segundos maximos por corrida del MOEA. None = sin limite (legado).
+    'MOEA_TIMEOUT': 3600,
 
     # ------------
     # METRICS / LOGGING
@@ -147,6 +164,7 @@ def set_params(overrides: dict = None):
         params["RANDOM_SEED"] = int(start.microsecond)
 
     random.seed(params["RANDOM_SEED"])
+    np.random.seed(params["RANDOM_SEED"])
 
     # Generate a timestamp to name folder
     hm = "%02d%02d" % (start.hour, start.minute)

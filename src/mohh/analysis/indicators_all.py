@@ -20,6 +20,7 @@ DataFrames de `instancia x indicador`. Ninguna genera datos.
 import numpy as np
 import pandas as pd
 
+from mohh.constants import NADIR
 from mohh.core.indicators.directions import (
     MINIMIZATION_METRICS,
     indicator_minimization as _indicator_minimization,
@@ -57,7 +58,7 @@ _MINIMIZATION = tuple(
     metrica for metrica in ("IGD+", "DELTA_P", "R2")
     if metrica in MINIMIZATION_METRICS)
 
-DEFAULT_HV_REF_POINT = 1.1
+DEFAULT_HV_REF_POINT = NADIR
 
 
 class IndicatorsError(RuntimeError):
@@ -106,7 +107,7 @@ class HypervolumeContext:
     @param ref_point: punto de referencia en la escala normalizada.
     """
 
-    def __init__(self, fronts=None, ref_point: float = DEFAULT_HV_REF_POINT) -> None:
+    def __init__(self, fronts=None, ref_point: float = NADIR) -> None:
         self.ref_point = float(ref_point)
         self.vmin = None
         self.vmax = None
@@ -204,7 +205,7 @@ class HypervolumeContexts:
     def __len__(self) -> int:
         return len(self.contexts)
 
-    def fit(self, fronts_by_instance: dict, ref_point: float = DEFAULT_HV_REF_POINT):
+    def fit(self, fronts_by_instance: dict, ref_point: float = NADIR):
         """
         Ajusta una escala por instancia a partir de los frentes dados.
 
@@ -232,7 +233,7 @@ class HypervolumeContexts:
         return f"HypervolumeContexts({len(self.contexts)} instancias)"
 
 
-def fit_hv_contexts(fronts_by_candidate: dict, ref_point: float = DEFAULT_HV_REF_POINT):
+def fit_hv_contexts(fronts_by_candidate: dict, ref_point: float = NADIR):
     """
     Ajusta la escala de HV por instancia con todos los candidatos a medir.
 

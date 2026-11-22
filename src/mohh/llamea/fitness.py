@@ -31,6 +31,15 @@ from functools import lru_cache
 
 import numpy as np
 
+from mohh.constants import (
+    EVAL_BUDGETS,
+    INSTANCE_TIMEOUT,
+    MO_POPULATION_SIZE,
+    NADIR,
+    OPERATOR_CALL_TIMEOUT,
+    REPEAT_PENALTY,
+)
+
 FALLBACK_SCORE = 0.0
 
 
@@ -55,14 +64,10 @@ class EarlyStop(BaseException):
     default); con joblib/loky el transporte de BaseException no es confiable.
     """
 
-# Limites de tiempo para el codigo generado por el LLM. Protegen la busqueda de
-# operadores que no terminan (`while True`, recursiones sin corte). Son
-# necesarios porque con `max_workers=1` joblib usa un backend secuencial que NO
-# aplica el `eval_timeout` de LLaMEA.
-OPERATOR_CALL_TIMEOUT = 10.0   # segundos por llamada de validacion (n <= 100)
+# Los limites de validacion y de instancia viven en `mohh.constants`. Protegen
+# de operadores que no terminan: con `max_workers=1` joblib usa un backend
+# secuencial que NO aplica el `eval_timeout` de LLaMEA.
 COMPILE_TIMEOUT = 30.0         # segundos para `exec` del codigo del LLM (código de módulo)
-INSTANCE_TIMEOUT = 300.0       # busqueda LLaMEA; `None` desactiva el limite.
-                              # La comparacion de operadores usa `None`.
 
 #: Nombre de fichero ficticio con el que se compila el codigo del LLM. Se
 #: registra en `linecache` para que el traceback muestre la linea exacta que
@@ -510,10 +515,8 @@ def _load_mutation(solver, model_name, mutation):
         solver.load_operator("mutation", "NullMutation")
 
 
-#: Presupuestos de la evaluacion original (`experiment.py`), en evaluaciones:
-#: 100/300/500 generaciones con poblacion 105. El original corre el MOEA hasta
-#: el ultimo y guarda el frente de la poblacion al alcanzar cada uno.
-EVAL_BUDGETS = {"10k": 10500, "30k": 31500, "50k": 52500}
+# `EVAL_BUDGETS` se re-exporta desde `mohh.constants` para los importadores
+# existentes: 100/300/500 generaciones con poblacion 105 del original.
 
 
 def solve_front_snapshots(instance, namespace, seed, model_name, mutation,
@@ -584,7 +587,7 @@ def _params_size():
     try:
         population_size = int(params["MO_POPULATION_SIZE"])
     except Exception:  # noqa: BLE001 - sin params, el default del original
-        population_size = 105
+        population_size = MO_POPULATION_SIZE
     try:
         generations = int(params["MO_GENERATIONS"])
     except Exception:  # noqa: BLE001
@@ -688,9 +691,8 @@ def _solve_front_task(task):
         }
 
 
-#: Punto de nadir fijo sobre frentes normalizados, igual que el proyecto
-#: original (`mohh/evaluation/experiment.py` usa `[1.1] * n_obj`).
-NADIR_FACTOR = 1.1
+#: Punto de nadir fijo sobre frentes normalizados (alias publico de `NADIR`).
+NADIR_FACTOR = NADIR
 
 
 def normalize_front(front, bounds):
@@ -969,7 +971,7 @@ class OperatorEvaluator:
     ampliamente los del panel y no son comparables con la tabla GE.
 
     Cachea el frente por instancia de cada codigo: si el LLM repite un operador
-    no se vuelve a correr el MOEA interno, y si el marco cambia se recalculan
+    sin repetir el MOEA; si el marco cambia se recalculan
     los HV de todos los candidatos a partir de esos frentes (sin MOEA).
     """
 
@@ -977,7 +979,7 @@ class OperatorEvaluator:
                  seed=42, model_name="MOEAD", mutation=False,
                  instance_timeout=INSTANCE_TIMEOUT, normalize=True,
                  bounds=None, reference_operators=None, archive=None,
-                 frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0,
+                 frame="ge", fronts_dir=None, repeat_penalty=REPEAT_PENALTY, patience=0,
                  fitness_workers=1, model_names=None, mutations=None,
                  ranking=False):
         self.instance_paths = [str(p) for p in instance_paths]
@@ -1828,7 +1830,7 @@ class PopulationEvaluator(OperatorEvaluator):
     invierte a `(K + 1) - rango_medio` para clientes que maximizan.
 
     El marco crece con cada operador evaluado, asi que los HV se recalculan en
-    cada evaluacion (los frentes estan cacheados: no se vuelve a correr el
+    cada evaluacion (frentes cacheados; no se repite el
     MOEA). En una evaluacion dada, padres y descendientes comparten marco, de
     modo que la comparacion entre ellos es justa.
     """
@@ -2014,7 +2016,7 @@ class PopulationEvaluator(OperatorEvaluator):
                     f"GE population ranking: mean rank {mean_rank:.4f} "
                     f"(1 = best; lower is better) over {len(values)} instances. "
                     f"Best instance rank {best}, worst {worst}, K={k}. "
-                    f"Reference point: fixed nadir [1.1]*K over the "
+                    f"Reference point: fixed nadir [{NADIR_FACTOR}]*K over the "
                     f"consolidated frame of everything evaluated so far."
                 )
             else:
@@ -2026,7 +2028,7 @@ class PopulationEvaluator(OperatorEvaluator):
                     f"(K + 1 - mean rank) = {score:.4f} with K={k}. "
                     f"Best instance rank {best}, worst {worst}, "
                     f"over {len(values)} instances. Reference point: fixed "
-                    f"nadir [1.1]*K over the consolidated frame of "
+                    f"nadir [{NADIR_FACTOR}]*K over the consolidated frame of "
                     f"everything evaluated so far."
                 )
             solution.set_scores(score, feedback=feedback)
@@ -2045,7 +2047,7 @@ def build_population_evaluator(train_instances, mo_generations,
                                normalize=True, bounds=None,
                                reference_operators=None, archive=None,
                                frame="stationary", fronts_dir=None,
-                               repeat_penalty=0.5, patience=0,
+                               repeat_penalty=REPEAT_PENALTY, patience=0,
                                fitness_workers=1, model_names=None,
                                mutations=None, raw_rank=False):
     """Construye el evaluador batch con el fitness de la busqueda GE.
@@ -2080,7 +2082,7 @@ def build_evaluator(train_instances, mo_generations, mo_population_size,
                     seed=42, model_name="MOEAD", mutation=False,
                     instance_timeout=INSTANCE_TIMEOUT, normalize=True,
                     bounds=None, reference_operators=None, archive=None,
-                    frame="ge", fronts_dir=None, repeat_penalty=0.5, patience=0,
+                    frame="ge", fronts_dir=None, repeat_penalty=REPEAT_PENALTY, patience=0,
                     fitness_workers=1, model_names=None, mutations=None,
                     ranking=False):
     """Construye la funcion de fitness que consume LLaMEA.

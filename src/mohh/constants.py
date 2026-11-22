@@ -1,0 +1,17 @@
+"""Constantes del protocolo mQAP compartidas por todas las fases."""
+
+NADIR = 1.1
+
+EVAL_BUDGETS = {"10k": 10500, "30k": 31500, "50k": 52500}
+EVAL_GENERATIONS = {label: budget // 105 for label, budget in EVAL_BUDGETS.items()}
+
+MO_POPULATION_SIZE = 105
+MO_GENERATIONS = 500
+N_EXPERIMENTS = 31
+
+MUTATION_PROBABILITY = 0.05
+CROSSOVER_PROBABILITY = 1.0
+REPEAT_PENALTY = 0.5
+
+OPERATOR_CALL_TIMEOUT = 10.0
+INSTANCE_TIMEOUT = 300.0
