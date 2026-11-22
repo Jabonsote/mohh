@@ -89,15 +89,17 @@ from mohh.evaluation.results_layout import (
 from mohh.llamea.fitness import (
     NADIR_FACTOR,
     _consolidated_frame,
-    _solve_front_namespace,
-    solve_front_snapshots,
     build_evaluator,
     clip_to_reference_box,
     comprobate_frame,
     compile_operator,
-    init_params,
     uses_unseeded_rng,
     normalize_front,
+)
+from mohh.shared.mo import (
+    _solve_front_namespace,
+    init_params,
+    solve_front_snapshots,
 )
 from mohh.llamea.ge_operators import ge_namespace, load_ge_operators
 from mohh.llamea.reference import REFERENCE_OPERATORS, namespace_for
