@@ -413,6 +413,7 @@ def run_simple(args, exp_dir, logger, llm, train_paths, bounds=None):
             parent_code, strategy, last_error=last_error,
             score=parent_score, description=parent_label, one_child=True,
             history=history, best_score=best_fitness)
+        response = ""
         try:
             response = llm.query([{"role": "user", "content": prompt}])
             code = parse_llm_response(response or "")
