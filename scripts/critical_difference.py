@@ -11,8 +11,6 @@ Uso:
         --solver MOEAD --budget 50k --mutation NM --out docs/cd.png
 """
 import argparse
-import glob
-import json
 import os
 
 import numpy as np
@@ -22,31 +20,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from mohh.analysis.evaluation_readers import load_hv_by_instance
+
 
 OPS = ["Best", "Middle", "Worst", "CX", "PMX"]
 
 
 def load_hv(root):
-    rows = []
-    for path in glob.glob(os.path.join(root, "evaluation_results",
-                                       "run_metrics", "evaluation_*.json")):
-        try:
-            data = json.load(open(path, encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        for record in data.get("sections", {}).get("hypervolumes", []):
-            parts = str(record["config"]).split("_")
-            rows.append({
-                "instance": record["instance"],
-                "budget": record["label"],
-                "solver": parts[0],
-                "operator": parts[1],
-                "mutation": parts[2],
-                "origin": parts[3] if len(parts) > 3 else "",
-                "experiment": record["experiment"],
-                "hv": float(record["hypervolume"]),
-            })
-    return pd.DataFrame(rows)
+    return load_hv_by_instance(root, experiment="raw")
 
 
 def build_matrix(frame, solver=None, budget=None, mutation=None, operators=None):

@@ -13,47 +13,24 @@ Uso:
     python scripts/partial_results.py <evaluation_results> --csv parcial.csv
 """
 import argparse
-import glob
-import json
 import os
 
 import numpy as np
 import pandas as pd
 from scipy import stats
 
+from mohh.analysis.evaluation_readers import (
+    load_evaluation_summaries,
+    parse_config as _parse_config,
+)
+
 
 def parse_config(config):
-    """``MOEAD_Best_NM_LLAMEA`` -> (MOEAD, Best, NM, LLAMEA)."""
-    parts = str(config).split("_")
-    solver = parts[0] if parts else ""
-    operator = parts[1] if len(parts) > 1 else ""
-    mutation = parts[2] if len(parts) > 2 else ""
-    origin = parts[3] if len(parts) > 3 else ""
-    return solver, operator, mutation, origin
+    return _parse_config(config)
 
 
 def load_hypervolumes(root):
-    rows = []
-    pattern = os.path.join(root, "run_metrics", "evaluation_*.json")
-    for path in sorted(glob.glob(pattern)):
-        try:
-            with open(path, encoding="utf-8") as handle:
-                data = json.load(handle)
-        except (json.JSONDecodeError, OSError):
-            continue
-        for record in data.get("sections", {}).get("hypervolumes", []):
-            solver, operator, mutation, origin = parse_config(record["config"])
-            rows.append({
-                "instance": record.get("instance"),
-                "budget": record.get("label"),
-                "solver": solver,
-                "operator": operator,
-                "mutation": mutation,
-                "origin": origin,
-                "experiment": record.get("experiment"),
-                "hv": float(record.get("hypervolume", np.nan)),
-            })
-    return pd.DataFrame(rows)
+    return load_evaluation_summaries(root, experiment="raw", sort_paths=True)
 
 
 def paired_stats(frame, gen_origin, gen_ops, bases):

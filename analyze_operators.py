@@ -18,9 +18,6 @@ Uso:
 import argparse
 import base64
 import io
-import json
-import os
-import re
 from pathlib import Path
 
 import matplotlib
@@ -30,6 +27,10 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from mohh.analysis.evaluation_readers import (
+    load_hv_by_instance,
+    parse_config as _parse_config,
+)
 from mohh.analysis.phenotype import to_python_module
 
 ROOT = Path(__file__).resolve().parent
@@ -52,45 +53,13 @@ BUDGETS = ["10k", "30k", "50k"]
 # Carga de datos
 # ---------------------------------------------------------------------------
 def parse_config(cfg):
-    # "MOEAD_Best_NM_MOEAD" -> solver, operator, mutation, origin
-    parts = cfg.split("_")
-    solver = parts[0]
-    operator = parts[1]
-    mutation = parts[2]
-    origin = parts[3] if len(parts) > 3 else ""
-    # normalizar nombres de operador a los usados en el reporte
-    op_map = {"CX": "CX", "PMX": "PMX", "Best": "Best",
-              "Middle": "Middle", "Worst": "Worst"}
-    operator = op_map.get(operator, operator)
-    mut_map = {"NM": "NM", "WM": "WM"}
-    mutation = mut_map.get(mutation, mutation)
-    return solver, operator, mutation, origin
+    return _parse_config(cfg)
 
 
 def load_hv(exp_dir):
-    exp_dir = Path(exp_dir)
-    folder_name = exp_dir.name
-    rows = []
-    rm = exp_dir / "evaluation_results" / "run_metrics"
-    for f in sorted(rm.glob("evaluation_*.json")):
-        d = json.load(open(f))
-        s = d["sections"]
-        instance = d["instance"]
-        for h in s["hypervolumes"]:
-            solver, operator, mutation, origin = parse_config(h["config"])
-            rep = int(h["experiment"].split()[-1])
-            rows.append({
-                "exp_folder": folder_name,
-                "instance": instance,
-                "budget": h["label"],
-                "solver": solver,
-                "operator": operator,
-                "mutation": mutation,
-                "origin": origin,
-                "replicate": rep,
-                "hv": float(h["hypervolume"]),
-            })
-    return pd.DataFrame(rows)
+    frame = load_hv_by_instance(exp_dir, experiment="int", exp_folder=True,
+                                instance_from_file=True, sort_paths=True)
+    return frame.rename(columns={"experiment": "replicate"})
 
 
 def load_operator_code(exp_dir):

@@ -17,49 +17,23 @@ Uso:
         results/searches/<RUN>/evaluation_results_vs_ge
 """
 import argparse
-import glob
-import json
-import os
-import re
 
 import numpy as np
 import pandas as pd
 
+from mohh.analysis.evaluation_readers import (
+    load_evaluation_summaries,
+    parse_config as _parse_config,
+)
 from mohh.llamea.statistics import add_holm, paired_summary
 
 
 def parse_config(config):
-    parts = str(config).split("_")
-    return (parts[0] if parts else "",
-            parts[1] if len(parts) > 1 else "",
-            parts[2] if len(parts) > 2 else "",
-            parts[3] if len(parts) > 3 else "")
+    return _parse_config(config)
 
 
 def load(root):
-    rows = []
-    for path in glob.glob(os.path.join(root, "run_metrics", "evaluation_*.json")):
-        try:
-            data = json.load(open(path, encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        for record in data.get("sections", {}).get("hypervolumes", []):
-            solver, operator, mutation, origin = parse_config(record["config"])
-            match = re.search(r"(\d+)", str(record.get("experiment", "")))
-            experiment = int(match.group(1)) if match else None
-            if experiment is None:
-                continue
-            rows.append({
-                "instance": record.get("instance"),
-                "budget": record.get("label"),
-                "solver": solver,
-                "operator": operator,
-                "mutation": mutation,
-                "origin": origin,
-                "experiment": experiment,
-                "hv": float(record.get("hypervolume", np.nan)),
-            })
-    return pd.DataFrame(rows)
+    return load_evaluation_summaries(root)
 
 
 def mean_by_experiment(frame, origin, operator, filters):

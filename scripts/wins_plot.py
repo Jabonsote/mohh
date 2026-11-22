@@ -2,9 +2,6 @@
 # -*- coding: utf-8 -*-
 """Grafica de victorias por instancia (sobre 20) frente a CX y PMX."""
 import argparse
-import glob
-import json
-import os
 
 import numpy as np
 import pandas as pd
@@ -12,29 +9,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from mohh.analysis.evaluation_readers import load_hv_by_instance
+
 OPS = ["Best"]
 
 
 def load_hv(root):
-    rows = []
-    for path in glob.glob(os.path.join(root, "evaluation_results",
-                                       "run_metrics", "evaluation_*.json")):
-        try:
-            data = json.load(open(path, encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        for record in data.get("sections", {}).get("hypervolumes", []):
-            parts = str(record["config"]).split("_")
-            rows.append({
-                "instance": record["instance"],
-                "budget": record["label"],
-                "solver": parts[0],
-                "operator": parts[1],
-                "mutation": parts[2],
-                "origin": parts[3] if len(parts) > 3 else "",
-                "hv": float(record["hypervolume"]),
-            })
-    return pd.DataFrame(rows)
+    return load_hv_by_instance(root)
 
 
 def wins_table(frame):
