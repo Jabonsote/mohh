@@ -1,258 +1,69 @@
 # Specialized Operators via a Multi-Objective Hyper-Heuristic
 
-Source code for the paper:<br>
-**Automatic Design of Specialized Variation Operators for the Multi-Objective Quadratic Assignment Problem** <br>
-[GECCO, 2025]
+Source code for the paper **Automatic Design of Specialized Variation Operators for the Multi-Objective Quadratic Assignment Problem** (GECCO 2025).
 
-> **[Authors]**<br>
-> Adrián Isaí Morales-Paredes<br>
-> Julio Juárez<br>
-> Jesús Guillermo Falcón-Cardona<br>
-> Hugo Terashima-Marín<br>
-> Carlos A. Coello Coello<br>
+Adrián Isaí Morales-Paredes, Julio Juárez, Jesús Guillermo Falcón-Cardona, Hugo Terashima-Marín, Carlos A. Coello Coello.
 
-A Grammatical-Evolution hyper-heuristic that generates variation operators
-for multi-objective evolutionary algorithms (MOEAs), then benchmarks the
-discovered operators against instances unseen during generation, on the
-multi-objective Quadratic Assignment Problem (mQAP).
-
-> **Note on reproducibility:** Running the commands below
-> with the default (published) parameters reproduces the *methodology* and
-> should land in the same range of operators, but will not reproduce the exact same
-> discovered operators.
-
----
-
-## Table of Contents
-
-- [Background](#background)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Reproducing the experiments](#reproducing-the-experiments)
-- [LLaMEA search (LLM-guided operators)](#llamea-search-llm-guided-operators)
-- [Repository structure](#repository-structure)
-- [Data](#data)
-- [Configuration reference](#configuration-reference)
-- [Algorithms](#algorithms)
-- [Output format](#output-format)
-
----
+A grammatical-evolution (GE) hyper-heuristic evolves crossover operators for permutation-encoded multi-objective evolutionary algorithms (MOEAs). A genome is a list of integer codons decoded through a BNF grammar into an operator expression; the candidate is embedded as the crossover of an inner MOEA and scored by hypervolume on mQAP training instances. The best operators are benchmarked on held-out instances against classic crossovers.
 
 ## Background
 
-**Grammatical Evolution (GE)** evolves programs indirectly: an individual is
-a *genome* (a list of integer codons), which is decoded into a *phenotype*
-(here, a crossover-operator expression) by walking a BNF grammar and using
-each codon, modulo the number of production choices, to pick the next
-production rule. Two genomes that differ can decode to the same phenotype,
-and small genome edits can produce structurally different phenotypes - this
-indirection is what lets a standard genetic algorithm (selection, crossover,
-mutation over integer genomes) search a space of *programs* and in this case
-heuristics.
+GE decodes indirectly: each codon selects a production rule modulo the number of alternatives at the current non-terminal. Two genomes can decode to the same expression and a small edit can change it altogether, so a genetic algorithm over integer genomes searches a space of programs.
 
-This repository uses GE to search a space of **variation (crossover) operators** for
-permutation-encoded multi-objective evolutionary algorithms. Each candidate
-operator is an expression built from primitives such as `move_right`,
-`reverse`, `order_based(...)` (see [Algorithms](#algorithms)); a candidate is
-scored by embedding it as the crossover operator inside an inner MOEA and
-solving the **multi-objective Quadratic Assignment Problem (mQAP)**:
+The target is a crossover operator for permutation-encoded MOEAs, composed of primitives such as `move_right`, `reverse` and `order_based(...)` (see [Algorithms](#algorithms)). Its fitness comes from the multi-objective Quadratic Assignment Problem:
 
-$$f_k(\pi) = \sum_{i} \sum_{j} w_k(i, j) \cdot d(\pi(i), \pi(j)), \quad k = 1, \dots, m$$
+$$f_k(\pi) = \sum_i \sum_j w_k(i,j)\, d(\pi(i), \pi(j)), \quad k = 1,\dots,m$$
 
-where $\pi$ is a permutation of facilities to locations, $w_k(i,j)$ is the
-flow between facilities $i,j$ under objective $k$, and $d(\cdot,\cdot)$ is
-the distance between locations. The goal is to find operators that help an
-MOEA approximate the Pareto front of $(f_1, \dots, f_m)$ well, and that it
-*generalize* on the problem, hence a strict split between instances seen
-during generation and instances held out for evaluation.
+where $\pi$ assigns facilities to locations, $w_k$ is objective $k$'s flow matrix and $d$ the location distance matrix. Generation uses training instances only; evaluation uses a disjoint test set. The split is enforced by the dataset layout: `mohh-generate` reads `train/` and `mohh-evaluate` reads `test/`.
 
-- **`generation`**: the outer GE loop evolves a population of candidate
-  operators (encoded as genomes), each scored by running an inner MOEA
-  (MOEA/D, NSGA-II, or SMS-EMOA, via [pymoo](https://pymoo.org)) with that
-  operator plugged in as crossover, on the training instances. Selection
-  pressure favors operators with better hypervolume across instances.
-- **`evaluation`**: takes the Best/Middle/Worst operators from a generation
-  run and benchmarks them against held-out mQAP instances, alongside
-  standard baseline operators (PMX, CX), across multiple MOEAs and multiple
-  evaluation budgets (to see whether more generations meaningfully improves
-  the discovered operators' performance).
+The **generation** stage evolves genomes, each fitness being an inner MOEA run (MOEA/D, NSGA-II or SMS-EMOA via pymoo) with the candidate as crossover. Selection favors the mean hypervolume rank across instances. The **evaluation** stage benchmarks the Best/Middle/Worst operators on the test set against PMX and CX over all configured solvers and budgets.
 
----
+## Requirements and installation
 
-## Requirements
-
-- Python >= 3.10
-- NumPy >= 2.0, pymoo >= 0.6.1, Matplotlib >= 3.9, pandas >= 2.3, tqdm >= 4.67
-
-All dependencies are declared in `pyproject.toml` and installed automatically
-by following the `Installation` steps. 
-
----
-
-## Installation
+Python >3.10. Dependencies: NumPy >=2.0, pymoo >=0.6.2, Matplotlib >=3.9, pandas >=2.3, tqdm >=4.67 and PyYAML >=6.0. The optional `llamea`, `vllm`, `analysis`, `local-server` and `dev` extras are declared in `pyproject.toml`.
 
 ```bash
-# Clone the repository
-git clone https://github.com/AdrianMP1/Generation-HyperHeuristic.git MOHH
-cd MOHH
-```
-
-```bash
-# Create and activate the environment
+git clone https://github.com/Jabonsote/mohh.git MOOHH-R
+cd MOOHH-R
 conda create -n mohh-dev python=3.12
 conda activate mohh-dev
-```
-
-```bash
-# Install the mohh package in editable mode
-pip install -e .
-```
-
-Verify the installation:
-
-```bash
+python -m pip install -e .
 python -c "import mohh; print('OK')"
 ```
 
----
-
 ## Running experiments
 
-All commands must be run from the `MOHH/` directory. Three console commands
-are installed by `pip install -e .`:
+`pip install -e .` installs five entry points; all expect the repository root as current directory. The `results/Experiment_001` path in the examples below is a folder produced by `mohh-generate`.
 
-### Run the GE search
+| Command | Role |
+|---|---|
+| `mohh-generate` | Outer GE search on the training instances. |
+| `mohh-evaluate <experiment>` | Benchmark one generation run on the test set. |
+| `mohh-run --full` | Both stages in one process; `--full` is required. |
+| `mohh-llamea` | LLM-guided operator search (see [LLaMEA search](#llamea-search)). |
+| `mohh-post` | Analysis of finished runs (see [Post-analysis](#post-analysis)). |
 
 ```bash
 mohh-generate
-```
-
-Evolves candidate operators against the training instances in
-`datasets/mqap/train/` and writes `results/Experiment_NNN/` (auto-numbered).
-At the end, it extracts the Best/Middle/Worst operators from the final
-generation and writes them to `<model>_operators.txt` in the experiment
-folder, one file per `--models` entry.
-
-### Benchmark a generation run
-
-```bash
 mohh-evaluate results/Experiment_001
-```
-
-Reads the operators produced by a `mohh-generate` run, benchmarks them
-against the held-out instances in `datasets/mqap/test/`, alongside PMX/CX
-baselines, across every solver in `--solvers` and every budget in
-`--eval-budgets`, and writes CSVs, `.pof` front files, and box-plot figures
-under `results/Experiment_001/evaluation_results/`.
-
-### Both stages in one command
-
-```bash
 mohh-run --full
 ```
 
-`--full` is a deliberate confirmation flag, since evaluation is by far the
-more expensive stage - the command refuses to run without it.
-
-### Overriding parameters
-
-All three commands accept CLI overrides instead of editing `params.py` by
-hand; anything not exposed as a flag can still be changed directly in
-`generation/params.py` / `evaluation/params.py`. Run any command with `-h`
-for the full flag list.
+`mohh-generate` writes `results/Experiment_NNN/` and extracts `<model>_operators.txt` (Best/Middle/Worst phenotypes) per `--models` entry. `mohh-evaluate` reads those files, evaluates on `datasets/mqap/test/` and writes CSVs, fronts and figures under `evaluation_results/`. `mohh-run --full` chains both stages; evaluation dominates the cost, hence the flag. All stages accept CLI overrides listed by `-h`.
 
 ```bash
-mohh-generate --models MOEAD --population-size 6 --generations 2 --elite-size 3 \
-              --mo-population-size 10 --mo-generations 5
-
+mohh-generate --models MOEAD --population-size 6 --generations 2 \
+              --elite-size 3 --mo-population-size 10 --mo-generations 5
 mohh-evaluate results/Experiment_001 --models MOEAD --solvers MOEAD,NSGAII \
-              --mo-population-size 6 --mo-generations 4 --n-experiments 1 \
+              --mo-population-size 6 --mo-generations 4 --n-experiments 31 \
               --eval-budgets 10k:6,30k:18,50k:24
+mohh-evaluate results/Experiment_001 --dataset mqap --instances \
+              KC100-5fl-1un KC31-3fl-1un
 ```
 
-`mohh-evaluate` takes two related but distinct flags:
+`--models` selects whose operators are read; `--solvers` selects the MOEAs that run the benchmark. These are independent: the first names the generation runs to pull operators from, the second the solvers that execute them. `--eval-budgets` takes `label:evaluations` pairs and skips unreachable budgets. `--dataset` names a directory under `datasets/`, `--dataset-path` an external one, and `--generation N` evaluates a past generation.
 
-| Flag | Meaning | Default |
-|------|---------|---------|
-| `--models` | Which generation model(s)' operators to pull from `experiment_path` (reads `<model>_operators.txt`) | auto-detected from the experiment folder |
-| `--solvers` | Which MOEA(s) to actually benchmark those operators with | `evaluation/params.py`'s `SOLVERS` (`MOEAD`, `NSGAII`, `SMSEMOA`) |
-
-**Useful flags:**
-
-| Flag | Effect |
-|------|--------|
-| `--models MOEAD,NSGAII,SMSEMOA` | Run generation's inner MOEA / pull evaluation operators for more than one model |
-| `--solvers MOEAD,NSGAII` | Restrict which MOEAs evaluation benchmarks against |
-| `--eval-budgets 10k:6,30k:18` | Comma-separated `label:evaluations` pairs; a budget unreachable at the configured `--mo-generations` is skipped rather than erroring |
-| `--n-experiments N` | Repeated experiments per instance/operator combination |
-| `--full` | Required on `mohh-run` to confirm running both stages |
-
-### Datasets y evaluación en paralelo
-
-`mohh-evaluate` acepta ahora un dataset explícito y puede repartir las
-instancias de test entre varios jobs:
-
-```bash
-# dataset nuevo (20 test)
-mohh-evaluate results/baseline/Experiment_001 \
-    --dataset-path /LUSTRE/$USER/proyectos/SDD/results/dataset_larger/mqap \
-    --n-experiments 31
-
-# dataset antiguo (16 test)
-mohh-evaluate results/Experiment_001 \
-    --dataset-path /LUSTRE/$USER/proyectos/SDD/datasets/mqap \
-    --n-experiments 31
-```
-
-Por defecto se ejecutan **todas** las `.txt` de `test/`. También se puede
-limitar:
-
-```bash
-mohh-evaluate results/baseline/Experiment_001 \
-    --dataset-path .../results/dataset_larger/mqap \
-    --instances KC100-5fl-1un KC31-3fl-1un
-```
-
-Para un job array, una tarea por instancia:
-
-```bash
-N=$(find /LUSTRE/$USER/proyectos/SDD/results/dataset_larger/mqap/test \
-        -maxdepth 1 -name '*.txt' | wc -l)
-EXPERIMENT=/LUSTRE/$USER/proyectos/SDD/results/baseline/Experiment_001 \
-DATASET_PATH=/LUSTRE/$USER/proyectos/SDD/results/dataset_larger/mqap \
-sbatch --array=0-$((N-1)) slurm/mohh-evaluate-array.slrm
-```
-
-Cada tarea usa 32 núcleos: 31 workers para las 31 réplicas + el proceso
-principal. Las tareas no dibujan figuras; al terminar el array se generan una
-sola vez:
-
-```bash
-# o directamente, calculando el array y encadenando las figuras:
-EXPERIMENT=... DATASET_PATH=... bash slurm/submit_evaluate_array.sh
-```
-
-### Evaluación intercalada por generación
-
-Además de evaluar los operadores finales, se puede evaluar cada generación:
-
-```bash
-mohh-evaluate results/Experiment_001 --dataset-path datasets/mqap \
-    --generation 5 --n-experiments 31
-# -> results/Experiment_001/evaluation_by_generation/generation_0005/
-
-# Todas las generaciones en un job array + figuras
-EXPERIMENT=results/Experiment_001 DATASET_PATH=$PWD/datasets/mqap \
-    bash slurm/submit_evaluate_generations.sh
-```
-
-Herramientas de análisis y P* incluidos: ver [`ANALYSIS.md`](ANALYSIS.md).
-
-### A quick, fast sanity run
-
-To confirm the pipeline works end-to-end without waiting for a full-scale
-run (the published-scale defaults - 50/30 generations, 105/300-500 MOEA
-population/generations, 11 repeated experiments - can take a long time):
+A short end-to-end check before a production run:
 
 ```bash
 mohh-run --full --models MOEAD --population-size 8 --generations 2 \
@@ -260,614 +71,198 @@ mohh-run --full --models MOEAD --population-size 8 --generations 2 \
          --n-experiments 3 --eval-budgets 10k:6
 ```
 
----
+## Datasets
 
-## LLaMEA search (LLM-guided operators)
-
-`mohh-llamea` reuses the **exact fitness of the GE search**: for each instance
-it consolidates the nondominated front of the current population, computes the
-population nadir, assigns each operator its hypervolume, and ranks those
-hypervolumes with `compute_rank`. The fitness is the mean GE rank across
-instances (1 = best), exactly as in `HyperHeuristic.compute_metrics`. The
-reference point is the population nadir and is recomputed on every evaluation;
-no fixed reference panel or mean HV is used.
-
-[LLaMEA](https://github.com/XAI-liacs/LLaMEA) prompts the model to write a
-Python `crossover(x, y)` operator, evaluates it as a pymoo `Crossover`, and
-feeds that rank back to refine the next prompt. The GE core is **not modified**:
-the LLM is injected through `solver.crossover` (`src/mohh/llamea/`).
-
-Cluster quick start: [`docs/llamea-prompts/CLUSTER.md`](docs/llamea-prompts/CLUSTER.md).
-Full background and design notes: [`docs/llamea-prompts/`](docs/llamea-prompts/).
-
-### Rules the generated operator must follow
-
-The 1+1 loop (`--simple`, `src/mohh/llamea/simple.py`) accepts an operator only
-if it is **reproducible** and if the prompt tells the model what it is
-refining:
-
-- **Reproducibility**: the operator must use numpy's global RNG
-  (`np.random.*`). A private generator (`np.random.default_rng()`) is
-  rejected, because the harness seeds `np.random.seed(...)` and a private
-  generator ignores that seed: the operator would not be reproducible and the
-  paired comparison would measure noise.
-- **`refine` vs `create`**: `refine` shows the parent operator (the incumbent
-  or a random prior) with **its own** mean rank; `create` shows no operator at
-  all, only the interface skeleton, so the model explores instead of copying.
-- **Token budget**: reasoning models (`gpt-oss`, GLM with `--reasoning-parser`)
-  spend most of `max_tokens` thinking. If the answer is cut off, the code is
-  never written: `search_summary.json` counts it as
-  `respuesta truncada` and `tokens.truncated_responses` counts the cut
-  answers. Use `MAX_TOKENS=8192` for those models.
-
-### Install
-
-```bash
-pip install -e ".[llamea]"      # llamea==1.4.0 + openai + huggingface_hub
-pip install -e ".[vllm]"        # only on the node that will SERVE the model (GPU)
-```
-
-The model must be exposed through an **OpenAI-compatible** endpoint: vLLM
-(cluster/GPU), Ollama, or llama.cpp (`scripts/local_openai_server.py`).
-
-### A. Local — normal command
-
-```bash
-# 1. Serve a model. Example: Ollama, using already-downloaded models (no GPU).
-ollama serve &
-ollama pull qwen2.5-coder:7b-instruct
-
-# 2. Run the search against the server (wrapper with sensible defaults).
-MODEL=qwen2.5-coder:7b-instruct \
-BASE_URL=http://127.0.0.1:11434/v1 \
-NO_DOWNLOAD=1 \
-CATEGORY=searches \
-BUDGET=200 \
-TRAIN_INSTANCES=8 \
-EVAL_TEST=1 \
-NAME=qwen25coder7b_moead_b200 \
-PYTHON=python3 \
-./scripts/llamea_search.sh
-```
-
-The same thing calling the entry point directly:
-
-```bash
-python -m mohh.llamea.run \
-    --model qwen2.5-coder:7b-instruct \
-    --base-url http://127.0.0.1:11434/v1 --no-download \
-    --budget 1000 --solver MOEAD --train-instances 8 \
-    --repeat-penalty 0.5 --stall-timeout 1800 \
-    --eval-test --results-dir results/searches \
-    --experiment-name qwen25coder7b_moead_b1000
-```
-
-For a local model with explicit reasoning, the 12 GB GPU option is
-`GLM-Z1-9B-0414` Q4_K_M (~6.2 GB). With llama.cpp:
-
-```bash
-hf download unsloth/GLM-Z1-9B-0414-GGUF GLM-Z1-9B-0414-Q4_K_M.gguf \
-  --local-dir "$HOME/models/glm-z1-9b"
-llama-server -m "$HOME/models/glm-z1-9b/GLM-Z1-9B-0414-Q4_K_M.gguf" \
-  -c 8192 -ngl 99 --port 8003
-MODEL=glm-z1-9b BASE_URL=http://127.0.0.1:8003/v1 \
-  NO_DOWNLOAD=1 BUDGET=30 NAME=glm_z1_9b_local ./scripts/llamea_search.sh
-```
-
-The request log (`llm_requests.jsonl`) keeps the prompt, raw response,
-`reasoning_content`, sampling parameters, token usage and latency, so the
-thinking is auditable even when the final code is extracted from the response.
-
-Defaults and the flags that matter:
-
-| Flag | Meaning | Default |
-|------|---------|---------|
-| `--budget N` | LLM candidate evaluations, not generations: `G ~= (B - parents) / offspring` | `1000` |
-| `--n-parents` / `--n-offspring` | population size / children per generation | `1` / `1` |
-| `--combine` | own two-parent recombination (requires `--n-parents >= 2`) | off |
-| `--solver MOEAD` | inner MOEA (`MOEAD`, `NSGAII`, `SMSEMOA`) | `MOEAD` |
-| `--mo-generations` / `--mo-population-size` | inner MOEA budget | `30` / `30` |
-| `--repeat-penalty F` | diversity pressure: ranking score is multiplied by `F` when the code was already evaluated (`1.0` disables) | `0.5` |
-| `--operator-memory N` | inject the last `N` mechanism descriptions into the prompt | `0` (CLI), `12` (cluster job) |
-| `--thinking` | `auto` leaves the server template untouched; `on`/`off` sets `chat_template_kwargs.enable_thinking` (Qwen3 and similar) and logs `reasoning_content` | `auto` |
-| `--patience N` | early stop after `N` evaluations without improving the best HV (`0` = off) | `0` |
-| `--parent-selection` | LLaMEA parent selection: `random`, `roulette`, `tournament` | `tournament` |
-| `--adaptive-mutation` / `--no-adaptive-mutation` | LLaMEA adaptive mutation | on |
-| `--feature-guided-mutation` | guide mutation with AST features | off |
-| `--niching` | LLaMEA diversity archive: `none`, `sharing`, `clearing`, `novelty`, `map_elites` | `none` |
-| `--stall-timeout S` | watchdog: abort and log if no new generation in `S` seconds | `0` (off) |
-| `--eval-test` | evaluate the best operator on the held-out test set | off |
-| `--eval-repeats R` | repeat the final test evaluation `R` times (reports mean/sd and a paired comparison against every reference classic; frame fixed to the reference panel) | `11` |
-| `--mutation` | add `Swap_Mutation` to the inner MOEA | off |
-| `--dry-run` | validate server + config, write them, exit without spending GPU | off |
-| `--stationary-frame` | normalize with the reference panel only (HV fixed); default is the GE frame | off |
-
-Before a long run, validate everything cheaply:
-
-```bash
-python -m mohh.llamea.run --model <model> --base-url <url> --dry-run
-```
-
-### B. Cluster (ixachi) — one command
-
-The cluster path is one SLURM job: the login wrapper downloads/verifies the
-model, then submits a GPU job that serves vLLM on localhost and runs LLaMEA.
-Compute nodes have no internet and do not see `$HOME`; everything stays in the
-LUSTRE checkout and the persistent model root.
-
-```bash
-cd /LUSTRE/$USER/MOOHH-R
-git pull origin cluster
-WITH_VLLM=1 bash slurm/ixachi-setup-env.sh   # once, login node
-
-PROFILE=list bash slurm/llamea-all.sh         # available profiles
-DRY_RUN=1 PROFILE=coder30b-awq bash slurm/llamea-all.sh
-
-# Smoke test: 20 queries, minimal test evaluation.
-PROFILE=smoke BUDGET=20 EVAL_TEST=1 TEST_INSTANCES=2 EVAL_REPEATS=1 \
-  WAIT=1 bash slurm/llamea-all.sh
-
-# Normal search.
-PROFILE=coder30b-awq GENERATIONS=1000 EVAL_TEST=1 \
-  bash slurm/llamea-all.sh
-```
-
-The validated path is `SIMPLE=1`: `NPARENTS=1`, `NOFFSPRING=1`,
-`BUDGET=GENERATIONS`, `COMBINE=0`. The job defaults to `MO_GENERATIONS=300`,
-`MO_POPULATION_SIZE=105`, `CPUS=32`, `MEM=96G`, and
-`FITNESS_WORKERS=CPUS-1`. `COMPARE=1` adds the paired classical comparison in
-the same job and is expensive; use it for the final table.
-
-Profiles: `coder30b-awq` (A100/H100), `glm47-flash-awq` (A100/H100,
-reasoning/code), `big-quant` (proven fallback), `coder30b-fp8` and
-`coder-next-awq` (H100), `coder30b-awq-a10`, `a10-quant`, `coder8b` (A10), and
-`smoke` (pipeline test). Use an explicit profile; do not rely on the default.
-
-```bash
-squeue --user=$USER
-tail -f logs/llamea-single-*.out
-tail -f logs/llamea-single-*.err
-tail -f results/searches/<EXPERIMENT_NAME>/progress.txt
-```
-
-Results go to `results/searches/<EXPERIMENT_NAME>/` (`progress.txt`,
-`llamea_best_operator.py`, `llamea_best_info.json`, `candidates.jsonl`,
-`llm_requests.jsonl`, logs). `COMPARE=1` writes to `results/evaluations/`.
-`results/*` is git-ignored.
-
-Minimal runbook, profile table and troubleshooting:
-[`docs/llamea-prompts/CLUSTER.md`](docs/llamea-prompts/CLUSTER.md).
-
-### C. Compare discovered operators against the classics
-
-The HV of a single search is **not** comparable across runs (its frame contains
-that run's candidates), and one seed cannot separate signal from inner-MOEA
-noise. This harness re-evaluates every operator under **one shared frame**, with
-**paired seeds** and **N independent repetitions**:
-
-```bash
-python scripts/compare_operators.py \
-    --operator discovered=results/examples/llamea_found_operators/qwen25coder7b_moead_b100_ge.py \
-    --operator ox=classic:ox --operator pbx=classic:pbx --operator pmx=classic:pmx \
-    --operator cx=classic:cx --operator erx=classic:erx \
-    --operator ox2=classic2:ox --operator pbx2=classic2:pbx \
-    --operator pmx2=classic2:pmx --operator cx2=classic2:cx \
-    --operator erx2=classic2:erx \
-    --split test --repeats 11 --name b100_vs_clasicos --save-fronts
-```
-
-Use `--ge-protocol` to evaluate the same comparison with the GE evaluation
-protocol (MOEA/D, NSGA-II and SMS-EMOA; with and without `Swap_Mutation`;
-300 generations and population 105). The short default (one solver, 30/30, no
-mutation) is cheaper and mirrors the search loop; the conclusion should be
-confirmed with `--ge-protocol` for the final table.
-
-Writes `results/evaluations/<name>/report.md` and `evaluation.json` with the
-paired Wilcoxon test, effect size (`dz`), 95% CI of the mean difference, Holm
-adjustment for the family of comparisons, **rank stability** across repetitions
-and the **minimum detectable difference** (how much of the ranking is noise).
-A failed operator/instance is counted as HV 0 by default (`--fail-policy
-zero`) instead of dropping the pair; `exclude` and `abort` are also available.
-`--save-fronts` / `--load-fronts` reuse the inner-MOEA fronts when adding
-operators or reanalyzing.
-
-> The shared frame fixes `vmin`/`vmax`. If an operator is better than the best
-> point of the reference panel, its normalized coordinates are clipped to `0`
-> before the HV integral; otherwise a fixed reference box would let an
-> arbitrarily good point produce an HV above the theoretical maximum
-> `1.1**K`. Clipping only affects points outside the reference box and keeps
-> the comparison bounded. In the GE frame the candidate already belongs to the
-> frame, so normal values are unchanged.
-
-### C2. Compare against the original GE frame (`compare_ge_frame.py`)
-
-`compare_operators.py` (above) uses a **stationary** panel frame. To compare
-LLaMEA with the GE table you need the **GE evaluation harness** (`experiment.py`):
-same consolidated frame per instance, `comprobate`, `(f-vmin)/(vmax-vmin)`,
-nadir `[1.1]*K`, same initial populations and seeds. `compare_ge_frame.py`
-reproduces it and adds the LLaMEA `.py` operator to the panel. Run it from
-`/LUSTRE/mohh`.
-
-**Reproduce `Experiment_001`** (its individuals, seeds and frame; `mqap_original`,
-16 test instances):
-
-```bash
-python scripts/compare_ge_frame.py \
-  --operator llamea=results/searches/<EXPERIMENT_NAME>/llamea_best_operator.py \
-  --operator ge1=ge:results/Experiment_001/MOEAD_operators.txt \
-  --operator pmx=classic:pmx --operator cx=classic:cx \
-  --frame-operators ge1_Best,ge1_Middle,ge1_Worst,pmx,cx \
-  --dataset mqap_original --split test --instances all --repeats 31 \
-  --init-from results/Experiment_001/evaluation_results/initial_solutions \
-  --reuse-seeds --solver MOEAD,NSGAII,SMSEMOA --mutation both \
-  --mo-generations 500 --mo-population-size 105 --budget 50k \
-  --name final_llamea_vs_ge
-```
-
-**Project test set** (`mqap`, 20 test instances; new paired populations, no
-`--init-from`):
-
-```bash
-python scripts/compare_ge_frame.py \
-  --operator llamea=results/searches/<EXPERIMENT_NAME>/llamea_best_operator.py \
-  --operator ge1=ge:results/Experiment_001/MOEAD_operators.txt \
-  --operator pmx=classic:pmx --operator cx=classic:cx \
-  --frame-operators ge1_Best,ge1_Middle,ge1_Worst,pmx,cx \
-  --dataset mqap --split test --instances all --repeats 31 \
-  --solver MOEAD,NSGAII,SMSEMOA --mutation both \
-  --mo-generations 500 --mo-population-size 105 --budget 50k \
-  --name final_llamea_vs_ge_mqap
-```
-
-- `--repeats 31` = 31 MOEA runs per (instance, operator, protocol); `--solver`
-  × `--mutation both` = **6 protocols**; the same initial population is shared
-  by all operators within a repetition (paired Wilcoxon + Holm).
-- `--frame-operators` makes LLaMEA be measured against the **GE frame** without
-  contributing to it.
-- `--init-from` only works if the dataset matches the saved experiment
-  (`mqap_original` for `Experiment_001`); otherwise omit it.
-- Output: `results/evaluations_ge_frame/<name>/` with `evaluation.json`,
-  `report.md`, `operators/`, `initial_solutions/`, `fronts/` and `fronts.npz`.
-- If `Experiment_001` is not in the cluster, point `ge1=` to its
-  `MOEAD_operators.txt` and `--init-from` to its `initial_solutions/`.
-
-### D. Replicate the search (not just the operator)
-
-The best of ~1000 candidates of one run is a max-biased estimate. To make a
-claim about the *procedure*, run R independent searches and report the
-distribution of the best-per-run:
-
-```bash
-for i in 0 1 2 3 4; do
-  MODEL=Qwen/Qwen2.5-Coder-32B-Instruct-AWQ BASE_URL=http://<node>:8000/v1 NO_DOWNLOAD=1 \
-  SEED=$((1000+i)) NAME=proc_r$i CATEGORY=searches BUDGET=1000 \
-    ./scripts/llamea_search.sh
-done
-python scripts/collect_replicates.py 'results/searches/proc_r*' \
-    --out results/multirun/proc_analysis
-```
-
-`summary.md` gives the mean/median/sd of the best-per-run (the honest number),
-and `compare_args.txt` feeds those operators into `compare_operators.py`.
-
-### E. Choose a model with evidence from *this* loop
-
-Code benchmarks do not predict anchoring or the valid-operator rate. Run the
-same short budget/seed with each profile and compare:
-
-```bash
-PROFILE=coder30b-awq BUDGET=50 SEED=42 EXPERIMENT_NAME=bakeoff_30b \
-  bash slurm/llamea-all.sh
-PROFILE=big-quant BUDGET=50 SEED=42 EXPERIMENT_NAME=bakeoff_32b \
-  bash slurm/llamea-all.sh
-python scripts/analyze_llamea_runs.py 'results/searches/bakeoff_*' \
-  --summary --csv results/bakeoff.csv
-```
-
-The table reports valid operators, distinct mechanisms, best HV, tokens per
-evaluation and seconds per request — the numbers that decide which model is
-worth a 1000-generation run.
-
-### Output artifacts (per search)
-
-Everything lands under `results/<category>/<name>/`:
-
-| File / dir | Content |
-|---|---|
-| `run.json` | full effective config (incl. vLLM version and model revision) |
-| `llamea_best_operator.py`, `llamea_best_info.json` | best operator and its scores |
-| `generation_summary.jsonl` | per generation: seed, tokens, time, validity, best-so-far |
-| `individuals.jsonl` | one record per candidate (name, fitness, code sha1, seed) |
-| `prompts/` | exact prompt sent + clean response + raw response/reasoning + per-turn tokens, sampling params and `finish_reason` |
-| `llm_requests.jsonl` | one raw JSONL record per request: full messages, effective sampling params, raw response, `reasoning_content`, usage and errors |
-| `fronts/` | raw Pareto fronts per candidate (evidence; `--no-save-fronts` to skip) |
-| `search_summary.json` | consolidated summary: tokens, valid/invalid, failures by reason, CrystalBLEU diversity, best operator, timeline |
-| `generations/individuals.jsonl` | every operator of every generation (code sha1, fitness, error, tokens) |
-| `generations/generation_summary.jsonl` | per generation: validity, best, improvements, diversity, tokens, wall time |
-| `checkpoint.json`, `best_so_far.py` | durable state — a crash never loses the best operator |
-| `seeds.json` | every seed used and the policy |
-| `tokens.json`, `metrics.json` | tokens, inference time, GPU seconds (vLLM `/metrics`), energy |
-| `progress.txt`, `llamea.log`, `error.log` | monitoring + traceback-only log |
-| `llamea_logs/exp-*/` | LLaMEA's own logs (`report.md`, `evolution.png`, `code/`) |
-
-### Diversity: CrystalBLEU
-
-Diversity is measured with **CrystalBLEU** (Eghbali & Pradel, ASE 2022), the
-official metric (`pip install crystalbleu`): it ignores the n-grams that are
-trivially shared by any two pieces of code, so it distinguishes "truly similar"
-operators from "written in the same language".
-
-The search reports it per generation and in the consolidated summary:
-
-```bash
-python scripts/analyze_small_runs.py 'results/searches/*' --summary
-```
-
-`search_summary.json` holds the measured value (1 - CrystalBLEU averaged over
-pairs, 0 = identical code), the number of distinct codes it was computed on,
-the tokens (total, input, output), the valid/invalid counts, the failures
-grouped by reason, the best operator and the per-iteration timeline.
-
-### Persistent model weights
-
-`scripts/mohh_models.py` keeps weights in `$MOHH_MODELS_DIR`, else
-`$SCRATCH/$USER/mohh-models`, else `$LUSTRE/$USER/mohh-models` — a disk the
-compute nodes can see, never `$HOME`. Subcommands: `root`, `list`, `path`,
-`download`, `verify [--hash] [--load-check]`, `manifest`, `smoke`, `remove`.
-
-```bash
-python scripts/mohh_models.py root
-python scripts/mohh_models.py download Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
-python scripts/mohh_models.py verify Qwen/Qwen2.5-Coder-32B-Instruct-AWQ --load-check
-```
-
----
-
-## Repository structure
-
-```
-MOHH/
-├── pyproject.toml
-├── README.md
-├── grammars/
-│   ├── naturals.bnf                 <- active grammar (permutation operators, used by default)
-│   └── reals.bnf                    <- earlier real-valued grammar.
-│                                        predates the project's focus on permutation-encoded
-│                                        problems; not wired into any current entry point
-├── datasets/
-│   └── mqap/
-│       ├── train/                   <- instances used during generation
-│       └── test/                    <- held-out instances used during evaluation
-│
-├── results/                         <- created on first run; one Experiment_NNN/ per mohh-generate call
-└── src/mohh/
-    ├── cli.py                       <- mohh-generate / mohh-evaluate / mohh-run
-    ├── main.py                      <- run_generation: orchestrates one or more generation models
-    ├── run_evaluation.py            <- discover_models / extract_operators (reads *_operators.txt)
-    ├── parallel.py                  <- simple process-pool parallelization (run_parallel)
-    ├── core/                        <- shared by both stages
-    │   ├── params.py                <- Params singleton (dict-like global config)
-    │   ├── representation/
-    │   │   ├── grammar.py           <- BNF parser (adapted from PonyGE2)
-    │   │   ├── mapper.py            <- genome -> phenotype mapping (adapted from PonyGE2)
-    │   │   └── population.py        <- Population / Individual
-    │   ├── problem/instance.py      <- QAP problem definition (pymoo Problem), Instance loader
-    │   ├── operators/operator_template.py <- HH_Operator: wraps a decoded phenotype as a pymoo Crossover
-    │   └── utilities/
-    │       ├── algorithm/MO.py      <- non-dominated sorting, hypervolume, nadir point
-    │       ├── algorithm/HH_functions.py <- grammar primitive functions (swap, reverse, order_based, ...)
-    │       ├── instance_utils.py    <- lists train/ or test/ instance file paths
-    │       ├── load_modules.py      <- string-name -> operator class dynamic dispatch
-    │       ├── paths.py             <- project_root()
-    │       └── print_utils.py       <- in-place CLI progress line updates
-    │ 
-    ├── generation/                  <- the GE search stage
-    │   ├── params.py                <- generation defaults + set_params(experiment_path, model, overrides)
-    │   ├── saver.py                 <- PopulationSaver / MyLogger singletons
-    │   ├── algorithm/
-    │   │   ├── hyperheuristic.py    <- HyperHeuristic: the outer GE loop (init, evaluate, evolve, replace)
-    │   │   └── multiobjective.py    <- MOSolver: inner MOEA wrapper (MOEAD/NSGAII/SMSEMOA), per candidate
-    │   ├── operators/                <- GE-level operators (on genomes)
-    │   │   ├── initialization.py    <- Rvd: random valid population, discarding invalid/duplicate genomes
-    │   │   ├── selection.py         <- Tournament
-    │   │   ├── crossover.py         <- KPointCrossover, UniformCrossover
-    │   │   └── mutation.py          <- BitFlipMutation
-    │   ├── problem/instance.py      <- re-export shim over core.problem.instance
-    │   ├── representation/population.py <- re-export shim + get_genome_usage()
-    │   └── utilities/algorithm/HH_auxiliars.py <- compute_rank, test_individual (phenotype sanity eval)
-    │
-    └── evaluation/                   <- the benchmarking stage
-        ├── params.py                <- evaluation defaults + set_params(overrides)
-        ├── main.py                  <- execute_experiments: run_experiments() then make_figures()
-        ├── experiment.py            <- run_experiments: the full sweep over instances x operators x solvers
-        ├── algorithms.py            <- MOSolver (ABC), MOEA_Decomposition/NSGAII/SMS_MOEA, MyCallback
-        ├── make_plots.py            <- reads saved CSVs, produces the box-plot figures
-        ├── problem/instance.py      <- Instance subclass adding N-experiments initial-solution handling
-        └── operators/
-            ├── operator_template.py <- re-export shim over core.operators.operator_template
-            ├── crossover.py         <- SBX_Cross, PMX_Cross, CX_Cross
-            └── mutation.py          <- PM_Mutation, Swap_Mutation
-```
-
-**Two separate `MOSolver` classes exist by design**: `generation/algorithm/multiobjective.py::MOSolver`
-dispatches on a `model_name` string and is built fresh per candidate operator (many short MOEA runs);
-`evaluation/algorithms.py::MOSolver` is an `ABC` with one subclass per MOEA and adds eval-budget
-snapshotting (`MyCallback`) for the benchmarking sweep. They share a name and a role but not a
-contract, do not assume one's API from the other.
-
-> **IMPORTANT — project rule:** Modifying the logic of the MOEAs is **forbidden**
-> (`Prohibido modificar`). This fork only *parallelizes* the independent MOEA runs.
-> No algorithm logic was touched (mating, decomposition, ask/tell, problem evaluation,
-> operators); the results/state updates applied after each run are identical to the
-> sequential version.
-
-### Parallelization (process pool, all cores)
-
-The independent MOEA runs are executed on all available cores via a simple
-process pool — parallelism comes from running *separate MOEA instances*
-concurrently, not from changing how a single MOEA advances.
-
-- `mohh/parallel.py` — `run_parallel(fn, tasks, on_complete=None)`: creates a
-  `ProcessPoolExecutor` with one worker per CPU (dynamic, capped by the number
-  of tasks) and returns the results in task order. Falls back to a plain
-  sequential loop for a single task or single core. The optional `on_complete(i)`
-  callback is invoked in the main process as each task finishes so the original
-  `tqdm` progress bars stay live (they advance while solving, exactly as in the
-  sequential version) instead of jumping at the end.
-- **Generation (search)** — `HyperHeuristic.evaluation_step` builds one task per
-  (candidate operator × training instance) and each worker runs that inner MOEA
-  (`generation/algorithm/hyperheuristic.py::_solve_individual_instance`). The
-  main process then applies the exact same updates as before (pareto sets/fronts,
-  consolidated fronts, metrics).
-- **Evaluation** — `run_experiments` builds one task per repeated experiment
-  (`evaluation/experiment.py::_solve_experiment_task`); this applies to **all**
-  solvers benchmarked (MOEAD, NSGAII, SMSEMOA). Each worker reproduces the same
-  global seeds (`random.seed`, `np.random.seed`) as the sequential loop, so the
-  evaluation results are comparable run-to-run. Generation seeds
-  `np.random.seed(seed)` per independent run for reproducibility (the RNG stream
-  is no longer shared across serial candidates).
-
----
-
-## Data
-
-`datasets/mqap/{train,test}/` hold mQAP instances in the Knowles-Corne
-(`KC`) benchmark format. Filename encodes the instance: `KC{n}-{k}fl-{tag}`,
-e.g. `KC20-2fl-3rl` = 20 facilities, 2 flow matrices (objectives), variant
-`3rl`. Each file starts with a header line, followed by the distance matrix
-and one flow matrix per objective:
+`datasets/mqap/{train,test}/` holds mQAP instances in the Knowles-Corne (KC) format. The name encodes size, number of objectives and variant, e.g. `KC20-2fl-3rl` (20 facilities, two flow matrices, variant `3rl`). Each file has a header, an `N x N` distance matrix, then one `N x N` flow matrix per objective:
 
 ```
 facilities= 20 objectives= 2 max_distances= ... max_flows= ... overlap= ... seed= ...
 <N x N distance matrix>
 <N x N flow matrix, objective 1>
 <N x N flow matrix, objective 2>
-...
 ```
 
-Training instances (used only by `mohh-generate`) are smaller (`KC10`,
-`KC20`, `KC30`); test instances (used only by `mohh-evaluate`) are held out
-to check that discovered operators generalize rather than overfit the
-training set.
+Training instances are smaller (`KC10`, `KC20`, `KC30`); test instances are held out and used only by evaluation.
 
----
+## Configuration
 
-## Configuration reference
+Defaults live in three Python files and two YAML files, plus two environment overrides. Values not exposed as CLI flags are edited there before a run.
 
-Both `generation/params.py` and `evaluation/params.py` are plain Python
-dicts merged into a `Params()` singleton at `set_params(...)` time, then
-patched by any CLI overrides. Representative excerpts:
+| Source | Scope | Contents |
+|---|---|---|
+| `src/mohh/generation/params.py` | GE search | `hh_params`: population 50, generations 30, elite 15, initialization/selection/crossover/mutation; `mo_params`: inner population 105, generations 300, crossover-only by default. |
+| `src/mohh/evaluation/params.py` | Benchmarking | `SOLVERS` (MOEAD, NSGAII, SMSEMOA), `N_EXPERIMENTS` (31 repeats per cell), `EVAL_BUDGETS` (10k/30k/50k), inner MOEA budget. |
+| `src/mohh/constants.py` | Shared protocol | `NADIR`, `EVAL_BUDGETS`, `MO_POPULATION_SIZE`, `MO_GENERATIONS`, `N_EXPERIMENTS = 31`, probabilities and timeouts. |
+| `config/prompts.yaml` | LLaMEA prompts | `ROLE`, `TASK`, `SKELETON`, `FORMAT`, `STRATEGY_REFINE`, `STRATEGY_CREATE`; `MOHH_PROMPTS_REGISTRY` replaces this path. |
+| `config/reasoning.yaml` | Reasoning models | Per-model `match`, vLLM `parser`, thinking `toggle`, `code_in_reasoning`, `max_tokens`, extra `vllm_args` and `env`; `MOHH_REASONING_REGISTRY` replaces this path. |
 
-```python
-# generation/params.py
-hh_params = {
-    'POPULATION_SIZE': 50,       # outer GE population
-    'GENERATIONS': 30,           # outer GE generations
-    'ELITE_SIZE': 15,            # kept unconditionally each generation
+Both `params.py` files are dicts merged into a `Params()` singleton at `set_params(...)`, then patched by CLI overrides. The YAML files are read by `mohh.llamea.prompt_config` and `mohh.llamea.reasoning`; the environment variables above point to alternative registries.
 
-    'INITIALIZATION': "Rvd",
-    'SELECTION': "Tournament", 'TOURNAMENT_SIZE': 3,
-    'CROSSOVER': 'KPointCrossover', 'CROSSOVER_K_POINTS': 2, 'CROSSOVER_PARENTS': 2,
-    'MUTATION': 'BitFlipMutation', 'MUTATION_PROBABILITY': 0.01,
-}
+## Post-analysis
 
-mo_params = {
-    'MO_MODEL': "MOEAD",         # inert default - overwritten by the CLI's --models value
-    'MO_POPULATION_SIZE': 105,   # inner MOEA population, per candidate operator
-    'MO_GENERATIONS': 300,
-    'MO_MUTATION_BOOL': False,   # inner MOEA runs crossover-only by default
-}
+`mohh-post` is the CLI for finished runs; `mohh-post --help` prints the subcommands and `mohh-post <subcommand> --help` their flags. The registry is `src/mohh/postanalysis/__init__.py`; analyses read the `run_metrics/` JSON of an experiment.
+
+```bash
+mohh-post --help
+mohh-post gen --help
 ```
 
-```python
-# evaluation/params.py
-mo_params = {
-    'SOLVERS': ["MOEAD", "NSGAII", "SMSEMOA"],   # benchmarked by default
-    'N_EXPERIMENTS': 11,                          # repeats per instance/operator/solver
-    # 10500/31500/52500 = 105 (MO_POPULATION_SIZE) * 100/300/500 generations -
-    # these are the published evaluation numbers.
-    'EVAL_BUDGETS': {"10k": 10500, "30k": 31500, "50k": 52500},
-    'MO_POPULATION_SIZE': 105,
-    'MO_GENERATIONS': 500,
-}
+| Subcommand | Module | Purpose |
+|---|---|---|
+| `gen` | `analyze_gen.py` | Per-generation metrics and saturation diagnostics. |
+| `operators` | `analyze_operators.py` | Discovered-operator statistics. |
+| `search` | `analyze_search.py` | LLaMEA search summaries. |
+| `ast-diversity` | `ast_diversity.py` | Diversity of operator source code. |
+| `eval31` | `evaluate_31.py` | Analysis of 31-repetition evaluations. |
+| `generations` | `evaluate_generations.py` | Results of evaluation by generation. |
+| `figures` | `export_figure_values.py` | Values behind plotted figures. |
+| `reference-sets` | `generate_reference_sets_pop.py` | Reference-set populations. |
+| `generation-comparison` | `generation_comparison.py` | Compare generations of a run. |
+| `hv-scale` | `hv_scale_from_evaluation.py` | Hypervolume scale of an evaluation. |
+| `indicators` | `indicator_quality.py` | Quality of computed indicators. |
+| `reference-report` | `reference_sets_report.py` | Report on generated reference sets. |
+
+Standalone comparison scripts are not part of `mohh-post`: `scripts/compare_operators.py` re-evaluates discovered and classic operators under one shared frame with paired seeds and reports Wilcoxon/Holm statistics; `scripts/compare_ge_frame.py` uses the GE evaluation harness for a direct comparison with a generation experiment.
+
+## LLaMEA search
+
+`mohh-llamea` replaces the grammar with an LLM that writes a Python `crossover(x, y)` operator. The inner MOEA and fitness are the same as in GE: population nadir as reference point, hypervolume per instance, mean rank across instances. The GE core is unchanged; the operator is injected through `solver.crossover` (`src/mohh/llamea/`). Prompts and reasoning settings come from the files in [Configuration](#configuration).
+
+```bash
+python -m pip install -e ".[llamea]"
+python -m pip install -e ".[vllm]"   # only on the GPU node serving the model
 ```
 
-Both share `problem_params` (`PROBLEM_NAME: "QAP"`, `DATASET: "mqap"`,
-`OPTIMIZATION_KIND: False` for minimization) and `grammar_params`
-(`GRAMMAR_FILE: "naturals.bnf"`).
+The model is reached through an OpenAI-compatible endpoint (vLLM, Ollama or `scripts/local_openai_server.py`).
 
----
+```bash
+MODEL=qwen2.5-coder:7b-instruct BASE_URL=http://127.0.0.1:11434/v1 \
+NO_DOWNLOAD=1 CATEGORY=searches BUDGET=200 TRAIN_INSTANCES=8 \
+EVAL_TEST=1 NAME=qwen25coder7b_moead_b200 PYTHON=python3 \
+./scripts/llamea_search.sh
+```
+
+Relevant flags of `mohh-llamea`:
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--budget N` | Candidate evaluations, not generations. | `1000` |
+| `--n-parents` / `--n-offspring` | Population size / children per step. | `1` / `1` |
+| `--solver` | Inner MOEA (`MOEAD`, `NSGAII`, `SMSEMOA`). | `MOEAD` |
+| `--mo-generations` / `--mo-population-size` | Inner MOEA budget. | `30` / `30` |
+| `--repeat-penalty F` | Score multiplier for repeated code; `1.0` disables. | `0.5` |
+| `--operator-memory N` | Previous mechanism descriptions in the prompt. | `0` (CLI), `6` (cluster job) |
+| `--eval-test` / `--eval-repeats R` | Test-set evaluation and its repeat count. | off / `11` |
+| `--dry-run` | Validate endpoint and config, write them, exit. | off |
+
+`refine` shows the parent operator and its rank; `create` shows only the interface skeleton. Reasoning models keep the raw response, including `reasoning_content`, in `llm_requests.jsonl`.
+
+An operator must use numpy's global RNG (`np.random.*`); a private `np.random.default_rng()` ignores the seed and measures noise. Reasoning models need `MAX_TOKENS=8192` to avoid truncation before the code is written. Searches write `run.json`, `search_summary.json`, checkpoints and the best operator to `results/searches/<EXPERIMENT_NAME>/` (generated at run time).
+
+## Cluster
+
+The scripts below live in `slurm/` and run from the repository root on the login node. Paths are passed through environment variables; no checkout path is fixed in the scripts. Outputs go to `results/` and `logs/` (generated on the cluster).
+
+| Script | Purpose | Main environment variables |
+|---|---|---|
+| `slurm/llamea-all.sh` | Downloads/verifies the model, submits the vLLM + LLaMEA GPU job. | `PROFILE`, `GENERATIONS`, `BUDGET`, `EXPERIMENT_NAME`, `EVAL_TEST`, `COMPARE`, `OPERATOR_MEMORY`, `CPUS`, `MEM`, `TIME`, `WAIT`, `DRY_RUN`, `MOHH_MODELS_DIR` |
+| `slurm/compare-operators.sh` | Shared-frame comparison of discovered and classic operators. | `OPERATORS`, `GROUPS`, `CONTRASTS`, `SPLIT`, `INSTANCES`, `REPEATS`, `GE_PROTOCOL`, `SOLVER`, `SEED`, `NAME`, `LOAD_FRONTS` |
+| `slurm/mohh-full-chain.sh` | Submits generation and evaluation with `--dependency=afterok`. | `USER` (from the environment) |
+| `slurm/mohh-generate-big.slrm` | GE search on a full compute node; extra flags from variables. | `MODELS`, `EXPERIMENT_ARGS`, `GENERATE_ARGS`, `EXPERIMENT_PATH` |
+| `slurm/mohh-evaluate.slrm` | Evaluation of one experiment, GE or LLaMEA operator. | `EXPERIMENT`, `DATASET_PATH`, `EVALUATION_DIR`, `SOLVERS`, `LLAMEA_OPERATOR`, `SEED`, `FORCE`, `MOEA_TIMEOUT`, `CONDA_ENV` |
+| `slurm/submit_evaluate_array.sh` | Array of one task per test instance plus the figures job. | `EXPERIMENT`, `DATASET_PATH`, `SOLVERS`, `N_EXPERIMENTS`, `MAX_CONCURRENT`, `DEPENDENCY`, `EVALUATION_DIR` |
+
+```bash
+bash slurm/mohh-full-chain.sh
+EXPERIMENT=<path-to-experiment> DATASET_PATH=<path-to-dataset> \
+    bash slurm/submit_evaluate_array.sh
+PROFILE=smoke BUDGET=20 EVAL_TEST=1 WAIT=1 bash slurm/llamea-all.sh
+```
+
+`EXPERIMENT` and `DATASET_PATH` are resolved on the cluster: the first points to an `Experiment_NNN/` folder from generation, the second to a dataset directory with `train/` and `test/`. Use an explicit `PROFILE` (for example `coder30b-awq` or `smoke`); the default is a fallback. Monitor jobs with `squeue --user=$USER` and the files under `logs/`.
+
+## Parallelism
+
+Independent MOEA runs are dispatched by `run_parallel` (`src/mohh/parallel.py`) through a process pool over separate solver instances; no algorithm logic changes. Workers come from `MOHH_WORKERS`, then `SLURM_CPUS_PER_TASK` (or `SLURM_CPUS_ON_NODE`), then `os.cpu_count()`. Results keep task order and an `on_complete` callback advances the progress bars in the main process. Tasks are per candidate and training instance in generation, per repeated experiment in evaluation; a timeout or `on_error="record"` yields an error record instead of aborting the batch.
+
+## Repository layout
+
+```
+MOOHH-R/
+├── pyproject.toml
+├── config/{prompts,reasoning}.yaml
+├── grammars/{naturals,reals}.bnf
+├── datasets/mqap/{train,test}/
+├── src/mohh/
+│   ├── cli.py, main.py, run_evaluation.py
+│   ├── constants.py                 shared protocol values
+│   ├── parallel.py                  run_parallel, worker resolution
+│   ├── core/
+│   │   ├── representation/          grammar, mapper, population
+│   │   ├── problem/                 QAP problem and instance loader
+│   │   ├── indicators/              HV, IGD, R2, delta-plus, reference sets
+│   │   ├── operators/               HH_Operator crossover wrapper
+│   │   └── utilities/               algorithm and instance helpers
+│   ├── shared/                      fronts, MO, instances, operators, statistics
+│   ├── generation/                  outer GE loop, inner MOEA, GE operators
+│   ├── evaluation/                  sweep, solver classes, plots, result layout
+│   ├── llamea/                      LLM search
+│   │   ├── fitness.py               fitness (compatibility alias)
+│   │   ├── operator.py              LLMOperator (compatibility alias)
+│   │   └── statistics.py            paired statistics (compatibility alias)
+│   ├── analysis/                    readers, indicators, diversity, plots
+│   └── postanalysis/                mohh-post CLI and 12 analyses
+├── scripts/                         comparisons, search wrappers, model tools
+├── slurm/                           cluster scripts
+├── results/                         generated by runs
+└── logs/                            generated on the cluster
+```
+
+`src/mohh/evaluation/operators/mutation.py` also re-exports `Swap_Mutation` as a compatibility alias. `grammars/reals.bnf` is not wired into an entry point. The two `MOSolver` classes (`generation/algorithm/multiobjective.py` and `evaluation/algorithms.py`) share a name, not an API.
 
 ## Algorithms
 
-### MOEAs (inner loop and benchmarking)
-
 | Key | pymoo class | Used in |
-|-----|-------------|---------|
-| `MOEAD` | `pymoo.algorithms.moo.moead.MOEAD` | generation (inner loop, default) and evaluation |
-| `NSGAII` | `pymoo.algorithms.moo.nsga2.NSGA2` | generation and evaluation |
-| `SMSEMOA` | `pymoo.algorithms.moo.sms.SMSEMOA` | generation and evaluation |
+|---|---|---|
+| `MOEAD` | `pymoo.algorithms.moo.moead.MOEAD` | inner loop and evaluation |
+| `NSGAII` | `pymoo.algorithms.moo.nsga2.NSGA2` | inner loop and evaluation |
+| `SMSEMOA` | `pymoo.algorithms.moo.sms.SMSEMOA` | inner loop and evaluation |
 
-### Grammar primitives (`grammars/naturals.bnf`)
+The active grammar, `grammars/naturals.bnf`, builds expressions from the primitives in `core/utilities/algorithm/HH_functions.py`:
 
-The active grammar builds operator expressions from these primitives
-(implemented in `core/utilities/algorithm/HH_functions.py`):
+| Primitive | Arity | Effect |
+|---|---|---|
+| `move_right` | 1 | Rotate the permutation one position right. |
+| `reverse` | 1 | Reverse the permutation. |
+| `map_list` | 2 | Apply one list as an index permutation of the other. |
+| `alternate_elements` | 2 | Interleave both parents and de-duplicate. |
+| `order_based(fill, preserve, x, y)` | 2 | Keep elements from `x` chosen by `preserve`, fill the rest from `y`. |
 
-| Primitive | Arity | Description |
-|-----------|-------|-------------|
-| `move_right` | 1 | Rotate the permutation one position to the right |
-| `reverse` | 1 | Reverse the permutation |
-| `map_list` | 2 | Use each list as an index permutation of the other |
-| `alternate_elements` | 2 | Interleave elements from both parents, then de-duplicate |
-| `order_based(fill, preserve, x, y)` | 2 | `preserve` selects elements/segments to keep from `x`, `fill_first_occurring` fills the rest with the first not-yet-used value from `y`, in order |
-| `preserve_elements` / `preserve_segments` | - | Two selection strategies for `order_based`'s `preserve` slot |
-
-`grammars/reals.bnf` additionally defines real-valued primitives
-(`sin`, `cos`, `convolution`, `one_point`, `masked_cross`, ...) but is not
-wired into any current entry point.
-
-**The grammar can be extended and modified once its non-terminals are programmed accordingly**
-
----
+`preserve_elements` and `preserve_segments` fill the `preserve` slot; the grammar extends by adding non-terminals and their implementations.
 
 ## Output format
 
-After `mohh-generate`, then `mohh-evaluate <path>`, the results tree is:
+A generation run followed by `mohh-evaluate` writes:
 
 ```
 results/Experiment_NNN/
-├── <MODEL>_operators.txt                     <- "Best: <phenotype>\nMiddle: ...\nWorst: ..."
-├── <MODEL>_<hostname>_<timestamp>/
-│   └── generation_results/
-│       ├── parameters.txt                    <- every param value used for this run
-│       ├── CLI_output.log
-│       ├── individuals/
-│       │   └── Individual_NNNNNN/
-│       │       ├── general_info.json         <- name, phenotype, nodes, depth, genome, codons_usage
-│       │       └── instance_<name>.json      <- per-instance pareto set/front/solutions for this individual
-│       ├── generations/
-│       │   └── generation_NNNN/
-│       │       ├── population.json           <- individual IDs in this generation
-│       │       ├── offspring.json            <- (only present when offspring were just created)
-│       │       └── Instance_Fronts_<name>.json <- per-instance consolidated non-dominated fronts
-│       └── initial_solutions/permutation/<instance>.txt
-│
+├── <MODEL>_operators.txt
+├── <MODEL>_<host>_<timestamp>/
+│   ├── generation_results/
+│   │   ├── parameters.txt, CLI_output.log
+│   │   ├── individuals/Individual_NNNNNN/{general_info.json, instance_*.json}
+│   │   └── generations/generation_NNNN/{population.json, offspring.json, Instance_Fronts_*.json}
+│   └── run_metrics/generation_NNNN.json
 └── evaluation_results/
     ├── initial_solutions/{permutation,real}/<instance>/{seeds.txt, experiment_NNN.txt}
-    └── <SOLVER>/<budget>/
-        ├── <instance>.csv                    <- one row per experiment, one column per operator x mutation
-        ├── fronts/<instance>/
-        │   ├── <label>_<mutation>_<solver>.pof[,_norm.pof]   <- median front per operator combination
-        │   └── best_front_consolidated[_norm].pof
-        └── Figures/{NoMutation,WithMutation}/<instance>_{NM,WM}.png
+    ├── <SOLVER>/<budget>/<instance>.csv
+    ├── <SOLVER>/<budget>/fronts/<instance>/*.pof
+    ├── <SOLVER>/<budget>/Figures/{NoMutation,WithMutation}/*.png
+    └── run_metrics/evaluation_<instance>.json
 ```
 
-**`<instance>.csv` columns** are named `<label>_<combination>_<NM|WM>_<solver>`
-(e.g. `MOEAD_Best_NM_MOEAD`, `None_PMX_WM_NSGAII`), where `label` is `MOEAD`
-(the generation model) for discovered operators or `None` for baselines,
-`combination` is `Best`/`Middle`/`Worst`/`Standard`/`PMX`/`CX`, and each row
-is one repeated experiment's hypervolume.
+`run_metrics/` holds one JSON per generation or evaluation instance with timers, counters and phase data, plus consolidated fronts under `fronts/`; these feed the analyses in [Post-analysis](#post-analysis).
 
-A budget directory is only created if at least one solver/instance actually
-reached it; if `--mo-generations` is too small for a given `--eval-budgets`
-entry, that budget is silently skipped for that run rather than erroring.
+CSV columns are `<label>_<combination>_<NM|WM>_<solver>` (label = model or `None`, combination = Best/Middle/Worst/Standard/PMX/CX, NM/WM = mutation).
+
+A budget directory appears only when a solver reached it; unreachable budgets are skipped.
