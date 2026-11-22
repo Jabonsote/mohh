@@ -1,0 +1,68 @@
+# Prompts del bucle LLaMEA (1+1) — FUENTE UNICA DE VERDAD.
+# Anadir una clave = anadirla aqui. No tocar codigo ni scripts.
+# Los textos son literales: no cambiar saltos de linea ni espacios.
+
+ROLE: >-
+  You are an expert in evolutionary computation and Python. You design
+  variation operators for permutation-encoded multi-objective optimization
+  problems.
+
+STRATEGY_REFINE: >-
+  Refine the strategy of the selected solution to improve it. Keep its main
+  mechanism and change only what is needed.
+
+STRATEGY_CREATE: >-
+  Generate a new algorithm that is different from the algorithms you have
+  tried before. Use a different combination of order, position, adjacency
+  or cycle ideas.
+
+TASK: |-
+  Design a crossover (recombination) operator.
+
+  Write a module-level Python function named EXACTLY:
+
+      def crossover(x, y):
+
+  `x` and `y` are numpy arrays that are permutations of 0..n-1.
+  Return one child permutation, or a tuple (child1, child2).
+  Do not modify `x` or `y`.
+  The child must be a permutation of 0..n-1.
+  The operator must work for any n >= 2.
+
+  Do NOT call `.pop()` or `.index()` on a numpy array; convert with
+  `list(x)` first if needed. Ensure `len(child) == n`, every value appears
+  exactly once, and there are no -1 entries. It must also work when `x` is
+  `[0, 1, ..., n-1]` and `y` is `[n-1, ..., 1, 0]`.
+
+  Use randomness ONLY through numpy's global RNG (`np.random.*`). Do NOT create
+  your own generator (`np.random.default_rng()`): the evaluation seeds
+  `np.random.seed(...)` and a private generator would ignore that seed, making
+  the operator irreproducible.
+
+  Answer with the code only: no long explanations, no examples of usage, no
+  self-checks that call `crossover` at import time. The operator must fit in a
+  few dozen lines.
+
+# TASK_ONE no se duplica: se deriva de TASK + este sufijo.
+TASK_ONE_SUFFIX: "\nReturn exactly one child permutation (not a tuple)."
+
+SKELETON: |
+  import numpy as np
+
+  def crossover(x, y):
+      n = len(x)
+      child = np.empty(n, dtype=x.dtype)   # construye una permutacion NUEVA
+      # ... tu mecanismo ...
+      return child
+
+FORMAT: |-
+  Answer in exactly this format:
+
+  # Description: <one line>
+  # Code:
+  ```python
+  def crossover(x, y):
+      ...
+  ```
+
+  The function must be named exactly `crossover`.

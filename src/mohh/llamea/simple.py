@@ -19,73 +19,11 @@ from datetime import datetime
 from mohh.llamea.fitness import build_population_evaluator, compile_operator
 from mohh.llamea.parsing import parse_llm_response
 from mohh.llamea.priors import load_priors
+from mohh.llamea.prompt_config import (
+    FORMAT, ROLE, SKELETON, STRATEGY_CREATE, STRATEGY_REFINE, TASK,
+    TASK_ONE, build_prompt,
+)
 from mohh.llamea.vllm import extract_description
-
-ROLE = (
-    "You are an expert in evolutionary computation and Python. "
-    "You design variation operators for permutation-encoded "
-    "multi-objective optimization problems."
-)
-
-TASK = """Design a crossover (recombination) operator.
-
-Write a module-level Python function named EXACTLY:
-
-    def crossover(x, y):
-
-`x` and `y` are numpy arrays that are permutations of 0..n-1.
-Return one child permutation, or a tuple (child1, child2).
-Do not modify `x` or `y`.
-The child must be a permutation of 0..n-1.
-The operator must work for any n >= 2.
-
-Do NOT call `.pop()` or `.index()` on a numpy array; convert with
-`list(x)` first if needed. Ensure `len(child) == n`, every value appears
-exactly once, and there are no -1 entries. It must also work when `x` is
-`[0, 1, ..., n-1]` and `y` is `[n-1, ..., 1, 0]`.
-
-Use randomness ONLY through numpy's global RNG (`np.random.*`). Do NOT create
-your own generator (`np.random.default_rng()`): the evaluation seeds
-`np.random.seed(...)` and a private generator would ignore that seed, making
-the operator irreproducible.
-
-Answer with the code only: no long explanations, no examples of usage, no
-self-checks that call `crossover` at import time. The operator must fit in a
-few dozen lines."""
-
-TASK_ONE = TASK + "\nReturn exactly one child permutation (not a tuple)."
-
-STRATEGY_REFINE = (
-    "Refine the strategy of the selected solution to improve it. "
-    "Keep its main mechanism and change only what is needed."
-)
-STRATEGY_CREATE = (
-    "Generate a new algorithm that is different from the algorithms you have "
-    "tried before. Use a different combination of order, position, adjacency "
-    "or cycle ideas."
-)
-
-#: Esqueleto que se muestra cuando no hay un operador padre (estrategia
-#: `create`): fija el contrato sin dar ningun mecanismo que copiar.
-SKELETON = """import numpy as np
-
-def crossover(x, y):
-    n = len(x)
-    child = np.empty(n, dtype=x.dtype)   # construye una permutacion NUEVA
-    # ... tu mecanismo ...
-    return child
-"""
-
-FORMAT = """Answer in exactly this format:
-
-# Description: <one line>
-# Code:
-```python
-def crossover(x, y):
-    ...
-```
-
-The function must be named exactly `crossover`."""
 
 
 class Candidate:
@@ -101,74 +39,6 @@ class Candidate:
         self.fitness = fitness
         self.feedback = feedback
         self.error = error
-
-
-def build_prompt(parent_code, strategy, last_error="", score=None,
-                 description="", one_child=True, history=(), best_score=None):
-    """Plantilla BAG: rol, tarea, historial, codigo, estrategia y formato.
-
-    `score` es el score **del padre que se muestra** (el incumbent cuando se
-    refina, el prior cuando se refina un prior) y `best_score` el del mejor
-    operador hasta ahora. Antes se confundian: se le atribuia al prior el
-    score del incumbent, asi que el modelo creia que estaba refinando el
-    mejor operador cuando en realidad era uno de los peores.
-
-    `parent_code=None` (estrategia `create`) omite el bloque `REFERENCE CODE`
-    y lo sustituye por un esqueleto: el modelo no tiene un operador que
-    copiar, solo el contrato. Anclar la exploracion al incumbent era lo que
-    hacia que la estrategia `create` fuera una copia anotada.
-    """
-    task = TASK_ONE if one_child else TASK
-    if strategy == "refine":
-        strategy_text = STRATEGY_REFINE
-    else:
-        strategy_text = STRATEGY_CREATE
-    has_parent = parent_code is not None
-    history_text = ""
-    rows = []
-    for item in list(history)[-6:]:
-        if isinstance(item, (tuple, list)) and len(item) >= 2:
-            rows.append(f"- {item[0]} (mean rank: {item[1]:.4f})")
-        else:
-            rows.append(f"- {item}")
-    listed = "\n".join(rows)
-    legend = ("The score is the GE mean rank over the training instances "
-              "(1 = best, lower is better; 2 = worst).")
-    if has_parent:
-        shown = score if score is not None else best_score
-        if shown is not None:
-            history_text = (
-                "The algorithms already evaluated "
-                "(description, mean rank) are:\n"
-                f"{listed or '- current best (mean rank: %.4f)' % shown}\n\n"
-                f"{legend}\n\n"
-                "The selected solution to update is:\n"
-                f"{description or 'current best'} (mean rank: {shown:.4f})\n\n"
-                "Do not repeat an operator already evaluated; change its mechanism.\n\n")
-    else:
-        history_text = (
-            "The algorithms already evaluated "
-            "(description, mean rank) are:\n"
-            f"{listed or '- (none yet)'}\n\n"
-            f"{legend}\n\n"
-            "There is no parent operator: design a new one from scratch, "
-            "with a mechanism different from the ones listed above.\n\n")
-    if has_parent:
-        reference = f"REFERENCE CODE\n```python\n{parent_code}\n```"
-    else:
-        reference = ("SKELETON (fill in the mechanism yourself; do not copy a "
-                     "known operator verbatim)\n```python\n" + SKELETON + "```")
-    prompt = (
-        f"{ROLE}\n\nTASK\n{task}\n\n{history_text}"
-        f"{reference}\n\n"
-        f"STRATEGY\n{strategy_text}\n\n{FORMAT}"
-    )
-    if last_error:
-        prompt += (
-            "\n\nPREVIOUS ATTEMPT FAILED:\n"
-            f"{last_error}\n"
-            "Fix that exact error. Return a complete, runnable operator.")
-    return prompt
 
 
 def _response_truncated(llm):
