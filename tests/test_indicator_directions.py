@@ -117,7 +117,7 @@ def test_wilcoxon_no_invierte_la_direccion():
 
 def test_mejor_por_generacion_usa_la_direccion():
     """analyze_search toma max para HV y min para IGD+/DELTA_P/R2."""
-    import analyze_search
+    from mohh.postanalysis import analyze_search
 
     filas = []
     for generacion in (0, 1):

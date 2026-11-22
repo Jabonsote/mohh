@@ -53,6 +53,7 @@ mohh-generate = "mohh.cli:generate"
 mohh-evaluate = "mohh.cli:evaluate"
 mohh-run = "mohh.cli:run_full"
 mohh-llamea = "mohh.llamea.run:main"
+mohh-post = "mohh.postanalysis.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mohh"]

@@ -27,18 +27,7 @@ ROOT = os.path.dirname(os.path.dirname(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-SPEC = importlib.util.spec_from_file_location(
-    "generation_comparison",
-    os.path.join(ROOT, "generation_comparison.py"),
-)
-generation_comparison = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(generation_comparison)
-
-SEARCH_SPEC = importlib.util.spec_from_file_location(
-    "analyze_search", os.path.join(ROOT, "analyze_search.py")
-)
-analyze_search = importlib.util.module_from_spec(SEARCH_SPEC)
-SEARCH_SPEC.loader.exec_module(analyze_search)
+from mohh.postanalysis import analyze_search, generation_comparison
 
 
 def _escala(bounds=None, ref_point=1.1, source="consolidado"):

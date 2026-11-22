@@ -207,7 +207,7 @@ def test_hv_by_instance(tmp_path):
     pd.testing.assert_frame_equal(
         _script("wins_plot").load_hv(str(exp)),
         _original_hv(str(exp), with_experiment=False))
-    operators = _script("analyze_operators")
+    operators = importlib.import_module("mohh.postanalysis.analyze_operators")
     pd.testing.assert_frame_equal(operators.load_hv(exp),
                                   _original_hv_operators(exp))
     assert operators.parse_config("MOEAD_Best_NM_MOEAD") == (
