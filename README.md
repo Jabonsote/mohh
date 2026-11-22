@@ -107,20 +107,22 @@ mohh-post --help
 mohh-post gen --help
 ```
 
-| Subcommand | Module | Purpose |
-|---|---|---|
-| `gen` | `analyze_gen.py` | Per-generation metrics and saturation diagnostics. |
-| `operators` | `analyze_operators.py` | Discovered-operator statistics. |
-| `search` | `analyze_search.py` | LLaMEA search summaries. |
-| `ast-diversity` | `ast_diversity.py` | Diversity of operator source code. |
-| `eval31` | `evaluate_31.py` | Analysis of 31-repetition evaluations. |
-| `generations` | `evaluate_generations.py` | Results of evaluation by generation. |
-| `figures` | `export_figure_values.py` | Values behind plotted figures. |
-| `reference-sets` | `generate_reference_sets_pop.py` | Reference-set populations. |
-| `generation-comparison` | `generation_comparison.py` | Compare generations of a run. |
-| `hv-scale` | `hv_scale_from_evaluation.py` | Hypervolume scale of an evaluation. |
-| `indicators` | `indicator_quality.py` | Quality of computed indicators. |
-| `reference-report` | `reference_sets_report.py` | Report on generated reference sets. |
+| Subcommand | Purpose |
+|---|---|
+| `gen` | Per-generation metrics and saturation diagnostics. |
+| `operators` | Discovered-operator statistics. |
+| `search` | LLaMEA search summaries. |
+| `ast-diversity` | Diversity of operator source code. |
+| `eval31` | Analysis of 31-repetition evaluations. |
+| `generations` | Results of evaluation by generation. |
+| `figures` | Values behind plotted figures. |
+| `reference-sets` | Reference-set populations. |
+| `generation-comparison` | Compare generations of a run. |
+| `hv-scale` | Hypervolume scale of an evaluation. |
+| `indicators` | Quality of computed indicators. |
+| `reference-report` | Report on generated reference sets. |
+
+The implementations live in `src/mohh/postanalysis/`. Invoke them only through `mohh-post <subcommand>`.
 
 Standalone comparison scripts are not part of `mohh-post`: `scripts/compare_operators.py` re-evaluates discovered and classic operators under one shared frame with paired seeds and reports Wilcoxon/Holm statistics; `scripts/compare_ge_frame.py` uses the GE evaluation harness for a direct comparison with a generation experiment.
 
