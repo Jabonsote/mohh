@@ -30,7 +30,7 @@ en el NADIR (la "esquina buena" en minimizacion) y baja hacia p:
 
     Dp(A, P) = (1/|P|) * sum_{p in P} (1 - V_orth(A, p) / V_box(p))
 
-En dos objetivos la formula es exactamente el volumen ortogonal publicado por
+En dos objetivos la formula es el volumen ortogonal publicado por
 Ishibuchi et al., espejado a minimizacion, lo que se verifica en
 `tests/test_indicators.py`. La extension a m objetivos mantiene la
 descomposicion en tramos disjuntos a lo largo del primer objetivo, por lo que
@@ -153,7 +153,7 @@ def delta_p(front, reference, nadir=None):
         # Volumen de la caja B_p.
         box = float(np.prod(spans[idx]))
 
-        # Anchos de los tramos, recortados a [p_1, n_1]. El primer tramo
+        # Anchos de los tramos, limitados a [p_1, n_1]. El primero
         # arranca en el nadir.
         upper = np.concatenate(([nadir[0]], active[:-1, 0]))
         lower = active[:, 0]
@@ -161,7 +161,7 @@ def delta_p(front, reference, nadir=None):
             np.minimum(upper, nadir[0]) - np.maximum(lower, p[0]), 0.0
         )
 
-        # Secciones: producto de (a_j - p_j) para j >= 2, recortado a 0.
+        # Secciones: producto de (a_j - p_j) para j >= 2, acotado a 0.
         tail = active[:, 1:]
         if m > 2:
             sections = np.prod(np.maximum(tail - p[1:], 0.0), axis=1)

@@ -25,11 +25,10 @@ def normalize_front(front, bounds):
 
 
 def clip_to_reference_box(front, nadir=NADIR_FACTOR):
-    """Recorta objetivos a la caja [0, nadir] antes de calcular HV.
+    """Acota los objetivos a ``[0, nadir]`` antes del HV.
 
-    Evita que coordenadas negativas de un candidato mejor que el panel
-    inflen el HV por encima de ``nadir**K``. Puntos peores que el nadir
-    aportan 0.
+    Impide que coordenadas negativas superen el limite ``nadir**K``.
+    Puntos fuera del rango no aportan volumen.
     """
     return np.clip(np.asarray(front, dtype=float), 0.0, float(nadir))
 
@@ -85,10 +84,10 @@ def _nondominated(points):
 
 
 def comprobate_frame(points):
-    """`comprobate` de `experiment.py`: peela el frente mientras tenga <= 2 puntos.
+    """`comprobate` de `experiment.py`.
 
-    Evita calcular el nadir desde un frente que domina a todos los demas
-    puntos. Se detiene cuando no queda nada fuera del frente actual.
+    Recalcula el frente mientras contenga dos puntos o menos. Evita derivar
+    los limites de un frente que domina al resto del consolidado.
     """
     if points is None:
         return None

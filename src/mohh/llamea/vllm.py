@@ -78,8 +78,8 @@ def memory_block(descriptions, limit: int = 12) -> str:
 
     El fallo observado en `b200` fue generar 108 veces el mismo operador. El
     `--repeat-penalty` castiga la repeticion en el ranking, pero el modelo sigue
-    gastando generaciones en ella; recordarle explicitamente lo ya intentado es
-    mas barato que descartar el candidato despues. Cada descripcion y el bloque
+    gastando generaciones en ella; incluir lo ya intentado evita
+    evaluar candidatos repetidos. Cada descripcion y el bloque
     completo estan acotados para que la memoria no infle el contexto ni el costo.
     """
     items = [d.strip()[:_MAX_DESCRIPTION_CHARS] for d in descriptions

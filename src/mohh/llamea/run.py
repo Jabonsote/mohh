@@ -528,8 +528,8 @@ def run_llamea(args):
             if failure_reason is None:
                 value = float(evaluated.fitness)
             else:
-                # Mismo criterio que la busqueda y que compare_operators.py:
-                # un fallo es HV 0, no un par perdido (descartarlo sesgaria).
+                # Criterio de la busqueda y de compare_operators.py:
+                # un fallo se puntua con HV 0 para conservar el par.
                 value = 0.0
                 test_failures.append({"repeat": rep, "seed": rep_args.seed,
                                       "reason": failure_reason})

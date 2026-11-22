@@ -128,7 +128,7 @@ class ReferenceFitness:
     # ------------------------------------------------------------------
 
     def _subconjunto(self, referencia: ReferenceSet):
-        """Referencia recortada de forma determinista, cacheada."""
+        """Subconjunto determinista de la referencia, cacheado."""
         if self.subset is None or referencia.size <= int(self.subset):
             return referencia.normalized
 

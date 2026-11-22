@@ -251,10 +251,9 @@ def normalize_values(data: np.ndarray, vmin: float, vmax: float):
 def clip_to_nadir(front, nadir_point):
     """Acota el frente normalizado a ``[0, nadir]`` antes del HV.
 
-    Un operador puede devolver un hijo invalido y sacar un objetivo de la caja
-    de normalizacion; sin el clip el HV se va (se observo 94132 en KC18). Con
-    los limites del marco (vmin/vmax del frente no dominado consolidado) el
-    clip no cambia ningun HV de los operadores validos.
+    Un operador invalido puede sacar un objetivo de la caja de
+    normalizacion y producir un HV desbordado. Con los limites del marco
+    consolidado, la acotacion no modifica el HV de operadores validos.
     """
     return np.clip(np.asarray(front, dtype=float), 0.0, nadir_point)
 
@@ -516,10 +515,8 @@ def run_experiments(experiment_path, results_paths, operators,
 
                 for i, result in enumerate(results, start=1):
 
-                    # Una corrida que falla no aborta la instancia: se registra
-                    # y se deja el hueco (el CSV la escribe como NaN). Contarla
-                    # como 0 o descartarla es una decision del analisis, no
-                    # del runner.
+                    # Una corrida fallida se registra y se deja como NaN
+                    # en el CSV. Su tratamiento es decision del analisis.
                     if result is None or "error" in result:
                         reason = (result or {}).get("error", "sin resultado")
                         RunMetrics().record("moea_failures", {

@@ -28,8 +28,8 @@ valida:
     el protocolo de la evaluacion GE (MOEAD, NSGAII y SMSEMOA; ambas mutaciones;
     300/105; 31 repeticiones);
   * un fallo de evaluacion (operador que lanza una excepcion en una instancia)
-    se cuenta como HV 0, no se descarta del par: descartarlo haria que un
-    operador roto pareciera mejor. ``--fail-policy`` permite abortar o excluir.
+    se puntua con HV 0 para conservar el pareado; descartarlo sesgaria
+    la media. ``--fail-policy`` permite abortar o excluir.
   * **todo se guarda** para no repetir el MOEA: `fronts.npz`, `failures.json`,
     CSV por instancia y por operador, contrastes, frentes `.pof` (formato del
     original) y `evaluation.json`. Con `--load-fronts` se reanaliza sin MOEA.
@@ -379,7 +379,7 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
     comparacion ya corrida sin repetir el MOEA de los demas.
 
     Una excepcion se guarda como frente vacio. Asi ``hv_values`` puede contarla
-    como HV 0 en el par (o abortar con ``--fail-policy abort``) en vez de
+    como HV 0 en el par (o abortar con ``--fail-policy abort``) en lugar de
     eliminar la repeticion entera. No hay timeout por instancia: el MOEA ya
     esta acotado por generaciones y un limite fijo mataba corridas largas en
     instancias dificiles, perdiendo el frente ya calculado.

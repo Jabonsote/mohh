@@ -248,10 +248,9 @@ def pooled_reference_sets(
     siendo la misma para todos los individuos de la instancia, asi que los
     valores siguen siendo comparables entre individuos y entre generaciones.
 
-    Ventaja adicional: la regla es la MISMA para todas las instancias, richa
-    con P* de 15 o 100 puntos o con un solo punto. No hace falta ningun caso
-    especial, y por eso el analisis puede calcular los cuatro indicadores en
-    todas las instancias sin descartar ninguna.
+    La regla es comun a todas las instancias, con P* de 15, 100 o un solo
+    punto. No requiere casos especiales: los cuatro indicadores se calculan
+    en todas las instancias.
 
     Es la misma idea que ya usa el HV (`HypervolumeContext` se ajusta a los
     frentes consolidados), pero para las metricas relativas a P*: aqui la caja

@@ -121,8 +121,8 @@ def hv_values(fronts, operators, protocols, frames, repeats, labels,
     ``frame is None`` significa que la instancia no tiene escala (``vmin ==
     vmax``) y se excluye para todos los operadores, como en
     ``experiment.py``. Un frente vacio es un fallo del operador en esa
-    instancia: con ``fail_policy="zero"`` cuenta como HV 0 (peor caso); con
-    ``"exclude"`` se elimina el par; con ``"abort"`` se detiene la comparacion.
+    instancia: ``fail_policy="zero"`` asigna HV 0, ``"exclude"`` elimina
+    el par y ``"abort"`` detiene la comparacion.
 
     ``problems`` (dict opcional) acumula las celdas que no pudieron
     calcularse: un fallo de HV no aborta el analisis, se excluye y se reporta

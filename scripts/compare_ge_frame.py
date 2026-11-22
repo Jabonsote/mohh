@@ -475,7 +475,7 @@ def _hv_values(fronts, operators, protocols, frames, paths, repeats):
                         failures[key] = "normalizacion no finita"
                         row.append(0.0)
                         continue
-                    # Exactamente GE: no hay clip_to_reference_box.
+                    # El protocolo GE no acota la caja de referencia.
                     try:
                         hv = compute_hypervolume(
                             np.full(normalized.shape[1], NADIR_FACTOR),
@@ -570,8 +570,8 @@ def _write_report(path, args, rows, comparisons, frames, operators, protocols,
         "- Operadores: " + ", ".join(f"`{o['name']}` ({o['kind']})" for o in operators),
         "- Marco: por instancia, frente no dominado consolidado de todas las "
         "configuraciones y repeticiones (reduccion de GE cuando el frente "
-        "tiene <=2 puntos); normalizacion `(f - vmin)/(vmax - vmin)`; nadir "
-        "fijo `[1.1] * K`; sin clipping extra. Operadores del marco: "
+        "tiene dos puntos o menos); normalizacion `(f - vmin)/(vmax - vmin)`; "
+        "nadir fijo `[1.1] * K`, sin acotacion adicional. Operadores del marco: "
         + (", ".join(f"`{name}`" for name in getattr(
             args, "frame_operators_resolved", [])) or "todos") + ".",
         "- Semillas: "
