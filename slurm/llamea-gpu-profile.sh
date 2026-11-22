@@ -128,8 +128,6 @@ case "$PROFILE" in
         CONSTRAINT="${CONSTRAINT:-A10|A100|H100}"
         MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
         GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
-        VLLM_ARGS="${VLLM_ARGS:---reasoning-parser openai_gptoss}"
-        export MAX_TOKENS="${MAX_TOKENS:-8192}"
         ;;
     glm47-flash-awq-a10)
         # GLM-4.7-Flash AWQ (~17 GB de pesos) en A10 24 GB. La configuracion
@@ -141,12 +139,8 @@ case "$PROFILE" in
         CONSTRAINT="${CONSTRAINT:-A10}"
         MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
         GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
-        VLLM_ARGS="${VLLM_ARGS:---trust-remote-code --reasoning-parser glm45 --enforce-eager}"
+        VLLM_ARGS="${VLLM_ARGS:---enforce-eager}"
         # Tambien razona: el pensamiento se come `max_tokens`.
-        export MAX_TOKENS="${MAX_TOKENS:-8192}"
-        export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
-        export VLLM_USE_FLASHINFER_MOE_FP16="${VLLM_USE_FLASHINFER_MOE_FP16:-1}"
-        export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
         ;;
     coder-next-awq)
         # 80B/3B activos en W4A16: ~42 GB de pesos. Solo H100 80 GB; el AWQ
@@ -166,12 +160,8 @@ case "$PROFILE" in
         CONSTRAINT="${CONSTRAINT:-A100|H100}"
         MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
         GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.92}"
-        VLLM_ARGS="${VLLM_ARGS:---trust-remote-code --reasoning-parser glm45}"
+        VLLM_ARGS="${VLLM_ARGS:-}"
         # Tambien razona: el pensamiento se come `max_tokens`.
-        export MAX_TOKENS="${MAX_TOKENS:-8192}"
-        export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
-        export VLLM_USE_FLASHINFER_MOE_FP16="${VLLM_USE_FLASHINFER_MOE_FP16:-1}"
-        export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
         ;;
     coder8b)
         MODEL="${MODEL:-ByteDance-Seed/Seed-Coder-8B-Instruct}"
@@ -218,6 +208,24 @@ case "$PROFILE" in
         VLLM_ARGS="${VLLM_ARGS:-}"
         ;;
 esac
+
+# Razoning comun a CUALQUIER modelo: se consulta el registro externo
+# (config/reasoning.yaml) mediante scripts/model_profile.py. Asi anadir un
+# modelo nuevo no requiere editar este archivo ni codigo Python.
+MODEL_PROFILE="python scripts/model_profile.py"
+REASONING_PARSER="$(${MODEL_PROFILE} parser "$MODEL")"
+EXTRA_VLLM="$(${MODEL_PROFILE} args "$MODEL")"
+SUGGESTED_TOKENS="$(${MODEL_PROFILE} tokens "$MODEL")"
+export REASONING_PARSER
+VLLM_ARGS="${VLLM_ARGS:-} ${EXTRA_VLLM} ${REASONING_PARSER}"
+if [ -z "${MAX_TOKENS:-}" ]; then
+    MAX_TOKENS="${SUGGESTED_TOKENS}"
+    export MAX_TOKENS
+fi
+# Variables de entorno propias del modelo (p. ej. QuantTrio GLM).
+while IFS='=' read -r key value; do
+    [ -n "$key" ] && export "$key=$value"
+done < <(${MODEL_PROFILE} env "$MODEL")
 
 export MODEL CONSTRAINT MAX_MODEL_LEN GPU_MEM_UTIL VLLM_ARGS PROFILE
 # `MAX_TOKENS` solo se exporta si el perfil lo define (modelos de razonamiento).

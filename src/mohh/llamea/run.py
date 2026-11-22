@@ -64,6 +64,7 @@ from mohh.llamea.reporting import (
     write_seeds,
 )
 from mohh.llamea.statistics import add_holm, paired_summary
+from mohh.llamea.reasoning import resolve as resolve_reasoning
 from mohh.llamea.vllm import VLLM_LLM, model_is_available, wait_for_server
 
 
@@ -590,6 +591,7 @@ def run_llamea(args):
         sampling_repetition_penalty=args.sampling_repetition_penalty,
         operator_memory=args.operator_memory,
         thinking=(None if args.thinking == "auto" else args.thinking == "on"),
+        reasoning_spec=resolve_reasoning(args.model),
         request_log_path=request_log,
         request_context={
             "experiment": args.experiment_name,

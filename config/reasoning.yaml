@@ -1,0 +1,41 @@
+# Registro de razonamiento por modelo — FUENTE UNICA DE VERDAD.
+# Anadir un modelo = anadir un bloque aqui. No tocar codigo ni scripts.
+#
+# Coincidencia: `match` en el id del modelo en minusculas (primera que encaje).
+#   parser:            flag --reasoning-parser para vLLM (vacio = ninguno)
+#   toggle:            si el template acepta chat_template_kwargs.enable_thinking
+#   code_in_reasoning: si el codigo puede venir solo en reasoning_content
+#   max_tokens:        recomendado; el CLI puede sobreescribirlo
+#   vllm_args:         flags extra del servidor para este modelo
+#   env:               variables de entorno del servidor
+
+defaults:
+  parser: ""
+  toggle: false
+  code_in_reasoning: false
+  max_tokens: 4096
+  vllm_args: ""
+  env: {}
+
+models:
+  - match: "gpt-oss"
+    parser: "openai_gptoss"
+    max_tokens: 8192
+    code_in_reasoning: true
+
+  - match: "glm-4"
+    parser: "glm45"
+    max_tokens: 8192
+    code_in_reasoning: true
+    vllm_args: "--trust-remote-code"
+    env:
+      VLLM_USE_DEEP_GEMM: "0"
+      VLLM_USE_FLASHINFER_MOE_FP16: "1"
+      VLLM_USE_FLASHINFER_SAMPLER: "0"
+
+  - match: "glm-z1"
+    max_tokens: 8192
+    code_in_reasoning: true
+
+  - match: "qwen3"
+    toggle: true

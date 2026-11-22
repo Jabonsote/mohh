@@ -12,6 +12,7 @@ otro nodo apuntando a `http://<nodo-del-servidor>:8000/v1`.
 import json
 import os
 import re
+import sys
 import threading
 import time
 
@@ -203,8 +204,8 @@ class VLLM_LLM(OpenAI_LLM):
                  api_key="EMPTY", temperature=0.8, timeout=600,
                  max_tokens=None, top_p=None, top_k=None,
                  sampling_repetition_penalty=None, operator_memory=0,
-                 thinking=None, request_log_path=None, request_context=None,
-                 **kwargs):
+                 thinking=None, reasoning_spec=None,
+                 request_log_path=None, request_context=None, **kwargs):
         super().__init__(api_key=api_key, model=model, temperature=temperature, **kwargs)
         self.base_url = base_url
         self.max_tokens = max_tokens
@@ -213,8 +214,16 @@ class VLLM_LLM(OpenAI_LLM):
         self.sampling_repetition_penalty = sampling_repetition_penalty
         self.operator_memory = max(0, int(operator_memory or 0))
         # None = no tocar el template del servidor; True/False fuerza
-        # `chat_template_kwargs.enable_thinking` (Qwen3 y familia).
+        # `chat_template_kwargs.enable_thinking` solo si el modelo lo acepta.
+        from mohh.llamea.reasoning import ReasoningSpec, thinking_payload
         self.thinking = thinking
+        self.reasoning_spec = reasoning_spec or ReasoningSpec("", False, False, 4096, "", {})
+        self._thinking_payload = thinking_payload(self.reasoning_spec, thinking)
+        if thinking is not None and self._thinking_payload is None:
+            print(
+                f"AVISO: '--thinking on/off' no aplica a '{model}': su template "
+                "no expone enable_thinking. El razonamiento se controla en el "
+                "servidor (--reasoning-parser), no aqui.", file=sys.stderr)
         #: JSONL con la peticion exacta (incluida la memoria), respuesta cruda,
         #: `reasoning_content`, parametros de muestreo, usage y latencia.
         self.request_log_path = request_log_path
@@ -265,13 +274,18 @@ class VLLM_LLM(OpenAI_LLM):
                 if owner.sampling_repetition_penalty is not None:
                     extra.setdefault("repetition_penalty",
                                      owner.sampling_repetition_penalty)
-                if owner.thinking is not None:
-                    # vLLM/Qwen3: el template recibe enable_thinking. No se
-                    # manda a servidores que no lo entiendan salvo pedido
-                    # explicito (--thinking on/off).
-                    template = dict(extra.get("chat_template_kwargs") or {})
-                    template.setdefault("enable_thinking", bool(owner.thinking))
-                    extra["chat_template_kwargs"] = template
+                if owner._thinking_payload:
+                    # Solo modelos cuyo template expone enable_thinking
+                    # (Qwen3 y familia). gpt-oss/GLM razonan siempre y su
+                    # template no acepta este campo: mandarlo rompia la
+                    # respuesta con GLM.
+                    for key, value in owner._thinking_payload.items():
+                        if key == "chat_template_kwargs":
+                            template = dict(extra.get(key) or {})
+                            template.update(value)
+                            extra[key] = template
+                        else:
+                            extra.setdefault(key, value)
                 if extra:
                     kwargs["extra_body"] = extra
                 start = time.perf_counter()
@@ -576,8 +590,14 @@ class VLLM_LLM(OpenAI_LLM):
     def __setstate__(self, state):
         super().__setstate__(state)
         # Estados antiguos (pickles/checkpoints) no traen los campos nuevos.
+        from mohh.llamea.reasoning import ReasoningSpec, thinking_payload
         if not hasattr(self, "thinking"):
             self.thinking = None
+        if not hasattr(self, "reasoning_spec"):
+            self.reasoning_spec = ReasoningSpec("", False, False, 4096, "", {})
+        if not hasattr(self, "_thinking_payload"):
+            self._thinking_payload = thinking_payload(
+                self.reasoning_spec, self.thinking)
         if not hasattr(self, "request_log_path"):
             self.request_log_path = None
         if not hasattr(self, "request_context"):
