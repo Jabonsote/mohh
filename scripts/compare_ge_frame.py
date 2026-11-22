@@ -569,7 +569,7 @@ def _write_report(path, args, rows, comparisons, frames, operators, protocols,
         f"poblacion {args.mo_population_size}, budget `{args.budget}`.",
         "- Operadores: " + ", ".join(f"`{o['name']}` ({o['kind']})" for o in operators),
         "- Marco: por instancia, frente no dominado consolidado de todas las "
-        "configuraciones y repeticiones (con el peeling de GE cuando el frente "
+        "configuraciones y repeticiones (reduccion de GE cuando el frente "
         "tiene <=2 puntos); normalizacion `(f - vmin)/(vmax - vmin)`; nadir "
         "fijo `[1.1] * K`; sin clipping extra. Operadores del marco: "
         + (", ".join(f"`{name}`" for name in getattr(

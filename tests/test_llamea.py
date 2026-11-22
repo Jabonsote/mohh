@@ -158,7 +158,7 @@ def test_compile_operator_rejects_infinite_loop(monkeypatch):
     """Un operador que no termina (`while True`) se rechaza, no cuelga."""
     import mohh.llamea.fitness as fit
 
-    monkeypatch.setattr(fit, "OPERATOR_CALL_TIMEOUT", 0.5)
+    monkeypatch.setattr("mohh.llamea.compilation.OPERATOR_CALL_TIMEOUT", 0.5)
     code = (
         "import numpy as np\n\n"
         "def crossover(x, y):\n"
