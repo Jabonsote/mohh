@@ -1,5 +1,6 @@
 
 import os
+import json
 import time
 import random
 import numpy as np
@@ -55,29 +56,36 @@ def make_experiment_paths(experiment_path: list[str]):
 
 def generate_incremental_seeds(seeds_number: int, instance_name: str) -> list:
 
-    # Get the initial time-based seed
-    start = datetime.now()
-    seed = int(start.microsecond)  # Use microsecond as the base seed
+    # Semilla base determinista: la maestra de la corrida (`RANDOM_SEED`), no
+    # el reloj. Asi el mismo `--seed` reproduce exactamente las mismas
+    # semillas por experimento. Si se pide reutilizar una corrida anterior, se
+    # recargan las semillas guardadas (junto con sus poblaciones iniciales).
+    params = Params()
+    reuse_path = params["INITIAL_POPULATION_PATH"] or initial_population_path
 
-    seeds = [seed]  # Initialize the list with the first seed
+    seeds = []
 
-    for _ in range(1, seeds_number):
-        # Add a random increment (e.g., between 1 and 1000) to the previous seed
-        increment = random.randint(1, 1000)
-        new_seed = seeds[-1] + increment
-        seeds.append(new_seed)
-
-    if initial_population_path:
+    if reuse_path:
         try:
-            old_seeds = []
+            with open(os.path.join(reuse_path, "real", instance_name,
+                                   "seeds.txt"), "r") as f:
+                seeds = [int(line) for line in f if line.strip()]
+        except Exception:  # noqa: BLE001 - sin archivo: se regeneran
+            seeds = []
 
-            with open(os.path.join(initial_population_path, "real", instance_name, "seeds.txt"), "r") as f:
-                for line in f:
-                    old_seeds.append(int(line))
+    if len(seeds) >= seeds_number:
+        return seeds[:seeds_number]
 
-            seeds = old_seeds
-        except:
-            pass
+    base = params["RANDOM_SEED"]
+    if base is None:
+        base = int(datetime.now().microsecond)
+
+    if not seeds:
+        seeds = [int(base)]
+
+    while len(seeds) < seeds_number:
+        increment = random.randint(1, 1000)
+        seeds.append(seeds[-1] + increment)
 
     return seeds
 
@@ -276,6 +284,56 @@ def write_front(front: np.ndarray, file_path: str):
         file.close()
 
 
+def _write_json(path: str, payload) -> None:
+    """Escritura atomica de un JSON (tmp + rename)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as handle:
+        json.dump(payload, handle, indent=2, default=str)
+    os.replace(tmp, path)
+
+
+def _merge_json(path: str, payload: dict) -> None:
+    """Actualiza un JSON acumulativo (no pierde las instancias anteriores)."""
+    current = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as handle:
+                current = json.load(handle)
+        except Exception:  # noqa: BLE001 - corrupto: se reescribe
+            current = {}
+    current.update(payload)
+    _write_json(path, current)
+
+
+def _dump_instance_fronts(results_path: str, instance_name: str,
+                          fronts_model_level: dict, labels) -> str:
+    """Guarda TODOS los frentes de la instancia antes de calcular el HV.
+
+    Es la red de seguridad del diseno: si el bloque de metricas falla (frente
+    degenerado, HV no finito, excepcion de pymoo), el MOEA ya esta en disco y
+    no hay que repetirlo. Formato: ``fronts_npz/<instancia>.npz`` con claves
+    ``<presupuesto>|<config>|<experimento>``.
+    """
+    arrays = {}
+    for label in labels:
+        for config, by_experiment in fronts_model_level[label].items():
+            for experiment, front in by_experiment.items():
+                if front is None or len(front) == 0:
+                    continue
+                arrays[f"{label}|{config}|{experiment}"] = np.asarray(front)
+
+    if not arrays:
+        return ""
+
+    path = os.path.join(results_path, "fronts_npz", instance_name + ".npz")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp.npz"
+    np.savez_compressed(tmp, **arrays)
+    os.replace(tmp, path)
+    return path
+
+
 def run_experiments(experiment_path, results_paths, operators,
                     overrides: dict = None, instances=None) -> str:
 
@@ -292,6 +350,11 @@ def run_experiments(experiment_path, results_paths, operators,
 
     n_experiments = params["N_EXPERIMENTS"]
     eval_labels = list(params["EVAL_BUDGETS"].keys())
+
+    # Timeout por corrida del MOEA: 0 o negativo = sin limite (comodo en local).
+    moea_timeout = params["MOEA_TIMEOUT"]
+    if moea_timeout is not None and moea_timeout <= 0:
+        moea_timeout = None
 
     print("\n" + "-" * 40)
     print("Starting Evaluation")
@@ -352,6 +415,15 @@ def run_experiments(experiment_path, results_paths, operators,
     # Total time
     program_time = time.time()
 
+    # Marcadores de instancias terminadas (reanudacion) y acumuladores de
+    # incidencias. Se escriben por instancia para que un fallo posterior no
+    # borre el trabajo ya hecho.
+    done_dir = os.path.join(params["RESULTS_PATH"], ".done")
+    os.makedirs(done_dir, exist_ok=True)
+    failures_path = os.path.join(params["RESULTS_PATH"], "failures.json")
+    degenerate_path = os.path.join(params["RESULTS_PATH"], "degenerate.json")
+    hv_failures_path = os.path.join(params["RESULTS_PATH"], "hv_failures.json")
+
     for instance_path in instances:
 
         # Instance time
@@ -364,12 +436,22 @@ def run_experiments(experiment_path, results_paths, operators,
         instance_name = instance_path.replace("\\", "/").split("/")[-1]
         instance_name = instance_name.removesuffix(".txt")
 
+        # Reanudacion: saltar instancias ya terminadas (el CSV y el marcador
+        # se escriben al final de la instancia).
+        done_path = os.path.join(done_dir, instance_name + ".json")
+        if os.path.exists(done_path) and not params["FORCE_RERUN"]:
+            print(f"\n[skip] {instance_name}: ya evaluada "
+                  f"(FORCE_RERUN/--force para repetir)\n")
+            continue
+
         print("\n" + "-" * 40)
         print(f"Instance: {instance_name}")
         print("-" * 40)
 
         # Load problem & Create initial population for MO for all experiments
-        instance.load_problem(params["PROBLEM_NAME"], instance_path, n_experiments, initial_population_path)
+        reuse_path = params["INITIAL_POPULATION_PATH"] or initial_population_path
+        instance.load_problem(params["PROBLEM_NAME"], instance_path,
+                              n_experiments, reuse_path)
 
         # Make seeds
         seeds = generate_incremental_seeds(n_experiments, instance_name)
@@ -427,10 +509,31 @@ def run_experiments(experiment_path, results_paths, operators,
                 def on_complete(_index: int):
                     pbar.update(1)
 
-                results = run_parallel(_solve_experiment_task, tasks, on_complete=on_complete)
+                results = run_parallel(
+                    _solve_experiment_task, tasks, on_complete=on_complete,
+                    timeout=moea_timeout, on_error="record")
                 pbar.close()
 
                 for i, result in enumerate(results, start=1):
+
+                    # Una corrida que falla no aborta la instancia: se registra
+                    # y se deja el hueco (el CSV la escribe como NaN). Contarla
+                    # como 0 o descartarla es una decision del analisis, no
+                    # del runner.
+                    if result is None or "error" in result:
+                        reason = (result or {}).get("error", "sin resultado")
+                        RunMetrics().record("moea_failures", {
+                            "instance": instance_name,
+                            "config": f"{solver_used}_{combination_name}_{with_mutation}_{solver_name}",
+                            "experiment": i,
+                            "reason": reason,
+                        })
+                        _merge_json(failures_path, {
+                            f"{instance_name}|{solver_used}_{combination_name}_{with_mutation}_{solver_name}|{i:03d}": reason,
+                        })
+                        print(f"  AVISO: fallo {solver_used} {combination_name} "
+                              f"{with_mutation} {solver_name} exp {i}: {reason}")
+                        continue
 
                     load_s = result["load_s"]
                     setup_s = result["setup_s"]
@@ -506,8 +609,15 @@ def run_experiments(experiment_path, results_paths, operators,
 
         #* Make a dataframe for that instance
 
-        # Ensure nadir is not computed from a best_front that dominates every other point.
-        # Stop peeling once there's nothing left beyond the current front (tiny consolidated sets).
+        # Red de seguridad: volcar los frentes crudos ANTES de tocar el HV.
+        # Si fallan las metricas, el HV se recalcula desde `fronts_npz/`.
+        if params["SAVE"]:
+            dumped = _dump_instance_fronts(params["RESULTS_PATH"], instance_name,
+                                           fronts_model_level, eval_labels)
+            if dumped:
+                print(f"  frentes crudos guardados en {dumped}")
+
+        # Evita un frente que domina a todos; para al agotar el consolidado.
         def comprobate(front, consol):
             while len(front) <= 2 and len(consol) > len(front):
                 for point in front:
@@ -543,6 +653,25 @@ def run_experiments(experiment_path, results_paths, operators,
             # (hasta x78 de HV) y la comparacion con el original deja de ser
             # valida.
             min_val, max_val = np.min(best_front, axis=0), np.max(best_front, axis=0)
+
+            # Guarda de marco degenerado: si algun objetivo no tiene rango, la
+            # normalizacion divide por cero y el HV sale NaN/inf. Es un fallo
+            # de la instancia, no del operador: se excluye para todos (igual
+            # que `hv_values` del harness de comparacion) y se registra.
+            span = np.asarray(max_val, dtype=float) - np.asarray(min_val, dtype=float)
+            if not np.all(np.isfinite(span)) or np.any(span <= 0):
+                reason = f"marco degenerado (span={span.tolist()})"
+                print(f"  AVISO: {instance_name} [{label}] {reason}; "
+                      f"se omite el HV de ese presupuesto")
+                RunMetrics().record("degenerate_frames", {
+                    "instance": instance_name,
+                    "label": label,
+                    "span": span.tolist(),
+                    "size": int(len(best_front)),
+                })
+                _merge_json(degenerate_path, {f"{instance_name}|{label}": reason})
+                continue
+
             boundaries[label] = [min_val, max_val]
 
             best_fronts[label] = best_front
@@ -573,36 +702,76 @@ def run_experiments(experiment_path, results_paths, operators,
 
             for model_operators in fronts_model_level[evals].keys():
 
-                column_data = []
+                # Columna indexada por NUMERO de experimento (no por posicion en
+                # la lista): si una repeticion no llego al presupuesto o fallo,
+                # su hueco queda como NaN. Antes, una lista mas corta que
+                # `n_experiments` desalineaba el experimento mediano y rompia el
+                # DataFrame.
+                column_data = [np.nan] * n_experiments
+                experiment_keys = [f"Experiment {i:03d}"
+                                   for i in range(1, n_experiments + 1)]
 
-                for experiment in fronts_model_level[evals][model_operators].keys():
+                for experiment_key, front in fronts_model_level[evals][model_operators].items():
 
-                    front = fronts_model_level[evals][model_operators][experiment]
+                    try:
+                        position = int(experiment_key.split()[-1]) - 1
+                    except (ValueError, IndexError):
+                        position = experiment_keys.index(experiment_key)
 
-                    front = normalize_values(front, boundaries[evals][0], boundaries[evals][1])
-                    front = clip_to_nadir(front, nadir_point)
-
-                    hv = compute_hypervolume(nadir_point, front)
+                    # Un HV que falla (NaN en el frente, punto fuera de la caja,
+                    # excepcion de pymoo) deja la celda como NaN y se registra:
+                    # no puede tumbar la instancia entera. Los frentes ya estan
+                    # en `fronts_npz/`, asi que se puede recalcular despues.
+                    try:
+                        normalized_front = normalize_values(
+                            front, boundaries[evals][0], boundaries[evals][1])
+                        normalized_front = clip_to_nadir(normalized_front,
+                                                         nadir_point)
+                        hv = float(compute_hypervolume(nadir_point,
+                                                       normalized_front))
+                        if not np.isfinite(hv):
+                            raise ValueError(f"HV no finito ({hv})")
+                    except Exception as error:  # noqa: BLE001 - celda, no instancia
+                        reason = f"{type(error).__name__}: {error}"
+                        RunMetrics().record("hv_failures", {
+                            "instance": instance_name,
+                            "label": evals,
+                            "config": model_operators,
+                            "experiment": experiment_key,
+                            "reason": reason,
+                        })
+                        _merge_json(hv_failures_path, {
+                            f"{instance_name}|{evals}|{model_operators}|{experiment_key}": reason,
+                        })
+                        print(f"  AVISO: HV fallido {model_operators} "
+                              f"{experiment_key} [{evals}]: {reason}")
+                        continue
 
                     metrics.record("hypervolumes", {
                         "instance": instance_name,
                         "label": evals,
                         "config": model_operators,
-                        "experiment": experiment,
-                        "hypervolume": float(hv),
-                        "front_size": int(front.shape[0]),
+                        "experiment": experiment_key,
+                        "hypervolume": hv,
+                        "front_size": int(normalized_front.shape[0]),
                         "normalized": True,
                         "ref_point": [1.1] * int(n_obj),
                     })
                     metrics.increment("hypervolumes", "count")
 
-                    column_data.append(hv)
+                    column_data[position] = hv
 
-                # Index of the median experiment - np.median() itself can
-                # interpolate between two values for an even n_experiments,
-                # which then wouldn't match any actual column_data entry.
-                median_indx = int(np.argsort(column_data)[len(column_data) // 2]) + 1
-                median_front = fronts_model_level[evals][model_operators][f"Experiment {median_indx:03d}"]
+                # Experimento mediano entre los que SI tienen HV valido. Se
+                # guarda la CLAVE real, no una reconstruccion por indice.
+                valid = [i for i, value in enumerate(column_data)
+                         if np.isfinite(value)]
+                if not valid:
+                    continue
+
+                order = sorted(valid, key=lambda i: column_data[i])
+                median_pos = order[len(order) // 2]
+                median_key = experiment_keys[median_pos]
+                median_front = fronts_model_level[evals][model_operators][median_key]
                 median_front_norm = clip_to_nadir(
                     normalize_values(median_front, boundaries[evals][0], boundaries[evals][1]),
                     nadir_point)
@@ -611,8 +780,8 @@ def run_experiments(experiment_path, results_paths, operators,
                     "instance": instance_name,
                     "label": evals,
                     "config": model_operators,
-                    "median_experiment": f"Experiment {median_indx:03d}",
-                    "median_hypervolume": float(column_data[median_indx - 1]),
+                    "median_experiment": median_key,
+                    "median_hypervolume": float(column_data[median_pos]),
                 })
 
                 # Save median front (I/O is logged separately from compute)
@@ -658,6 +827,17 @@ def run_experiments(experiment_path, results_paths, operators,
 
         # Dump the evaluation metrics accumulated for this instance.
         RunMetrics().dump(f"evaluation_{instance_name}", {"instance": instance_name})
+
+        # Reanudacion: la instancia esta terminada solo cuando el CSV, los
+        # .pof y las metricas ya estan en disco. El marcador se escribe al
+        # final, nunca antes.
+        if params["SAVE"]:
+            _write_json(done_path, {
+                "instance": instance_name,
+                "labels": list(eval_labels),
+                "evaluation_dir": params["RESULTS_PATH"],
+                "finished": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            })
 
         # Instance total time
         instance_time = time.time() - instance_start

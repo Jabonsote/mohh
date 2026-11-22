@@ -180,7 +180,7 @@ def load_operator(spec):
     `classic2:ox` es el clasico devolviendo **dos** hijos, `(ox(x, y), ox(y, x))`:
     el mismo contrato que un operador que devuelve una tupla. Comparar un
     operador de dos hijos contra clasicos de un solo hijo no es justo, porque el
-    arnes (`LLMOperator`) usa `child[::-1]` como segundo descendiente. Ojo:
+    arnes (`LLMOperator`) usa `child[::-1]` como segundo descendiente.
     `classic2` llama dos veces al operador de un hijo, con cortes/inicios
     independientes; no reproduce el corte unico del original.
 

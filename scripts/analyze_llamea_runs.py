@@ -173,8 +173,7 @@ def run_record(dirname):
         "valid": len(valid_rows),
         "validity_rate": (len(valid_rows) / evaluated) if evaluated else 0.0,
         "distinct": distinct,
-        # `distinct` es texto; `behavior_unique` es mecanismos distintos. La
-        # brecha entre ambos es exactamente el anclaje conductual.
+        # `distinct` cuenta texto; `behavior_unique`, mecanismos.
         "behavior_unique": diversity.get("unique_behavior"),
         "behavior_entropy": diversity.get("behavior_entropy"),
         "behavior_novelty": diversity.get("mean_novelty"),

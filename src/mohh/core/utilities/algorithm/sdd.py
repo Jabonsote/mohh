@@ -169,9 +169,7 @@ class SDD():
                 f"recibidos N = {n_problems}."
             )
 
-        # Ojo: no se usa `frame.stack()` para localizar la celda, porque
-        # `stack()` descarta los NaN por defecto en pandas >= 1.3 y la mascara
-        # saldria vacia. Se busca directamente sobre la matriz numerica.
+        # `frame.stack()` descarta NaN en pandas >= 1.3; se busca en la matriz.
         valores = frame.to_numpy(dtype=float)
         if not np.isfinite(valores).all():
             fila, columna = (int(i) for i in np.argwhere(~np.isfinite(valores))[0])

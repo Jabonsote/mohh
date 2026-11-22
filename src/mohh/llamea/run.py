@@ -313,7 +313,7 @@ def run_llamea(args):
     from llamea import LLaMEA
 
     if args.no_example:
-        # Ojo: LLaMEA interpreta example_prompt=None como *su* ejemplo por
+        # LLaMEA interpreta example_prompt=None como *su* ejemplo por
         # defecto (una busqueda aleatoria, de otro dominio). Para no anclar el
         # prompt a nada hay que pasar cadena vacia.
         example_prompt = ""

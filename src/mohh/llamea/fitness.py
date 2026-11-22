@@ -1015,10 +1015,8 @@ class PopulationEvaluator(OperatorEvaluator):
     menor es mejor (el mismo valor que usa GE). Con `raw_rank=False` se
     invierte a `(K + 1) - rango_medio` para clientes que maximizan.
 
-    El marco crece con cada operador evaluado, asi que los HV se recalculan en
-    cada evaluacion (frentes cacheados; no se repite el
-    MOEA). En una evaluacion dada, padres y descendientes comparten marco, de
-    modo que la comparacion entre ellos es justa.
+    El marco crece con cada operador; los HV se recalculan con frentes
+    cacheados. Padres y descendientes comparten marco en cada evaluacion.
     """
 
     def __init__(self, *args, raw_rank=False, **kwargs):
