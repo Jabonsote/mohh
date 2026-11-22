@@ -103,8 +103,8 @@ from mohh.shared.mo import (
 )
 from mohh.llamea.ge_operators import ge_namespace, load_ge_operators
 from mohh.llamea.reference import REFERENCE_OPERATORS, namespace_for
-from mohh.llamea.run import _select_instances
-from mohh.llamea.statistics import (
+from mohh.shared.instances import select_instances as _select_instances
+from mohh.shared.statistics import (
     add_holm,
     minimum_detectable_difference,
     paired_summary,

@@ -47,6 +47,7 @@ import time
 import numpy as np
 
 from mohh.core.utilities.instance_utils import instance_paths
+from mohh.shared.instances import select_instances as _select_instances
 from mohh.llamea import metrics as model_metrics
 from mohh.llamea.fitness import EarlyStop, build_evaluator, build_population_evaluator, init_params
 from mohh.llamea.prompts import (
@@ -81,18 +82,6 @@ class _EvalSolution:
         self.fitness = fitness
         self.feedback = feedback
         self.error = error
-
-
-def _select_instances(paths, amount, seed):
-    # `os.listdir` no garantiza orden entre sistemas de ficheros. Ordenar antes
-    # de muestrear hace que el mismo `--seed` seleccione las mismas instancias en
-    # el cluster y en local (la comparacion pareada depende de ello).
-    ordered = sorted(str(path) for path in paths)
-    if amount == "all":
-        return ordered
-    amount = int(amount)
-    rng = random.Random(seed)
-    return rng.sample(ordered, min(amount, len(ordered)))
 
 
 def _merge_reference_scores(history, scores, rep):
