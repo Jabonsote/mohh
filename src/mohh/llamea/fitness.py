@@ -566,7 +566,7 @@ def solve_front_snapshots(instance, namespace, seed, model_name, mutation,
 
     budgets = dict(EVAL_BUDGETS) if budgets is None else dict(budgets)
     from mohh.generation.algorithm.multiobjective import MOSolver
-    from mohh.llamea.operator import LLMOperator
+    from mohh.shared.operators import LLMOperator
 
     np.random.seed(seed)
     population_size, _current_generations = _params_size()
@@ -618,7 +618,7 @@ def _solve_front_namespace(instance, namespace, seed, model_name, mutation,
     ``LLMOperator``.
     """
     from mohh.generation.algorithm.multiobjective import MOSolver
-    from mohh.llamea.operator import LLMOperator
+    from mohh.shared.operators import LLMOperator
 
     # Semilla determinista por corrida (igual que el worker GE).
     np.random.seed(seed)

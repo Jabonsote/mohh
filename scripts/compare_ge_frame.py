@@ -94,8 +94,8 @@ from mohh.llamea.fitness import (
     compile_operator,
     normalize_front,
 )
-from mohh.llamea.operator import LLMOperator
-from mohh.llamea.reference import REFERENCE_OPERATORS, namespace_for
+from mohh.shared.operators import LLMOperator
+from mohh.shared.reference import REFERENCE_OPERATORS, namespace_for
 from mohh.llamea.statistics import add_holm, paired_summary
 from mohh.parallel import available_cores
 
