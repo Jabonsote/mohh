@@ -1,6 +1,6 @@
 """Prompts de LLaMEA para disenar operadores de cruce sobre mQAP.
 
-Diseno **basado en evidencia** (no derivado de la gramatica de MOHH-R). Cada
+Diseno basado en evidencia. Cada
 bloque retoma una practica reportada en la literatura de "automatic heuristic
 design" con LLMs; el detalle y las citas estan en
 `docs/llamea-prompts/diseno-de-prompts.md` y `docs/llamea-prompts/referencias.md`.
@@ -30,7 +30,7 @@ Principios aplicados
 
 El prompt del problema se parametriza con el MOEA interno
 (``make_task_prompt(solver)``) para que coincida con el algoritmo en el que el
-operador se evaluara (los mismos MOEAD/NSGAII/SMSEMOA de MOHH-R).
+operador se evaluara (MOEAD, NSGAII, SMSEMOA).
 """
 
 from llamea import Operator
@@ -45,7 +45,7 @@ ROLE_PROMPT = (
     "You write original, correct and efficient Python."
 )
 
-# Nombre + descripcion breve de cada MOEA interno (los mismos de MOHH-R).
+# Nombre y descripcion de cada MOEA interno.
 _SOLVERS = {
     "MOEAD": (
         "MOEA/D",
@@ -83,7 +83,7 @@ inherit useful structure from BOTH parents while remaining diverse.
 
 # Where your operator is used
 Your operator replaces the crossover of {solver_name} ({solver_desc}). This is \
-the same algorithm and the same problem family used by the MOHH-R \
+the same algorithm and problem family used in the evaluation \
 operator-design pipeline. The operator is called at every generation, on \
 instances of DIFFERENT sizes, and its quality is measured by the hypervolume \
 of the final Pareto front. It must therefore be general, not tuned to one \
@@ -125,7 +125,7 @@ Before the expensive run, a cheap check applies your operator to random parent \
 pairs: if it returns one parent unchanged (or a view of a parent, e.g. \
 `np.array(x, copy=False)`), it scores 0 immediately. \
 The score is the mean hypervolume of the final Pareto fronts, normalised like \
-the MOHH-R pipeline (0 = poor, higher = better). After every attempt you \
+the evaluation pipeline (0 = poor, higher = better). After every attempt you \
 receive: (i) your RANK among all crossovers evaluated so far (1 = best), \
 (ii) the best value so far and (iii) how much your operator actually recombines \
 (0 = copies a parent, 1 = child unlike both parents); hypervolume ties are \
@@ -226,7 +226,7 @@ returns one permutation or a tuple of two permutations>
 
 
 def make_task_prompt(solver: str = "MOEAD") -> str:
-    """Prompt del problema adaptado al MOEA interno (mismos que MOHH-R)."""
+    """Prompt del problema adaptado al MOEA interno."""
     name, desc = _SOLVERS.get(solver.upper(), _SOLVERS["MOEAD"])
     return _TASK_TEMPLATE.format(solver_name=name, solver_desc=desc)
 

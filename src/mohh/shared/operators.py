@@ -15,10 +15,8 @@ DEFAULT_EXPRESSION = "crossover(x, y)"
 class LLMOperator(Crossover):
     """Envoltorio pymoo de una funcion `crossover(x, y)` generada por el LLM.
 
-    Espeja exactamente la semantica de `HH_Operator` (mismo shape de entrada
-    y salida y mismo segundo descendiente `child[::-1]`), pero en lugar de
-    evaluar un fenotipo de gramatica evalua codigo Python definido por el LLM
-    a partir de un namespace explicito.
+    Misma interfaz que `HH_Operator` (segundo descendiente `child[::-1]`),
+    pero evalua codigo Python en vez de un fenotipo de gramatica.
     """
 
     def __init__(self, namespace: dict, expression: str = DEFAULT_EXPRESSION,

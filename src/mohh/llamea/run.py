@@ -1,6 +1,6 @@
 """CLI de la busqueda LLaMEA de operadores de cruce para mQAP.
 
-Conecta LLaMEA con MOHH-R: el LLM propone `crossover(x, y)` y el fitness
+El LLM propone `crossover(x, y)` y el fitness
 reutiliza el MOEA interno y la metrica de hipervolumen del proyecto de
 evolucion gramatical (mismos conjuntos `datasets/mqap/{train,test}`).
 
@@ -88,7 +88,7 @@ from mohh.llamea.setup import (
 
 
 def run_llamea(args):
-    # 0. Inicializar los defaults de MOHH-R (DATASET, PROBLEM_NAME, ...) para
+    # 0. Inicializar los defaults del protocolo (DATASET, PROBLEM_NAME, ...) para
     #    poder listar los mismos conjuntos train/test que la busqueda GE.
     init_params(RANDOM_SEED=args.seed)
 
@@ -144,7 +144,7 @@ def run_llamea(args):
     print(f"Servidor: {server_info or 'sin endpoint /version'}")
     print(f"Modelo local: {model_info or 'sin manifiesto local'}")
 
-    # 3. Fitness con la logica actual de MOHH-R (train).
+    # 3. Fitness sobre train.
     train_paths = _select_instances(instance_paths(train=True), args.train_instances, args.seed)
     print(f"Instancias de train: {len(train_paths)}")
 
@@ -482,7 +482,7 @@ def run_llamea(args):
             print(f"AVISO: no se pudieron guardar los limites: {error}")
 
     # 6. Evaluacion opcional sobre el conjunto de TEST (el mismo split que
-    #    usa la evaluacion de MOHH-R; nunca se usa durante la busqueda).
+    #    usa la evaluacion final; no se usa durante la busqueda).
     if args.eval_test:
         test_paths = _select_instances(instance_paths(train=False), args.test_instances, args.seed)
         repeats = max(1, args.eval_repeats)
@@ -691,7 +691,7 @@ def run_llamea(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Busqueda LLaMEA de operadores de cruce para mQAP (conectada a MOHH-R)."
+        description="Busqueda LLaMEA de operadores de cruce para mQAP."
     )
     parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct",
                         help="ID del modelo local (HuggingFace) o ruta.")

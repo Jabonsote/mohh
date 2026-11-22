@@ -196,7 +196,7 @@ def load_specs(specs: list[str], ge_labels: list[str]) -> list[dict]:
 
 @lru_cache(maxsize=8)
 def _compile_cached(code: str) -> dict:
-    """Compila una vez por proceso el codigo LLaMEA (no es picklable)."""
+    """Compila una vez por proceso el codigo LLaMEA."""
     return compile_operator(code)
 
 

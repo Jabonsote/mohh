@@ -1,4 +1,4 @@
-"""Integracion LLaMEA + MOHH-R.
+"""Integracion de LLaMEA con la busqueda de operadores.
 
 Permite buscar operadores de variacion (cruce) para mQAP con un LLM en lugar
 de con la gramatica, reutilizando la logica actual del proyecto de evolucion

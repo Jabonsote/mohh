@@ -28,7 +28,29 @@ SOLVERS = ("MOEAD", "NSGAII", "SMSEMOA")
 BUDGETS = ("10k", "30k", "50k")
 MUTS = ("NM", "WM")
 MUT_NOMBRE = {"NM": "sin mutacion", "WM": "con mutacion"}
-OPS = ("llamea", "ox", "pmx")
+def _panel():
+    """(operador evaluado, [bases]) deducidos de evaluation.json o del npz."""
+    import json as _json, numpy as _np
+    ep = os.path.join(D, "evaluation.json")
+    if os.path.exists(ep):
+        with open(ep) as fh:
+            info = _json.load(fh)
+        rows = info.get("operators", [])
+        evaluados = [r["operator"] for r in rows if r.get("kind") == "llamea"]
+        bases = [r["operator"] for r in rows
+                 if r.get("kind") in ("classic", "ge") and r.get("runs")]
+        if evaluados and bases:
+            return evaluados[0], bases
+    # sin evaluation.json: deducir los nombres del fronts.npz
+    d = _np.load(os.path.join(D, "fronts.npz"))
+    ops = sorted({k.split("|")[1] for k in d.files})
+    evaluados = [o for o in ops if o == "llamea"] or [ops[0]]
+    bases = [o for o in ops if o != evaluados[0]]
+    return evaluados[0], bases
+
+
+EVAL, BASES = _panel()
+OPS = (EVAL,) + tuple(BASES)
 
 # ---------------------------------------------------------------- carga
 celdas = defaultdict(dict)
@@ -47,9 +69,12 @@ for solver in SOLVERS:
                     for col, v in row.items():
                         if col == "Experiment":
                             continue
+                        # el nombre del operador puede llevar guiones bajos
+                        # (ge_best): se parsea desde la derecha
                         p = col.split("_")
-                        celdas[(solver, budget,
-                                "WM" if "WM" in p else "NM", inst, rep)][p[1]] = (
+                        mut = "WM" if p[-2] == "WM" else "NM"
+                        op = "_".join(p[1:-2])
+                        celdas[(solver, budget, mut, inst, rep)][op] = (
                             float(v) if v not in ("", "None") else 0.0)
 
 INSTS = sorted({k[3] for k in celdas})
@@ -57,13 +82,13 @@ REPS = sorted({k[4] for k in celdas})
 
 
 def bloque(solver, budget, mut, inst):
-    """[[llamea, pmx, ox]] por repeticion, en el mismo orden para los tres."""
+    """[[op_evaluado, base1, base2, ...]] por repeticion, en el mismo orden."""
     out = []
     for rep in REPS:
         c = celdas.get((solver, budget, mut, inst, rep))
         if not c or len(c) < len(OPS):
             continue
-        out.append((c["llamea"], c["pmx"], c["ox"]))
+        out.append(tuple(c[op] for op in OPS))
     return out
 
 
@@ -91,7 +116,7 @@ for solver in SOLVERS:
             bloques = []
             for inst in INSTS:
                 bloques += bloque(solver, budget, mut, inst)
-            for base, bidx in (("pmx", 1), ("ox", 2)):
+            for bidx, base in enumerate(BASES, start=1):
                 s = paired_summary([b[0] for b in bloques],
                                    [b[bidx] for b in bloques])
                 w, l, t, t0 = cuenta(bloques, bidx)
@@ -114,7 +139,7 @@ for solver in SOLVERS:
                 bloques += bloque(solver, budget, mut, inst)
             if not bloques:
                 continue
-            for base, bidx in (("pmx", 1), ("ox", 2)):
+            for bidx, base in enumerate(BASES, start=1):
                 w, l, t, t0 = cuenta(bloques, bidx)
                 t2.append({
                     "moea": solver, "mutacion": MUT_NOMBRE[mut],
@@ -123,7 +148,7 @@ for solver in SOLVERS:
                     "empata_fallo_ambos": t0,
                     "pct_gana": round(100 * w / len(bloques), 1),
                     "pct_gana_efectiva": round(100 * w / (w + l), 1) if (w + l) else "",
-                    "hv_llamea": round(statistics.mean(b[0] for b in bloques), 6),
+                    "hv_evaluado": round(statistics.mean(b[0] for b in bloques), 6),
                     "hv_base": round(statistics.mean(b[bidx] for b in bloques), 6),
                 })
 
@@ -136,15 +161,17 @@ for solver in SOLVERS:
                 bloques = bloque(solver, budget, mut, inst)
                 if not bloques:
                     continue
-                w, l, t, t0 = cuenta(bloques, 1)
-                if l > w:
+                for bidx, base in enumerate(BASES, start=1):
+                    w, l, t, t0 = cuenta(bloques, bidx)
+                    if not l > w:
+                        continue
                     ml = statistics.mean(b[0] for b in bloques)
-                    mp = statistics.mean(b[1] for b in bloques)
+                    mp = statistics.mean(b[bidx] for b in bloques)
                     t3.append({
                         "moea": solver, "presupuesto": budget,
                         "mutacion": MUT_NOMBRE[mut], "instancia": inst,
-                        "base": "pmx", "gana": w, "pierde": l, "empata": t,
-                        "hv_llamea": round(ml, 6), "hv_base": round(mp, 6),
+                        "base": base, "gana": w, "pierde": l, "empata": t,
+                        "hv_evaluado": round(ml, 6), "hv_base": round(mp, 6),
                         "dif": round(ml - mp, 6),
                         "ratio": round(ml / mp, 4) if mp else "",
                     })
@@ -166,10 +193,10 @@ write_csv("tabla_por_moea.csv", t1, [
     "relative", "wilcoxon_p", "wilcoxon_p_holm", "significant_holm"])
 write_csv("tabla_por_instancia.csv", t2, [
     "moea", "mutacion", "instancia", "base", "n", "gana", "pierde", "empata",
-    "empata_fallo_ambos", "pct_gana", "pct_gana_efectiva", "hv_llamea", "hv_base"])
+    "empata_fallo_ambos", "pct_gana", "pct_gana_efectiva", "hv_evaluado", "hv_base"])
 write_csv("tabla_no_gana.csv", t3, [
     "moea", "presupuesto", "mutacion", "instancia", "base", "gana", "pierde",
-    "empata", "hv_llamea", "hv_base", "dif", "ratio"])
+    "empata", "hv_evaluado", "hv_base", "dif", "ratio"])
 
 
 def md_tabla(filas_, campos, titulo):
@@ -203,14 +230,14 @@ md.append("\n\n## 2. Por instancia (MOEA x mutacion)\n")
 md.append(md_tabla(
     t2,
     ["moea", "mutacion", "instancia", "base", "n", "gana", "pierde", "empata",
-     "pct_gana", "pct_gana_efectiva", "hv_llamea", "hv_base"],
+     "pct_gana", "pct_gana_efectiva", "hv_evaluado", "hv_base"],
     "Victorias por instancia"))
 
 md.append("\n\n## 3. Celdas donde el operador pierde la mayoria contra PMX\n")
 md.append(md_tabla(
     t3,
     ["moea", "presupuesto", "mutacion", "instancia", "gana", "pierde",
-     "hv_llamea", "hv_base", "dif", "ratio"],
+     "hv_evaluado", "hv_base", "dif", "ratio"],
     "No gana contra PMX"))
 
 ruta_md = os.path.join(D, "tablas.md")
@@ -218,7 +245,8 @@ with open(ruta_md, "w", encoding="utf-8") as fh:
     fh.write("\n".join(md) + "\n")
 print("escrito", ruta_md)
 print(f"\nresumen: {len(t1)} filas en la tabla por MOEA, {len(t2)} por instancia, "
-      f"{len(t3)} celdas donde no gana contra PMX")
+      f"{len(t3)} celdas donde no gana contra {BASES}")
 por_moea = Counter(r["moea"] for r in t3) if False else {}
 from collections import Counter
 print("celdas donde no gana, por MOEA:", dict(Counter(r["moea"] for r in t3)))
+print("operador evaluado:", EVAL, "| bases:", BASES)

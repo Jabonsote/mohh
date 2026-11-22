@@ -109,7 +109,7 @@ class MOSolver:
 
             self.pop_size = len(ref_dirs)
 
-            # Ajustar la población para que coincida exactamente con el tamaño de ref_dirs
+            # Ajustar la poblacion al tamaño de ref_dirs
             if len(self.pop) > self.pop_size:
                 self.pop = self.pop[:self.pop_size]
             elif len(self.pop) < self.pop_size:

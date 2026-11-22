@@ -47,7 +47,7 @@ def _call_with_timeout(func, timeout, *args, **kwargs):
 
 
 def init_params(**overrides):
-    """Inicializa el singleton `Params` con los defaults de MOHH-R.
+    """Inicializa el singleton `Params` con los defaults del protocolo.
 
     Reutiliza `mohh.generation.params.params_dict` (los mismos defaults que la
     busqueda gramatical: DATASET, PROBLEM_NAME, etc.) y aplica overrides. Es

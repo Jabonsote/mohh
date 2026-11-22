@@ -60,6 +60,16 @@ def _evaluation_overrides(args, solvers: list, models: list) -> dict:
             and not getattr(args, "evaluation_dir", None)):
         overrides["EVALUATION_DIR"] = (
             f"evaluation_by_generation/generation_{args.generation:04d}")
+    if getattr(args, "seed", None) is not None:
+        overrides["RANDOM_SEED"] = args.seed
+    if getattr(args, "reuse_initial", None):
+        overrides["INITIAL_POPULATION_PATH"] = os.path.abspath(
+            os.path.expanduser(args.reuse_initial))
+    if getattr(args, "force", False):
+        overrides["FORCE_RERUN"] = True
+    if getattr(args, "moea_timeout", None) is not None:
+        overrides["MOEA_TIMEOUT"] = (None if args.moea_timeout <= 0
+                                     else args.moea_timeout)
 
     return overrides
 
@@ -206,6 +216,20 @@ def evaluate():
                         help="Carpeta de salida. Relativa al experimento o "
                              "absoluta. Por defecto evaluation_results; con "
                              "--generation usa evaluation_by_generation/generation_NNNN.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Semilla maestra de la evaluación (RANDOM_SEED). "
+                             "Fijarla es lo que hace reproducible la corrida.")
+    parser.add_argument("--reuse-initial", default=None,
+                        help="Ruta a la carpeta initial_solutions/ de una corrida "
+                             "anterior (…/evaluation_results/initial_solutions): "
+                             "reutiliza sus semillas y poblaciones iniciales en "
+                             "vez de generar otras.")
+    parser.add_argument("--force", action="store_true",
+                        help="Re-evaluar instancias ya marcadas como "
+                             "terminadas en .done/.")
+    parser.add_argument("--moea-timeout", type=float, default=None,
+                        help="Segundos máximos por corrida del MOEA "
+                             "(default 3600; 0 = sin límite).")
     args = parser.parse_args()
 
     if args.no_figures and args.figures_only:

@@ -205,7 +205,7 @@ def generar_poblacion(n_variables: int, population_size: int, semilla: int):
 
     Se usa `MOSampling`, el mismo generador que employa el pipeline
     (`Instance.create_initial_solution`), de modo que las permutaciones tienen
-    exactamente la misma distribucion y el mismo formato que las que se
+    la misma distribucion y el mismo formato que las que se
     usarian sin este script.
 
     @param n_variables: numero de instalaciones a permutar.

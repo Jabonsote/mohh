@@ -30,7 +30,7 @@ from mohh.generation.utilities.algorithm.HH_auxiliars import test_individual
 def _solve_individual_instance(task: dict) -> dict:
     """
     Worker del pool de procesos de la búsqueda: resuelve una instancia con el
-    MOEA de un operador candidato. Conserva exactamente la lógica de
+    MOEA de un operador candidato. Conserva la logica de
     evaluation_step; solo cambia el proceso en el que se ejecuta. El proceso
     principal aplica las mismas actualizaciones de estado con el resultado.
     """
@@ -55,7 +55,7 @@ def _solve_individual_instance(task: dict) -> dict:
                          prob=mo_cross_prob)
     solver.load_operator("mutation", "NullMutation")
 
-    # Problema / algoritmo / MOEA (idéntico al proceso principal).
+    # Problema / algoritmo / MOEA.
     start = time.time()
     solver.load_instance(instance)
     problem_setup_s = time.time() - start
@@ -172,7 +172,7 @@ class HyperHeuristic():
 
         Las corridas MOEA/D (candidato x instancia) son independientes, así
         que se resuelven en paralelo con un pool de procesos que usa todos
-        los núcleos. La lógica de cada corrida es idéntica a la secuencial.
+        los núcleos. Cada corrida usa la misma logica que la version secuencial.
         """
 
         # Load logger

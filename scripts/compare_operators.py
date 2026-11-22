@@ -175,7 +175,7 @@ def load_operator(spec):
     Devuelve `(nombre, namespace, kind, source)` donde `source` es lo necesario
     para reconstruir el namespace en un worker de otro proceso (la clave del
     clasico, la expresion GE o el codigo del operador descubierto); el
-    namespace en si no es picklable (contiene `np` y funciones de `exec`).
+    el namespace no es serializable (contiene `np` y funciones `exec`).
 
     `classic2:ox` es el clasico devolviendo **dos** hijos, `(ox(x, y), ox(y, x))`:
     el mismo contrato que un operador que devuelve una tupla. Comparar un
@@ -289,10 +289,10 @@ def parse_contrasts(specs):
 
 
 def _solve_task(task):
-    """Worker picklable: evalua una instancia con un operador.
+    """Evalua una instancia con un operador en el proceso worker.
 
     Reconstruye el namespace a partir de `source`/`kind` (el namespace no es
-    picklable) y corre el MOEA con la semilla/solver/mutacion dados. Devuelve
+    ) y corre el MOEA con la semilla, solver y mutacion dados. Devuelve
     `(key, front, error)`; `error` es `None` si todo salio bien.
     """
     (keys, source, kind, instance, seed, model_name, mutation,
@@ -387,7 +387,7 @@ def collect_fronts(operators, paths, args, protocols, existing=None,
     labels = labels or [None]
     fronts = {} if existing is None else dict(existing)
     failures = {} if stored_failures is None else dict(stored_failures)
-    # Las instancias como objetos `Instance` (picklable para el worker) y los
+    # Las instancias como objetos `Instance` para el worker y los
     # overrides de Params: los workers arrancan con el singleton vacio
     # (forkserver) y necesitan MO_GENERATIONS/MO_POPULATION_SIZE y las
     # direcciones de referencia. Con snapshots, MO_GENERATIONS es el ultimo

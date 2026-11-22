@@ -19,7 +19,7 @@ Ese es el N que se pide aqui por instancia.
 
 La extraccion es la oficial del pipeline `set-reference` (RSEIterative,
 Falcon-Cardona et al.): mismas 21 corridas, mismas 10000 iteraciones y el
-mismo criterio `select="spread"`. La unica diferencia es `subset_size`.
+mismo criterio `select="spread"`; cambia `subset_size`.
 
 Si el ground set de una instancia tiene MENOS puntos que N, no se inventa
 ninguno: se queda con todo el ground set y la instancia queda marcada como

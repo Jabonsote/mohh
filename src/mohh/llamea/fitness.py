@@ -1,19 +1,4 @@
-"""Fitness de LLaMEA: evalua un operador de cruce generado por el LLM.
-
-Reutiliza la logica actual de MOHH-R: el mismo `MOSolver` interno (MOEA/D,
-NSGA-II o SMS-EMOA de pymoo) y la misma metrica de hipervolumen que usa la
-busqueda gramatical. La unica diferencia es que el operador candidato ya no
-se decodifica de una gramatica: es una funcion `crossover(x, y)` escrita por
-el LLM, inyectada con `LLMOperator` (ver `mohh.llamea.operator`).
-
-El fitness es el hipervolumen medio sobre las instancias (por defecto train).
-Es comparable con la generacion GE porque usa la misma funcion objetivo mQAP,
-el mismo presupuesto de MOEA y la misma metrica.
-
-El evaluador es una clase (picklable) para que LLaMEA pueda paralelizar la
-evaluacion con `max_workers > 1`; cada llamada re-inicializa `Params` de forma
-idempotente, de modo que funciona tambien en procesos hijos.
-"""
+"""Evaluacion de operadores `crossover(x, y)` propuestos por un LLM."""
 
 import hashlib
 import json
@@ -134,9 +119,8 @@ from mohh.llamea.archive import HVArchive, _nd_merge, _same_points
 
 
 class OperatorEvaluator:
-    """Fitness picklable que evalua operadores generados por el LLM.
+    """Evalua operadores generados por un LLM con el mismo MOEA e HV.
 
-    Reutiliza la logica interna de MOHH-R (MOSolver + hipervolumen) sobre las
     instancias indicadas (train durante la busqueda; test en la verificacion
     final). Crea las instancias de forma perezosa y determinista.
 
@@ -228,11 +212,7 @@ class OperatorEvaluator:
 
     # -- infraestructura -------------------------------------------------- #
     def __getstate__(self):
-        """Al picklear (joblib, `max_workers > 1`) no se envian las instancias.
-
-        Se recrean de forma perezosa en el proceso hijo. Asi el evaluador es
-        siempre picklable aunque el padre ya haya construido sus instancias.
-        """
+        """Recrea las instancias en el proceso hijo al deserializar."""
         state = self.__dict__.copy()
         state["_instances"] = None
         state.pop("_fronts_lock", None)
@@ -790,7 +770,7 @@ class OperatorEvaluator:
         reuse = " (reused cached evaluation)" if cached_hit else ""
         frame_note = (
             "normalized with the consolidated front of the reference operators and "
-            "every candidate evaluated so far, exactly like the MOHH-R grammar "
+            "every candidate evaluated so far, as in the grammar search "
             "pipeline" if self.frame == "ge" else
             "normalized with the reference operators only (stationary frame)"
         )

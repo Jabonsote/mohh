@@ -58,11 +58,7 @@ def test_cli_selecciona_modulo_correcto(monkeypatch):
 
 
 @pytest.mark.parametrize("modulo", sorted(set(ESPERADOS.values())))
-def test_wrapper_raiz_expone_main(modulo):
-    ruta = ROOT / f"{modulo}.py"
-    spec = importlib.util.spec_from_file_location(f"_wrapper_{modulo}", ruta)
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    esperado = importlib.import_module(f"mohh.postanalysis.{modulo}").main
-    assert mod.main is esperado
+def test_modulo_postanalysis_expone_main(modulo):
+    mod = importlib.import_module(f"mohh.postanalysis.{modulo}")
+    assert callable(mod.main)
+    assert not (ROOT / f"{modulo}.py").exists()

@@ -140,7 +140,7 @@ def validate_operator(crossover_func):
     """
     rng = np.random.RandomState(0)
     # Tamanos del dominio mQAP (las instancias van de n=11 a n=100). No se usan
-    # tamanos muy chicos: algunas primitivas de MOHH-R (p.ej. preserve_segments)
+    # tamanos muy chicos: algunas primitivas (p.ej. preserve_segments)
     # no estan definidas para n<3 y no se debe tocar el nucleo. Se incluye 100
     # porque un operador puede funcionar hasta 50 y romper en la instancia mas
     # grande; sin esta prueba el fallo aparecia despues, gastando el MOEA.
@@ -237,7 +237,7 @@ def recombination_novelty(crossover_func, trials=DEGENERACY_TRIALS, seed=1234):
 
 
 def primitive_namespace() -> dict:
-    """Namespace con los primitivos de permutacion de MOHH-R + ayudas.
+    """Namespace con las primitivas de permutacion y ayudas.
 
     Por un lado expone los mismos bloques que usa la busqueda gramatical (por
     compatibilidad). Por otro, deja `np`/`numpy` y nombres comunes de `typing`
@@ -350,7 +350,7 @@ def compile_operator(code: str, timeout=COMPILE_TIMEOUT,
                      check_seeded_rng=True) -> dict:
     """`exec` del codigo del LLM; devuelve el namespace o lanza ValueError.
 
-    El namespace incluye los primitivos de permutacion de MOHH-R, de modo que
+    El namespace incluye las primitivas de permutacion, de modo que
     el operador generado puede reutilizar la logica actual. Debe existir
     `crossover(x, y)` y devolver permutacion(es) valida(s).
 

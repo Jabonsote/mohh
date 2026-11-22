@@ -22,6 +22,11 @@
 #SBATCH -e logs/mohh-evaluate-%j.err
 
 # --- Parametros del experimento (editar aqui) ---
+# Semilla maestra (reproducibilidad) y timeout por corrida del MOEA.
+#   SEED=42  MOEA_TIMEOUT=3600  (0 = sin limite)
+# FORCE=1 re-evalua instancias ya marcadas como terminadas en .done/.
+# EVALUATION_DIR=... escribe en otra carpeta: recomendado para no pisar una
+# evaluacion archivada.
 # Carpeta producida por mohh-generate. Si no se define, se usa el
 # Experiment_NNN mas reciente (util para encadenar con --dependency).
 if [ -z "${EXPERIMENT:-}" ]; then
@@ -33,7 +38,12 @@ SOLVERS="MOEAD,NSGAII,SMSEMOA"
 # Budgets publicados 10k/30k/50k con MO 105x500. Sanity rapido:
 #   EVAL_ARGS="--solvers MOEAD --mo-population-size 10 --mo-generations 3 --n-experiments 3 --eval-budgets 10k:6"
 # 31 ejecuciones independientes por combinacion instancia/operador/solver.
-EVAL_ARGS="--solvers $SOLVERS --n-experiments 31"
+SEED="${SEED:-42}"
+MOEA_TIMEOUT="${MOEA_TIMEOUT:-3600}"
+EVAL_ARGS="--solvers $SOLVERS --n-experiments 31 --seed $SEED --moea-timeout $MOEA_TIMEOUT"
+if [ "${FORCE:-0}" = "1" ]; then
+    EVAL_ARGS="$EVAL_ARGS --force"
+fi
 
 # Dataset: vacio = <repo>/datasets/<DATASET> (comportamiento historico).
 # Para el dataset grande: DATASET_PATH=$PWD/datasets/mqap
@@ -53,7 +63,6 @@ EVAL_DIR_ARGS=""
 if [ -n "${EVALUATION_DIR:-}" ]; then
     EVAL_DIR_ARGS="--evaluation-dir $EVALUATION_DIR"
 fi
-
 cd "$SLURM_SUBMIT_DIR"
 
 echo "Ejecutandose en el nodo $SLURM_JOB_NODELIST."

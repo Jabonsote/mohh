@@ -271,7 +271,7 @@ def compute_indicators(
         compara un unico individuo.
     @param require_references: si True y falta la referencia de alguna
         instancia, lanza `IndicatorsError` en vez de devolver NaN (NaN
-        silencioso es exactamente el fallo que hay que evitar).
+        silencioso es el fallo que hay que evitar).
     @return: DataFrame con indice = instancias y columnas = indicadores.
     """
     metrics = tuple(m for m in metrics if m in INDICATORS)
