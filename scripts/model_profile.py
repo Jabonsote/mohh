@@ -1,48 +1,71 @@
 #!/usr/bin/env python3
-"""CLI del registro de modelos — puente entre config/reasoning.yaml y bash.
+"""CLI del registro de modelos (config/reasoning.yaml).
 
-No contiene ningun modelo escrito a mano: todo sale del YAML. Los perfiles
-concretos de GPU (VRAM, constraint, longitud) siguen en llamea-gpu-profile.sh;
-aqui solo va lo comun a cualquier modelo (razonamiento y servidor).
-
-Uso:
-  python scripts/model_profile.py parser  <modelo>   # --reasoning-parser ...
-  python scripts/model_profile.py args    <modelo>   # flags extra de vLLM
-  python scripts/model_profile.py tokens  <modelo>   # max_tokens sugerido
-  python scripts/model_profile.py env     <modelo>   # VAR=valor, una por linea
-  python scripts/model_profile.py toggle  <modelo>   # yes/no
+No importa mohh: lee el YAML directamente para funcionar sin activar el
+entorno (.conda-env). Asi `slurm/llamea-gpu-profile.sh` puede llamarlo desde
+el login (python del sistema) sin depender de llamea ni de src/.
 """
 from __future__ import annotations
 
 import os
 import sys
-import warnings
+from pathlib import Path
 
-warnings.filterwarnings("ignore", message="urllib3.*doesn't match")
+import yaml
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if os.path.join(_ROOT, "src") not in sys.path:
-    sys.path.insert(0, os.path.join(_ROOT, "src"))
+ROOT = Path(__file__).resolve().parents[1]
+REGISTRY = Path(os.environ.get(
+    "MOHH_REASONING_REGISTRY", str(ROOT / "config" / "reasoning.yaml")))
 
-from mohh.llamea.reasoning import resolve
+
+def _resolve(model: str) -> dict:
+    data = {}
+    if REGISTRY.exists():
+        with open(REGISTRY, encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    base = dict(data.get("defaults") or {})
+    name = str(model or "").lower()
+    for rule in data.get("models") or []:
+        match = str(rule.get("match") or "")
+        if match and match.lower() in name:
+            base.update(rule)
+            break
+    base.pop("match", None)
+    return base
+
+
+def _val(spec: dict, key: str, default):
+    if key in spec and spec[key] is not None:
+        return spec[key]
+    return default
 
 
 def main() -> int:
     if len(sys.argv) != 3:
-        print(__doc__, file=sys.stderr)
+        print("uso: model_profile.py {parser|args|tokens|toggle|env} <modelo>",
+              file=sys.stderr)
         return 2
     action, model = sys.argv[1], sys.argv[2]
-    spec = resolve(model)
+    spec = _resolve(model)
+    defaults = {}
+    if REGISTRY.exists():
+        defaults = (yaml.safe_load(open(REGISTRY, encoding="utf-8")) or {}).get(
+            "defaults", {}) or {}
+    # merge defaults
+    merged = dict(defaults)
+    merged.update(spec)
+
     if action == "parser":
-        print(spec.parser_flag)
+        p = str(merged.get("parser") or "")
+        print(f"--reasoning-parser {p}" if p else "")
     elif action == "args":
-        print(spec.vllm_args)
+        print(str(merged.get("vllm_args") or ""))
     elif action == "tokens":
-        print(spec.max_tokens)
+        print(int(merged.get("max_tokens") or 4096))
     elif action == "toggle":
-        print("yes" if spec.toggle else "no")
+        print("yes" if merged.get("toggle") else "no")
     elif action == "env":
-        for key, value in spec.env.items():
+        for key, value in (merged.get("env") or {}).items():
             print(f"{key}={value}")
     else:
         print(f"accion desconocida: {action}", file=sys.stderr)
