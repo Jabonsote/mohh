@@ -14,10 +14,15 @@ Uso:
 """
 from __future__ import annotations
 
+import os
 import sys
 import warnings
 
 warnings.filterwarnings("ignore", message="urllib3.*doesn't match")
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if os.path.join(_ROOT, "src") not in sys.path:
+    sys.path.insert(0, os.path.join(_ROOT, "src"))
 
 from mohh.llamea.reasoning import resolve
 
