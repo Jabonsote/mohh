@@ -10,8 +10,18 @@ import json
 import os
 import re
 import sys
-if os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src") not in sys.path:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+if os.path.join(_ROOT, "src") not in sys.path:
+    sys.path.insert(0, os.path.join(_ROOT, "src"))
+# llamea esta instalado en .conda-env; si no esta en sys.path (p. ej. el
+# script se invoca sin activar el entorno), anadir el site-packages comun.
+for _candidate in (
+        os.path.join(_ROOT, ".conda-env", "lib", "python3.12", "site-packages"),
+        os.environ.get("LLAMEA_SITE_PACKAGES", "")):
+    if _candidate and os.path.isdir(_candidate) and _candidate not in sys.path:
+        sys.path.insert(0, _candidate)
 import threading
 import time
 
