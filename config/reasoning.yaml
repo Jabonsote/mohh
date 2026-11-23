@@ -23,6 +23,11 @@ models:
     max_tokens: 8192
     code_in_reasoning: true
 
+  - match: "glm-4.5"
+    parser: "glm45"
+    max_tokens: 16384
+    code_in_reasoning: true
+    vllm_args: "--trust-remote-code"
   - match: "glm-4"
     parser: "glm45"
     max_tokens: 8192
@@ -37,5 +42,21 @@ models:
     max_tokens: 8192
     code_in_reasoning: true
 
+  - match: "qwen3-coder"
+    toggle: true
+    max_tokens: 16384
+    vllm_args: "--quantization awq_marlin"
   - match: "qwen3"
     toggle: true
+
+  # Modelos grandes con razonamiento: requieren contexto amplio y tokens
+  # suficientes para el codigo despues del pensamiento.
+  - match: "deepseek-r1"
+    parser: "deepseek_r1"
+    max_tokens: 16384
+    code_in_reasoning: true
+
+  - match: "qwq"
+    parser: "qwen3"
+    max_tokens: 16384
+    code_in_reasoning: true
