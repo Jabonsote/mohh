@@ -10,6 +10,8 @@ import json
 import os
 import re
 import sys
+if os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src") not in sys.path:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 import threading
 import time
 
